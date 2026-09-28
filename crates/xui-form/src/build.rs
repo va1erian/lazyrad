@@ -25,7 +25,7 @@ use xui_core::units::Dip;
 
 use crate::doc::{FormDoc, Node};
 use crate::schema::{Access, Catalog, EventSpec, WidgetSpec};
-use crate::value::Value;
+use crate::value::{Value, ValueType};
 
 /// How a property write failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -302,6 +302,7 @@ pub(crate) trait WidgetProps<M: 'static>: 'static {
 #[derive(Clone, Debug)]
 struct NodeMeta {
     name: String,
+    kind: String,
     parent: Option<String>,
     id: WidgetId,
     design: (i64, i64, i64, i64),
@@ -312,7 +313,6 @@ struct NodeMeta {
 /// A built form: every live widget plus the metadata needed to relayout it.
 pub struct LiveForm<M: 'static> {
     ui: Ui<M>,
-    #[allow(dead_code)]
     catalog: Rc<Catalog>,
     widgets: Vec<Box<dyn LiveWidget<M>>>,
     by_name: BTreeMap<String, usize>,
@@ -355,6 +355,29 @@ impl<M: 'static> LiveForm<M> {
     /// The node names, in creation order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.nodes.iter().map(|node| node.name.as_str())
+    }
+
+    /// The canonical widget kind of the node named `name`, if any.
+    ///
+    /// An alias resolves to the canonical kind, so a `CommandButton` node
+    /// reports `Button`.
+    pub fn kind(&self, name: &str) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find(|node| node.name == name)
+            .map(|node| node.kind.as_str())
+    }
+
+    /// The schema type of `property` on the node named `name`, if the catalog
+    /// declares that property for the node's kind.
+    ///
+    /// This is the schema lookup a runtime needs to decode a script value into
+    /// the right [`Value`] variant (for example an `enum` property).
+    pub fn property_type(&self, name: &str, property: &str) -> Option<ValueType> {
+        let node = self.nodes.iter().find(|node| node.name == name)?;
+        self.catalog
+            .property(&node.kind, property)
+            .map(|spec| spec.ty)
     }
 
     /// Re-anchors every node from the design size to `new_client_size`.
@@ -515,6 +538,7 @@ pub fn build_with<M: 'static>(
         by_name.insert(node.name.clone(), index);
         nodes.push(NodeMeta {
             name: node.name.clone(),
+            kind: spec.kind.clone(),
             parent: node.parent.clone(),
             id,
             design,

@@ -108,6 +108,11 @@ looks it up among the active form's controls, then the form itself (`Me`), then
 globals such as `App`, `Screen` and `Clipboard`. Controls are registered custom types
 that wrap an `Rc` handle, so a property setter changes the live widget:
 
+The resolver **pushes the value into the scope** rather than returning it from the
+callback: Rhai marks a value returned by `on_var` read-only, so a setter such as
+`lbl.caption = …` would fail with a "cannot modify property of constant" error,
+while a pushed variable is an ordinary mutable entry.
+
 ```rhai
 fn cmdHello_Click() {
     lblOut.caption = `Hello, ${txtName.text}!`;

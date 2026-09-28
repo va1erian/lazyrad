@@ -1180,6 +1180,7 @@ dependencies = [
  "rhai",
  "xui-canvas",
  "xui-core",
+ "xui-form",
 ]
 
 [[package]]
