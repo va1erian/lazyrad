@@ -135,6 +135,24 @@ impl Project {
                 ),
             )));
         }
+        // A plain name can still be a symlink pointing elsewhere; following it
+        // would read (and later write) outside the project folder.
+        for item in &project.items {
+            for relative in std::iter::once(item.code()).chain(item.layout()) {
+                let linked = fs::symlink_metadata(dir.join(relative))
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+                if linked {
+                    return Err(Error::Diagnostic(Diagnostic::new(
+                        DiagnosticKind::ProjectFile,
+                        path.clone(),
+                        format!(
+                            "item file `{}` is a symbolic link; project files must be regular files in the project folder",
+                            relative.display()
+                        ),
+                    )));
+                }
+            }
+        }
         Ok(project)
     }
 

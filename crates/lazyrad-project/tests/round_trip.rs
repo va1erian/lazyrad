@@ -322,3 +322,34 @@ fn a_plain_file_name_is_a_single_normal_component() {
     assert!(!is_plain_file_name(Path::new("")));
     assert!(!is_plain_file_name(Path::new(".")));
 }
+
+/// Symlinks need no privilege on Unix; on Windows creating one usually does, so
+/// the check is exercised on Linux CI.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_item_file_is_rejected() {
+    let temp = TempDir::new("symlink-item");
+    let outside = TempDir::new("symlink-target");
+    fs::write(outside.path().join("secret.rhai"), "// outside").expect("target");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.rhai"),
+        temp.path().join("util.rhai"),
+    )
+    .expect("symlink");
+    fs::write(
+        temp.path().join("app.lrp"),
+        "name = \"app\"\nversion = \"0.1.0\"\nstartup = \"util\"\n\n[[items]]\nkind = \"module\"\nname = \"util\"\ncode = \"util.rhai\"\n",
+    )
+    .expect("project file");
+
+    let error = Project::load(temp.path()).expect_err("a symlinked item is rejected");
+    let lazyrad_project::Error::Diagnostic(diagnostic) = error else {
+        panic!("expected a diagnostic, got {error:?}");
+    };
+    assert_eq!(diagnostic.kind, DiagnosticKind::ProjectFile);
+    assert!(
+        diagnostic.message.contains("symbolic link"),
+        "{}",
+        diagnostic.message
+    );
+}
