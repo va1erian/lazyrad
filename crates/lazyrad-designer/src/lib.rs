@@ -5,8 +5,8 @@
 //!
 //! It renders the form's real xui widgets in design mode and lays a transparent
 //! `Custom` overlay on top for the dot grid, selection handles and mouse
-//! editing. The model lives in [`lazyrad_project`] and the toolbox and property
-//! grid sit alongside the surface. See PLAN.md §6.
+//! editing. The model lives in [`lazyrad_project`] and the property grid sits
+//! alongside the surface. See PLAN.md §6.
 //!
 //! # Layout
 //!
@@ -17,6 +17,12 @@
 //! * [`Designer`] is the xui widget: a [`Panel`](xui_core::widget::Panel)
 //!   holding the live widgets and a transparent overlay node that receives input
 //!   and paints.
+//! * [`Toolbox`] is a [`Custom`](xui_core::backend::NodeKind) icon grid of the
+//!   control kinds. It maps a click to [`ToolboxMsg::Select`] and a
+//!   double-click to [`ToolboxMsg::Activate`]; the host forwards those to
+//!   [`Designer::handle_toolbox`], which arms the click-then-drag tool or drops
+//!   a control in the centre of the form. Every creation is one undoable
+//!   [`Surface`] command.
 //!
 //! # Wiring a designer into a host
 //!
@@ -71,12 +77,14 @@
 pub mod geometry;
 pub mod history;
 pub mod surface;
+pub mod toolbox;
 pub mod widget;
 
 pub use geometry::{DesignRect, Handle, handle_at, resize, resize_form, snap};
 pub use history::History;
 pub use surface::{
     Change, CursorHint, DEFAULT_GRID, HANDLE_TOLERANCE, KeyInput, KeyPress, Outcome, Selection,
-    Surface,
+    Surface, control_base_name,
 };
+pub use toolbox::{CONTROL_KINDS, Tool, Toolbox, ToolboxMsg, tools};
 pub use widget::{Designer, DesignerError, DesignerMsg};
