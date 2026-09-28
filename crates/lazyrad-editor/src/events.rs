@@ -47,7 +47,24 @@ fn viewport<M: 'static>(ui: &Ui<M>, id: WidgetId, state: &EditorState) -> Viewpo
 }
 
 /// Handles one event, returning `None` when it is not the editor's.
+///
+/// After an event that changed the text, the highlight cache is brought up to
+/// date from the earliest line the edit touched.
 pub(crate) fn handle<M: 'static>(
+    state: &mut EditorState,
+    ui: &Ui<M>,
+    id: WidgetId,
+    event: &Event,
+) -> Option<Outcome> {
+    let outcome = dispatch(state, ui, id, event)?;
+    if outcome.changed {
+        state.sync_highlight();
+    }
+    Some(outcome)
+}
+
+/// Dispatches one event to the editor's input rules.
+fn dispatch<M: 'static>(
     state: &mut EditorState,
     ui: &Ui<M>,
     id: WidgetId,
@@ -598,6 +615,26 @@ mod tests {
             let outcome = handle(&mut state, ui, id, &Event::Char('x')).expect("char is handled");
             assert!(outcome.changed);
             assert_eq!(state.buffer.text(), "x");
+        });
+    }
+
+    #[test]
+    fn typing_keeps_the_highlight_in_sync() {
+        use crate::lexer::TokenClass;
+
+        with_ui(|ui, id| {
+            let mut state = state("let x = 1;");
+            handle(&mut state, ui, id, &Event::SetFocus);
+            handle(&mut state, ui, id, &Event::Char('/')).expect("first slash");
+            handle(&mut state, ui, id, &Event::Char('/')).expect("second slash");
+            assert_eq!(state.buffer.text(), "//let x = 1;");
+            let classes: Vec<TokenClass> = state
+                .highlight
+                .tokens(0)
+                .iter()
+                .map(|token| token.class)
+                .collect();
+            assert_eq!(classes, [TokenClass::Comment]);
         });
     }
 }
