@@ -420,3 +420,47 @@ fn set_doc_rolls_back_when_a_valid_form_fails_to_build() {
     );
     assert!(can_undo, "the undo history survives");
 }
+
+#[test]
+fn a_failed_construction_restores_the_windows_design_mode() {
+    let mut catalog = lazyrad_project::lazyrad_catalog();
+    let mut fancy = catalog.get("Button").expect("Button spec").clone();
+    fancy.kind = "FancyButton".to_owned();
+    catalog.register(fancy);
+    let catalog = Rc::new(catalog);
+
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let results: Rc<Cell<Option<(bool, bool)>>> = Rc::new(Cell::new(None));
+    let results_for_check = Rc::clone(&results);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(backend, spec, move |ui| {
+        let mut unbuildable = FormDoc::new("fancy_form");
+        unbuildable.insert(Node::new("FancyButton", "fancy1"));
+        let failed = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            unbuildable,
+            Rc::clone(&catalog),
+            Msg::Designer,
+        )
+        .is_err();
+        results_for_check.set(Some((failed, ui.is_design_mode())));
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            button_doc(),
+            catalog,
+            Msg::Designer,
+        )
+        .expect("a valid form builds");
+        Editor {
+            designer: Rc::new(RefCell::new(designer)),
+        }
+    })
+    .expect("run_app succeeds");
+
+    let (failed, design_mode) = results.get().expect("the check ran");
+    assert!(failed, "the unbuildable form is reported");
+    assert!(!design_mode, "the window left design mode again");
+}
