@@ -447,16 +447,19 @@ impl<M: 'static> Designer<M> {
             &self.binder,
             BuildOptions { design_mode: true },
         )?;
+        // Create the new overlay before touching the current preview, so a
+        // failure leaves the old preview and overlay in place.
+        let overlay = self.create_overlay(ui)?;
         *self.live.borrow_mut() = Some(form);
         self.resize_panel(ui);
-        *self.overlay.borrow_mut() = None;
-        self.install_overlay(ui)?;
+        self.overlay_id.set(overlay.id());
+        *self.overlay.borrow_mut() = Some(overlay);
         Ok(())
     }
 
     /// Creates the transparent overlay above the live widgets and wires its
-    /// painter and event mapper.
-    fn install_overlay(&self, ui: &Ui<M>) -> Result<(), BackendError> {
+    /// painter and event mapper; the caller installs it.
+    fn create_overlay(&self, ui: &Ui<M>) -> Result<Control<M>, BackendError> {
         let (width, height) = self.form_px(ui);
         let origin = self.panel_origin;
         let bounds = Rect::new(origin.x, origin.y, origin.x + width, origin.y + height);
@@ -472,10 +475,7 @@ impl<M: 'static> Designer<M> {
         let ui_for_events = ui.clone();
         overlay
             .on_events(move |event| designer_message(event, &ui_for_events).map(|msg| wrap(msg)));
-
-        self.overlay_id.set(overlay.id());
-        *self.overlay.borrow_mut() = Some(overlay);
-        Ok(())
+        Ok(overlay)
     }
 
     /// Pushes the document's geometry into the live widgets and resizes the
