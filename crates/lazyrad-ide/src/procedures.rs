@@ -13,6 +13,7 @@
 //! Everything here is pure data and text, so it is unit-tested without a
 //! `Ui`. The IDE supplies the source text and applies the returned snippet.
 
+use lazyrad_editor::{Buffer, LineLexer, TokenClass};
 use lazyrad_project::{Catalog, FormDoc};
 use xui_form::EventSpec;
 
@@ -107,14 +108,82 @@ pub fn handler_snippet(signature: &str, args: &str) -> String {
 }
 
 /// The char offset just inside the body of the handler `signature` in `text`,
-/// if a `fn <signature>(` definition is present.
+/// if a `fn <signature>(...) {` definition is present in the code.
 ///
-/// The caret lands just after the opening brace, ready for typing.
+/// Comments and strings are skipped (a `fn` in either is not a definition),
+/// the parameter list must be balanced, and only the brace that directly
+/// follows it counts. The caret lands just after that brace, ready for typing.
 pub fn find_handler(text: &str, signature: &str) -> Option<usize> {
-    let needle = format!("fn {signature}(");
-    let start = text.find(&needle)?;
-    let brace = text[start..].find('{')? + start;
-    Some(text[..brace].chars().count() + 1)
+    let code = code_chars(text);
+    let needle: Vec<char> = format!("fn {signature}(").chars().collect();
+    let mut from = 0;
+    while let Some(found) = code
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle.as_slice())
+    {
+        let start = from + found;
+        from = start + 1;
+        // `xfn name(` or `my_fn name(` is not a definition.
+        if start > 0 && is_identifier_char(code[start - 1]) {
+            continue;
+        }
+        if let Some(brace) = body_brace(&code, start + needle.len()) {
+            return Some(brace + 1);
+        }
+    }
+    None
+}
+
+/// `text`'s chars with every comment and string blanked to spaces, so a search
+/// only sees code. Offsets are unchanged.
+fn code_chars(text: &str) -> Vec<char> {
+    let buffer = Buffer::new(text);
+    let lexer = LineLexer::new(&buffer);
+    let mut code: Vec<char> = text.chars().collect();
+    for line in 0..buffer.line_count() {
+        let base = buffer.line_start(line);
+        for token in lexer.tokens(line) {
+            if matches!(
+                token.class,
+                TokenClass::Comment
+                    | TokenClass::DocComment
+                    | TokenClass::String
+                    | TokenClass::Interpolation
+            ) {
+                for index in base + token.start..(base + token.end).min(code.len()) {
+                    code[index] = ' ';
+                }
+            }
+        }
+    }
+    code
+}
+
+/// The offset of the `{` opening a body, given the offset just past a
+/// parameter list's `(`: the list must close, and only whitespace may sit
+/// between its `)` and the brace.
+fn body_brace(code: &[char], after_open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = after_open;
+    while depth > 0 {
+        match code.get(index)? {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '{' | '}' | ';' => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+    while code.get(index)?.is_whitespace() {
+        index += 1;
+    }
+    (code[index] == '{').then_some(index)
+}
+
+/// Whether `c` can be part of a Rhai identifier.
+fn is_identifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -185,5 +254,28 @@ mod tests {
         let text = "fn form_resize(width, height) {\n}\n";
         let offset = find_handler(text, "form_resize").expect("found");
         assert_eq!(offset, text.find('{').expect("there is a brace") + 1);
+    }
+
+    #[test]
+    fn find_handler_ignores_comments_and_strings() {
+        let text = "// fn go_button_click() {\nlet s = \"fn go_button_click() {\";\n";
+        assert!(find_handler(text, "go_button_click").is_none());
+
+        let text = "/* fn go_button_click() { */\nfn go_button_click() {\n}\n";
+        let offset = find_handler(text, "go_button_click").expect("the real one");
+        assert_eq!(offset, text.rfind('{').expect("a brace") + 1);
+    }
+
+    #[test]
+    fn find_handler_needs_a_body_right_after_the_parameters() {
+        // An unclosed parameter list is not a definition, so the later brace
+        // (which belongs to `if`) is not taken.
+        let text = "fn go_button_click(a;\nif x { }\n";
+        assert!(find_handler(text, "go_button_click").is_none());
+        let text = "fn go_button_click((a), b)\n{\n}\n";
+        assert_eq!(
+            find_handler(text, "go_button_click"),
+            Some(text.find('{').expect("a brace") + 1)
+        );
     }
 }

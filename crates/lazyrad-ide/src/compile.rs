@@ -16,6 +16,7 @@
 //! [`Engine`]: rhai::Engine
 //! [`Engine::compile`]: rhai::Engine::compile
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use lazyrad_runtime::engine::new_engine;
@@ -69,15 +70,22 @@ pub struct Job {
     pub revision: u64,
 }
 
-/// The UI-thread half of the debounce: the latest source and when it is due.
+/// The UI-thread half of the debounce: each document's latest source and when
+/// it is due.
 ///
+/// Jobs and revisions are kept per document, so scheduling one document never
+/// drops another's pending compile or makes its in-flight result look stale.
 /// It is shared (`Rc<RefCell<..>>`) with the window's timer mapper, which calls
 /// [`CompileScheduler::take_due`] on every tick.
 #[derive(Debug, Default)]
 pub struct CompileScheduler {
-    revision: u64,
-    due: Option<Instant>,
-    job: Option<Job>,
+    /// A counter shared by every document, so a revision is never reused, even
+    /// across a [`CompileScheduler::reset`].
+    next_revision: u64,
+    /// Each document's newest scheduled revision.
+    latest: BTreeMap<String, u64>,
+    /// Each document's pending job and the time it comes due.
+    pending: BTreeMap<String, (Instant, Job)>,
 }
 
 impl CompileScheduler {
@@ -87,37 +95,62 @@ impl CompileScheduler {
     }
 
     /// Records `source` for `name`, debouncing to [`COMPILE_DEBOUNCE`] from
-    /// `now`. A later call replaces the pending job, so only the newest source
-    /// is ever compiled.
+    /// `now`. A later call for the same document replaces its pending job, so
+    /// only a document's newest source is compiled; other documents are
+    /// unaffected.
     pub fn schedule(&mut self, name: &str, source: &str, now: Instant) {
-        self.revision += 1;
-        self.job = Some(Job {
-            name: name.to_owned(),
-            source: source.to_owned(),
-            revision: self.revision,
-        });
-        self.due = Some(now + COMPILE_DEBOUNCE);
+        self.next_revision += 1;
+        let revision = self.next_revision;
+        self.latest.insert(name.to_owned(), revision);
+        self.pending.insert(
+            name.to_owned(),
+            (
+                now + COMPILE_DEBOUNCE,
+                Job {
+                    name: name.to_owned(),
+                    source: source.to_owned(),
+                    revision,
+                },
+            ),
+        );
     }
 
-    /// Takes the pending job when `now` has reached its due time, clearing it.
-    /// Returns `None` while the debounce is still running or when idle.
-    pub fn take_due(&mut self, now: Instant) -> Option<Job> {
-        if self.due.is_some_and(|due| now >= due) {
-            self.due = None;
-            return self.job.take();
-        }
-        None
+    /// Takes every job whose due time `now` has reached, clearing them.
+    /// Returns an empty list while every debounce is still running or when
+    /// idle.
+    pub fn take_due(&mut self, now: Instant) -> Vec<Job> {
+        let due: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, (at, _))| now >= *at)
+            .map(|(name, _)| name.clone())
+            .collect();
+        due.into_iter()
+            .filter_map(|name| self.pending.remove(&name).map(|(_, job)| job))
+            .collect()
     }
 
-    /// The newest scheduled revision. A result stamped older than this is
-    /// stale and should be ignored.
-    pub fn revision(&self) -> u64 {
-        self.revision
+    /// `name`'s newest scheduled revision, if it was ever scheduled.
+    pub fn revision(&self, name: &str) -> Option<u64> {
+        self.latest.get(name).copied()
     }
 
-    /// Whether a job is waiting for its debounce to elapse.
+    /// Whether a result for `name` stamped `revision` is still the newest; an
+    /// older one is stale and should be ignored.
+    pub fn is_current(&self, name: &str, revision: u64) -> bool {
+        self.revision(name) == Some(revision)
+    }
+
+    /// Whether any job is waiting for its debounce to elapse.
     pub fn is_pending(&self) -> bool {
-        self.job.is_some()
+        !self.pending.is_empty()
+    }
+
+    /// Forgets every pending job and revision, so a compile still running for
+    /// the previous project is stale when its result arrives.
+    pub fn reset(&mut self) {
+        self.latest.clear();
+        self.pending.clear();
     }
 }
 
@@ -168,38 +201,64 @@ mod tests {
     fn the_scheduler_debounces_until_the_due_time() {
         let start = Instant::now();
         let mut scheduler = CompileScheduler::new();
-        scheduler.schedule("Form1", "let x = 1;", start);
+        scheduler.schedule("main_form", "let x = 1;", start);
 
         assert!(
             scheduler
                 .take_due(start + Duration::from_millis(100))
-                .is_none(),
+                .is_empty(),
             "still inside the debounce"
         );
         assert!(scheduler.is_pending());
 
-        let job = scheduler
-            .take_due(start + COMPILE_DEBOUNCE)
-            .expect("the job is due");
-        assert_eq!(job.name, "Form1");
-        assert_eq!(job.source, "let x = 1;");
+        let jobs = scheduler.take_due(start + COMPILE_DEBOUNCE);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "main_form");
+        assert_eq!(jobs[0].source, "let x = 1;");
         assert!(!scheduler.is_pending());
-        assert!(scheduler.take_due(start + COMPILE_DEBOUNCE * 2).is_none());
+        assert!(scheduler.take_due(start + COMPILE_DEBOUNCE * 2).is_empty());
     }
 
     #[test]
-    fn a_newer_schedule_replaces_the_pending_job_and_bumps_the_revision() {
+    fn a_newer_schedule_replaces_the_documents_pending_job() {
         let start = Instant::now();
         let mut scheduler = CompileScheduler::new();
-        scheduler.schedule("Form1", "one", start);
-        let first = scheduler.revision();
-        scheduler.schedule("Form1", "two", start + Duration::from_millis(10));
-        assert!(scheduler.revision() > first);
+        scheduler.schedule("main_form", "one", start);
+        let first = scheduler.revision("main_form").expect("scheduled");
+        scheduler.schedule("main_form", "two", start + Duration::from_millis(10));
+        assert!(!scheduler.is_current("main_form", first));
 
-        let job = scheduler
-            .take_due(start + COMPILE_DEBOUNCE + Duration::from_millis(10))
-            .expect("due");
-        assert_eq!(job.source, "two", "only the newest source compiles");
-        assert_eq!(job.revision, scheduler.revision());
+        let jobs = scheduler.take_due(start + COMPILE_DEBOUNCE + Duration::from_millis(10));
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].source, "two", "only the newest source compiles");
+        assert!(scheduler.is_current("main_form", jobs[0].revision));
+    }
+
+    #[test]
+    fn documents_are_scheduled_and_judged_independently() {
+        let start = Instant::now();
+        let mut scheduler = CompileScheduler::new();
+        scheduler.schedule("main_form", "a", start);
+        scheduler.schedule("util", "b", start + Duration::from_millis(5));
+
+        let jobs = scheduler.take_due(start + COMPILE_DEBOUNCE + Duration::from_millis(5));
+        let names: Vec<&str> = jobs.iter().map(|job| job.name.as_str()).collect();
+        assert_eq!(names, ["main_form", "util"], "neither job is lost");
+        for job in &jobs {
+            assert!(scheduler.is_current(&job.name, job.revision));
+        }
+    }
+
+    #[test]
+    fn a_reset_makes_in_flight_results_stale() {
+        let start = Instant::now();
+        let mut scheduler = CompileScheduler::new();
+        scheduler.schedule("main_form", "a", start);
+        let jobs = scheduler.take_due(start + COMPILE_DEBOUNCE);
+        scheduler.reset();
+        assert!(!scheduler.is_current("main_form", jobs[0].revision));
+
+        scheduler.schedule("main_form", "b", start);
+        assert!(!scheduler.is_current("main_form", jobs[0].revision));
     }
 }

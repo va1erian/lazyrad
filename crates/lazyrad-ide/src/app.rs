@@ -488,7 +488,8 @@ impl IdeApp {
                 // A change armed the debounce; when it comes due, hand the
                 // newest source to a worker. The engine is built there, since
                 // it is not `Send`.
-                if let Some(job) = diagnostics.borrow_mut().take_due(Instant::now()) {
+                let due = diagnostics.borrow_mut().take_due(Instant::now());
+                for job in due {
                     let proxy = proxy.clone();
                     std::thread::spawn(move || {
                         let errors = compile::compile_source(&job.source);
@@ -1299,7 +1300,10 @@ impl IdeApp {
             replacement,
         ) {
             Ok(Some(text)) => {
-                editor.set_text(&text);
+                // One replace over the whole text is a single undoable edit;
+                // `set_text` would start a new buffer and lose the history.
+                let len = editor.text().chars().count();
+                editor.replace(0, len, &text);
                 self.after_programmatic_edit(&name, ui);
                 self.log(ui, "Replaced all matches.");
             }
@@ -1394,7 +1398,7 @@ impl IdeApp {
         errors: Vec<CodeDiagnostic>,
         ui: &mut Ui<Msg>,
     ) {
-        if self.diagnostics.borrow().revision() != revision {
+        if !self.diagnostics.borrow().is_current(name, revision) {
             return;
         }
         self.errors.retain(|entry| entry.name != name);
@@ -1900,6 +1904,9 @@ impl IdeApp {
 
     /// Closes every document and rebuilds the tabs with just the Start Page.
     fn reset_documents(&mut self) -> UiResult<()> {
+        // A compile still running for the old project must not land in the new
+        // one's Error List.
+        self.diagnostics.borrow_mut().reset();
         self.editors.borrow_mut().clear();
         self.documents.clear();
         self.errors.clear();
@@ -2336,7 +2343,11 @@ mod tests {
                 .expect("the code document opens");
 
             // A finished compile fills the Error List and the editor markers.
-            let revision = app.diagnostics.borrow().revision();
+            let revision = app
+                .diagnostics
+                .borrow()
+                .revision(crate::project::DEFAULT_FORM)
+                .expect("opening the document scheduled a compile");
             app.apply_compile(
                 crate::project::DEFAULT_FORM,
                 revision,
@@ -2360,7 +2371,11 @@ mod tests {
             app.layout_frame(ui);
 
             // A clean compile clears both the list and the errors.
-            let revision = app.diagnostics.borrow().revision();
+            let revision = app
+                .diagnostics
+                .borrow()
+                .revision(crate::project::DEFAULT_FORM)
+                .expect("opening the document scheduled a compile");
             app.apply_compile(crate::project::DEFAULT_FORM, revision, Vec::new(), ui);
             assert!(app.errors.is_empty());
             assert_eq!(app.error_list.len(), 0);
