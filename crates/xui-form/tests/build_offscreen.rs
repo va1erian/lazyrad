@@ -427,14 +427,38 @@ fn float_properties_accept_integers_at_runtime() {
 #[test]
 fn a_list_view_without_selected_has_no_selection() {
     let mut doc = FormDoc::new("main_form");
-    let mut list = Node::new("ListView", "lstItems");
+    let mut list = Node::new("ListView", "items_list");
     list.set_prop("items", Value::List(vec!["a".to_owned(), "b".to_owned()]));
     doc.insert(list);
     let catalog = Catalog::xui();
     let selected = with_form(&doc, &catalog, BuildOptions::default(), |form| {
-        form.get("lstItems", "selected")
+        form.get("items_list", "selected")
     });
     assert_eq!(selected, Some(Value::Int(-1)));
+}
+
+#[test]
+fn a_list_view_accepts_items_at_runtime() {
+    let mut doc = FormDoc::new("main_form");
+    let mut list = Node::new("ListView", "items_list");
+    list.set_prop("items", Value::List(vec!["a".to_owned()]));
+    doc.insert(list);
+    let catalog = Catalog::xui();
+    let (before, after) = with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        let before = form.get("items_list", "items");
+        form.set(
+            "items_list",
+            "items",
+            &Value::List(vec!["a".to_owned(), "b".to_owned()]),
+        )
+        .expect("items is writable at runtime");
+        (before, form.get("items_list", "items"))
+    });
+    assert_eq!(before, Some(Value::List(vec!["a".to_owned()])));
+    assert_eq!(
+        after,
+        Some(Value::List(vec!["a".to_owned(), "b".to_owned()]))
+    );
 }
 
 /// A form with a three-option radio group pinned to the bottom-right corner.

@@ -9,7 +9,7 @@
 //! construction, so a node's `left`/`top`/`width`/`height` are in place as soon
 //! as the form is built.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use xui_core::app::Ui;
 use xui_core::backend::Result as BackendResult;
@@ -777,13 +777,17 @@ impl<M: 'static> WidgetFactory<M> for ListViewFactory {
         if let Some(handler) = cx.handler("Activate") {
             list = list.on_activate(move |index| handler(&[Value::Int(index as i64)]));
         }
-        Ok(cx.live(ListViewProps { list, items, multi }))
+        Ok(cx.live(ListViewProps {
+            list,
+            items: RefCell::new(items),
+            multi,
+        }))
     }
 }
 
 struct ListViewProps<M: 'static> {
     list: xui_core::ListView<M>,
-    items: Vec<String>,
+    items: RefCell<Vec<String>>,
     multi: bool,
 }
 
@@ -794,7 +798,7 @@ impl<M: 'static> WidgetProps<M> for ListViewProps<M> {
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "items" => Some(Value::List(self.items.clone())),
+            "items" => Some(Value::List(self.items.borrow().clone())),
             "selected" => Some(Value::Int(
                 self.list.selected().map_or(-1, |index| index as i64),
             )),
@@ -810,7 +814,14 @@ impl<M: 'static> WidgetProps<M> for ListViewProps<M> {
                 Ok(())
             }
             ("selected", _) => Err(SetError::TypeMismatch),
-            ("items" | "multi_select", _) => Err(SetError::ReadOnly),
+            ("items", Value::List(items)) => {
+                let rows: Vec<&str> = items.iter().map(String::as_str).collect();
+                self.list.set_items(&rows);
+                *self.items.borrow_mut() = items.clone();
+                Ok(())
+            }
+            ("items", _) => Err(SetError::TypeMismatch),
+            ("multi_select", _) => Err(SetError::ReadOnly),
             _ => Err(SetError::UnknownProperty),
         }
     }
