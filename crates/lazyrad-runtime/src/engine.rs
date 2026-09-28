@@ -196,6 +196,25 @@ impl EngineHost {
             .map_err(|error| ScriptError::from_parse(&self.file, &error))
     }
 
+    /// Runs `ast`'s top-level statements once and returns the AST its handlers
+    /// are called on.
+    ///
+    /// Rhai's `call_fn` evaluates an AST's statements before every call, so
+    /// calling handlers on the full script would re-run its top-level code on
+    /// every event. The returned AST keeps the functions and only the `import`
+    /// statements, so `import "util" as util` aliases still resolve in handlers.
+    pub fn prepare(&self, ast: &AST) -> Result<AST, ScriptError> {
+        self.engine
+            .run_ast_with_scope(&mut Scope::new(), ast)
+            .map_err(|error| ScriptError::from_eval(&self.file, &error))?;
+        let imports = ast
+            .statements()
+            .iter()
+            .filter(|statement| matches!(statement, rhai::Stmt::Import(..)))
+            .cloned();
+        Ok(AST::new(imports, ast.shared_lib().clone()))
+    }
+
     /// Calls a script function defined in `ast` with no arguments, locating any
     /// runtime error.
     ///
