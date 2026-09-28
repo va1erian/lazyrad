@@ -113,6 +113,18 @@ const WHEEL_NOTCH: i32 = 120;
 fn wheel_scroll(delta: i16, row_h: i32) -> i32 {
     -(i32::from(delta) * WHEEL_ROWS * row_h / WHEEL_NOTCH)
 }
+
+/// The number of whole list entries a wheel `delta` scrolls: [`WHEEL_ROWS`]
+/// per notch, and at least one for any non-zero (touchpad) delta, since a
+/// list cannot scroll part of an entry.
+fn wheel_entries(delta: i16) -> i32 {
+    let entries = -(i32::from(delta) * WHEEL_ROWS / WHEEL_NOTCH);
+    if entries == 0 {
+        -i32::from(delta.signum())
+    } else {
+        entries
+    }
+}
 /// The height of a category header, in design units.
 const HEADER_HEIGHT: Dip = Dip(22.0);
 /// The text size for labels and values, in design units.
@@ -1684,11 +1696,10 @@ fn grid_message<M: 'static>(
                     .then(|| layout.dropdown(state.objects.len(), state.dropdown_first))
             };
             if let Some(dropdown) = dropdown {
-                return dropdown.rect.contains(Point::new(*x, *y)).then(|| {
-                    wrap(PropertyGridMsg::ScrollObjects(
-                        -i32::from(*delta) * WHEEL_ROWS,
-                    ))
-                });
+                return dropdown
+                    .rect
+                    .contains(Point::new(*x, *y))
+                    .then(|| wrap(PropertyGridMsg::ScrollObjects(wheel_entries(*delta))));
             }
             Some(wrap(PropertyGridMsg::Scroll(wheel_scroll(
                 *delta,
@@ -2028,6 +2039,16 @@ mod wheel_tests {
         );
         assert_eq!(wheel_scroll(120, 22), -66);
         assert_eq!(wheel_scroll(-240, 22), 132, "two notches");
+    }
+
+    #[test]
+    fn a_notch_scrolls_three_list_entries_and_a_nudge_scrolls_one() {
+        use super::wheel_entries;
+        assert_eq!(wheel_entries(-120), 3);
+        assert_eq!(wheel_entries(120), -3);
+        assert_eq!(wheel_entries(-10), 1, "a small touchpad delta still moves");
+        assert_eq!(wheel_entries(10), -1);
+        assert_eq!(wheel_entries(0), 0);
     }
 
     #[test]
