@@ -232,6 +232,85 @@ fn a_standard_module_can_be_imported_by_name() {
 }
 
 #[test]
+fn a_message_box_does_not_block_the_handler() {
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "main_form",
+            doc,
+            "fn form_load() { msg_box(\"Hello\"); result_label.text = \"after\"; }",
+        )],
+        Vec::new(),
+    );
+
+    let form = capture_form(runtime, "main_form");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("after".to_owned())),
+        "the handler continues past a non-blocking msg_box"
+    );
+}
+
+#[test]
+fn a_form_script_can_use_the_standard_library() {
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "main_form",
+            doc,
+            "fn form_load() { result_label.text = [(144.0).sqrt().to_int(), today().len()].join(\"/\"); }",
+        )],
+        Vec::new(),
+    );
+
+    let form = capture_form(runtime, "main_form");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("12/10".to_owned()))
+    );
+}
+
+#[test]
+fn a_standard_module_function_is_callable_from_a_form() {
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "main_form",
+            doc,
+            "fn form_load() { result_label.text = greeting(\"Ada\"); }",
+        )],
+        vec![ModuleSource::new(
+            "util",
+            "fn greeting(name) { `Hello, ${name}!` }",
+        )],
+    );
+
+    let form = capture_form(runtime, "main_form");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("Hello, Ada!".to_owned()))
+    );
+}
+
+#[test]
 fn a_top_level_import_alias_resolves_in_handlers() {
     let mut doc = FormDoc::new("main_form");
     let mut label = Node::new("Label", "result_label");
@@ -303,33 +382,5 @@ fn top_level_code_runs_once_and_extra_handler_parameters_are_unit() {
     assert_eq!(
         form.get("result_label", "text"),
         Some(Value::Text("xcc".to_owned()))
-    );
-}
-
-#[test]
-fn a_standard_module_function_is_callable_from_a_form() {
-    let mut doc = FormDoc::new("main_form");
-    let mut label = Node::new("Label", "result_label");
-    label.set_prop("left", Value::Int(10));
-    label.set_prop("top", Value::Int(10));
-    label.set_prop("width", Value::Int(160));
-    doc.insert(label);
-
-    let runtime = FormRuntime::from_sources(
-        vec![FormSource::new(
-            "main_form",
-            doc,
-            "fn form_load() { result_label.text = greeting(\"Ada\"); }",
-        )],
-        vec![ModuleSource::new(
-            "util",
-            "fn greeting(name) { `Hello, ${name}!` }",
-        )],
-    );
-
-    let form = capture_form(runtime, "main_form");
-    assert_eq!(
-        form.get("result_label", "text"),
-        Some(Value::Text("Hello, Ada!".to_owned()))
     );
 }
