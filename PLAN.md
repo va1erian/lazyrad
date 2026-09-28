@@ -350,7 +350,7 @@ contributed to xui.
 | G8 | **No docking or floating tool-window framework.** `layout::Dock` is arithmetic only, and there is no MDI | VB-style dockable panes | v1 uses a fixed layout with `Split`/`Tabs` and toggleable panes. Later, build a dock manager (possibly upstream) on `open_window` |
 | G9 | **`Toolbar` has text labels only**, with no icons, toggle groups or tooltips per item. `TopBar` has vector `Glyph`s but a fixed glyph set | The toolbox and main toolbar need icons | Upstream: `Toolbar` items with `RowIcon` (glyph or `Image`). Workaround: a toolbox grid as a `Custom` node, or `GridView` with icons |
 | G10 | **No portable accelerator or shortcut table.** `Event::Accelerator(u16)` exists, but core has no API to register key bindings | Ctrl+S, F5, F8, F9 and similar | Workaround: handle `KeyDown` at window level in LazyRAD's command dispatcher. Upstream: `Ui::set_accelerators(&[(KeyChord, Msg)])` |
-| G11 | **Menu item shortcut text and dynamic menus are unverified.** It is unclear whether menus can display "Ctrl+S" and be rebuilt at runtime (for recent files, and for user programs' menus built from the form's menu tree) | IDE menus and the runtime `Menu` control | Spike in M0. Upstream if it's missing |
+| G11 | **Menu shortcut text and runtime rebuilds are missing (spike result, xui#185).** `MenuScope::item` takes only an id and label and `Node` has no accelerator field, so an item cannot display `Ctrl+S`. `Menu::build` consumes the menu and fills a private model with no public rebuild call, so menus cannot change at runtime (the Recent list, or a user program's menu tree); `set_enabled`/`set_checked` are the only mutations | IDE menus and the runtime `Menu` control | Workaround: build the menu once, keep the accelerator table in the command dispatcher, and replace the whole `Menu` when the recent list changes. Upstream (xui#185): an optional shortcut on each entry that the popup painter right-aligns, plus `Menu::rebuild` |
 | G12 | **No drag and drop of OS files** | Dropping a `.lrp` file onto the IDE. Nice to have | Upstream later, via winit `DroppedFile` |
 | G13 | **No image or picture widget and no `Image` loading helper** in the catalogue (only `draw_image`) | `PictureBox`, `Image`, form icons, toolbox icons | Build a small `Picture` widget on `Custom` + `draw_image`, and decode with the `image` crate (PNG/BMP/JPG) |
 | G14 | **Modal windows don't work on canvas** (confirmed: xui#146, tracked in emusic#417). `run_modal` returns `Unsupported`, so `Ui::open_modal` closes the child window immediately | Blocking `MsgBox`/`InputBox` and `Form.show_modal` | Iteration 1: `MsgBox` is an in-window `Dialog` and is **non-blocking** (with an optional callback). Upstream: implement `run_modal`/`set_window_enabled` on `WinitBackend` (a nested loop), then make `MsgBox` blocking |
@@ -418,6 +418,7 @@ editor move to 1.x.
 
 1. Convert the repo into the §2 workspace. Add xui (pinned) and `rhai` with the
    `debugging`, `metadata` and `internals` features.
-2. Spike G11 (menu shortcuts and rebuilds). Write the result into §10.
+2. Spike G11 (menu shortcuts and rebuilds). Done: both are missing, recorded in §10 and
+   filed upstream as xui#185.
 3. Write `lazyrad-project` (the `.lrp`/`.lfm` serde model) plus the "Hello" sample,
    then implement M1 so the player runs it.
