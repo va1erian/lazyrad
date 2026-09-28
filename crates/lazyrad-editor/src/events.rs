@@ -240,7 +240,8 @@ fn wheel<M: 'static>(
     let layout = viewport(ui, id, state);
     if horizontal || shift {
         let step = i32::from(delta) * WHEEL_COLS;
-        state.view.first_col = (state.view.first_col as i32 - step).max(0) as usize;
+        let max = max_first_col(state, &layout);
+        state.view.first_col = (state.view.first_col as i32 - step).clamp(0, max) as usize;
     } else {
         let step = i32::from(delta) * WHEEL_ROWS;
         let max = state
@@ -429,7 +430,7 @@ fn scrollbar_down<M: 'static>(
                 } else {
                     state.view.first_col as i32 + page
                 };
-                state.view.first_col = target.max(0) as usize;
+                state.view.first_col = target.clamp(0, max_first_col(state, layout)) as usize;
             }
         }
         state.captured = true;
@@ -496,6 +497,15 @@ fn vertical_scroll(state: &EditorState, layout: &Viewport, first_line: usize) ->
 }
 
 /// The horizontal scroll state.
+/// The largest `first_col` that still shows text: the longest line's length
+/// minus the visible columns.
+fn max_first_col(state: &EditorState, layout: &Viewport) -> i32 {
+    state
+        .buffer
+        .max_line_chars()
+        .saturating_sub(layout.visible_cols) as i32
+}
+
 fn horizontal_scroll(state: &EditorState, layout: &Viewport) -> Scroll {
     Scroll {
         viewport: layout.text.width(),

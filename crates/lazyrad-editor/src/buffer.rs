@@ -139,19 +139,20 @@ impl LineIndex {
 }
 
 /// The number of chars in a line slice, excluding its terminator.
+///
+/// Ropey splits lines on every Unicode break (LF, CRLF, lone CR, VT, FF, NEL,
+/// LS and PS), so all of them are stripped here; CR is only paired with a
+/// following LF.
 fn line_content_len(slice: &ropey::RopeSlice<'_>) -> usize {
     let len = slice.len_chars();
     if len == 0 {
         return 0;
     }
-    let mut end = len;
-    if slice.char(len - 1) == '\n' {
-        end -= 1;
+    match slice.char(len - 1) {
+        '\n' if len >= 2 && slice.char(len - 2) == '\r' => len - 2,
+        '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => len - 1,
+        _ => len,
     }
-    if end > 0 && slice.char(end - 1) == '\r' {
-        end -= 1;
-    }
-    end
 }
 
 /// The text buffer.
@@ -407,6 +408,19 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::Buffer;
+
+    #[test]
+    fn every_ropey_line_break_is_excluded_from_line_content() {
+        for terminator in [
+            "\n", "\r\n", "\r", "\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}",
+        ] {
+            let buffer = Buffer::new(&format!("ab{terminator}cd"));
+            assert_eq!(buffer.line_count(), 2, "{terminator:?} splits lines");
+            assert_eq!(buffer.line_string(0), "ab", "{terminator:?} is not content");
+            assert_eq!(buffer.line_end(0), 2, "{terminator:?}: End stops before it");
+            assert_eq!(buffer.max_line_chars(), 2, "{terminator:?} is not counted");
+        }
+    }
 
     #[test]
     fn line_index_tracks_lines_including_a_trailing_empty_one() {

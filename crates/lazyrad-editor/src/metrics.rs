@@ -119,12 +119,16 @@ impl Viewport {
     ) -> Viewport {
         let bar = SCROLLBAR.to_px(dpi).value();
         let content_height = line_count.max(1) as i32 * metrics.line_height;
-        let v_needed = content_height > bounds.height();
-        let vbar_w = if v_needed { bar } else { 0 };
-
         let content_width = max_cols.max(1) as i32 * metrics.advance;
-        let available = bounds.width() - metrics.gutter - vbar_w;
-        let h_needed = content_width > available;
+        // Each bar takes room from the other axis, so decide them together:
+        // the vertical check is redone once the horizontal bar is known.
+        let mut v_needed = content_height > bounds.height();
+        let h_needed =
+            content_width > bounds.width() - metrics.gutter - if v_needed { bar } else { 0 };
+        if h_needed && !v_needed {
+            v_needed = content_height > bounds.height() - bar;
+        }
+        let vbar_w = if v_needed { bar } else { 0 };
         let hbar_h = if h_needed { bar } else { 0 };
 
         let gutter = Rect::new(
@@ -224,6 +228,16 @@ mod tests {
         assert!(viewport.vbar.is_none());
         assert!(viewport.hbar.is_none());
         assert_eq!(viewport.visible_lines, 12);
+    }
+
+    #[test]
+    fn a_horizontal_bar_that_hides_lines_brings_the_vertical_bar() {
+        // 12 lines of 16 px fit in 200 px, but not in the 188 px left once a
+        // long line adds the 12 px horizontal bar.
+        let metrics = Metrics::new(measured(80, 16), 12, false, 96);
+        let viewport = Viewport::split(Rect::new(0, 0, 400, 200), metrics, 12, 100, 96);
+        assert!(viewport.hbar.is_some());
+        assert!(viewport.vbar.is_some());
     }
 
     #[test]
