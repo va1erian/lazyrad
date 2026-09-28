@@ -148,6 +148,7 @@ impl<M: 'static> Editor<M> {
         let mut state = self.state.borrow_mut();
         state.buffer = Buffer::new(text);
         state.view = View::new();
+        state.reset_highlight();
         drop(state);
         self.control.invalidate();
     }
