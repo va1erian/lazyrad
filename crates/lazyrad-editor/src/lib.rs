@@ -38,6 +38,7 @@ pub mod buffer;
 mod edit;
 mod editor;
 mod events;
+pub mod find;
 pub mod lexer;
 pub mod markers;
 mod metrics;
@@ -52,6 +53,7 @@ pub mod view;
 
 pub use buffer::Buffer;
 pub use editor::Editor;
+pub use find::Query;
 pub use lexer::{LexState, LineLexer, Token, TokenClass};
 pub use markers::{Marker, MarkerKind};
 pub use options::{FontConfig, Options};

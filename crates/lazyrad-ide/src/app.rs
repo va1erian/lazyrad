@@ -17,22 +17,26 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 
-use lazyrad_editor::Editor;
+use lazyrad_editor::{Editor, Marker, MarkerKind, Query};
 use xui_core::app::{App, Ui};
-use xui_core::backend::{Backend, Event, PlatformSpec, Result as UiResult, WidgetId};
+use xui_core::backend::{Backend, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId};
 use xui_core::geometry::Point;
 use xui_core::layout::Dock;
 use xui_core::units::Px;
 use xui_core::widget::{
-    Dialog, DialogAction, HasText, Label, Menu, MenuId, Panel, Split, Tabs, Toolbar, TreeView,
+    ComboBox, Dialog, DialogAction, HasText, Label, ListView, Menu, MenuId, Panel, Split, Tabs,
+    Toolbar, TreeView,
 };
 use xui_core::{Dip, Rect, dip};
 
 use crate::command::{Command, Dispatcher};
+use crate::compile::{self, CodeDiagnostic, CompileScheduler};
 use crate::dialog::ChoiceDialog;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
 use crate::platform::dialogs;
+use crate::procedures::{self, ObjectEntry};
 use crate::project::{DEFAULT_PROJECT, ProjectSession};
 use crate::settings::{Settings, ThemeChoice};
 
@@ -43,6 +47,13 @@ const TOOLBAR_HEIGHT: Dip = dip(32.0);
 /// The divider thickness xui's [`Split`] draws, so computed pane sizes are
 /// exact.
 const DIVIDER: f32 = 5.0;
+/// The tab strip height xui's [`Tabs`] reserves at the top of a page. The code
+/// view positions its widgets below it, matching the tab layout.
+const TABS_STRIP: Dip = dip(32.0);
+/// The code view's procedure-combo header height.
+const CODE_HEADER: Dip = dip(26.0);
+/// How often the compile scheduler is polled, in milliseconds.
+const COMPILE_POLL_MS: u32 = 100;
 /// How many output lines the pane keeps.
 const OUTPUT_LINES: usize = 500;
 /// The Start Page's welcome text.
@@ -71,6 +82,34 @@ pub enum Msg {
     SaveChoice(SaveChoice),
     /// A code document's text changed.
     DocumentEdited(String, String),
+    /// The selected document tab changed (page 0 is the Start Page).
+    TabChanged(usize),
+    /// A background compile finished. `revision` guards against a stale result
+    /// arriving after a newer edit.
+    CompileFinished {
+        /// The item whose source was compiled.
+        name: String,
+        /// The revision the result belongs to.
+        revision: u64,
+        /// The parse errors, or empty when the source compiled.
+        errors: Vec<CodeDiagnostic>,
+    },
+    /// An Error List row was activated (double-clicked or Return).
+    ErrorActivated(usize),
+    /// The object combo of a form's code window changed.
+    ObjectChanged(String, usize),
+    /// The procedure combo of a form's code window changed.
+    ProcedureChanged(String, usize),
+}
+
+/// One diagnostic shown in the Error List, tagged with the document it belongs
+/// to so activating the row can open that document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ErrorEntry {
+    /// The item's name.
+    name: String,
+    /// The parse error.
+    diagnostic: CodeDiagnostic,
 }
 
 /// Which persisted pane size a divider move changes.
@@ -108,6 +147,14 @@ pub enum PromptKind {
     NewProject,
     /// A new name for an item.
     Rename(String),
+    /// A find query, searched from the caret.
+    Find,
+    /// The find half of replace-all.
+    ReplaceFind,
+    /// The replacement text of replace-all.
+    ReplaceWith,
+    /// A one-based line number to jump to.
+    GoToLine,
 }
 
 /// The three answers to the save-changes prompt.
@@ -180,8 +227,43 @@ enum DocumentView {
         _panel: Panel<Msg>,
         _labels: Vec<Label<Msg>>,
     },
+    /// The code editor, with the two procedure combos for a form's code.
+    Code(CodeView),
+}
+
+/// One open code document: the editor and, for a form, its procedure combos.
+struct CodeView {
+    /// The object combo (the form and its controls). `None` for a module, which
+    /// has no events to bind.
+    object: Option<ComboBox<Msg>>,
+    /// The event combo, rebuilt when the object changes.
+    procedure: Option<ComboBox<Msg>>,
     /// The code editor.
-    Code(Rc<Editor<Msg>>),
+    editor: Rc<Editor<Msg>>,
+    /// The object entries the combos are built from.
+    objects: Vec<ObjectEntry>,
+    /// The index of the selected object, or `None` for a module.
+    object_index: Option<usize>,
+}
+
+impl CodeView {
+    /// The page children, in the order the tab lays them out.
+    fn children(&self) -> Vec<WidgetId> {
+        let mut ids = Vec::new();
+        if let Some(object) = &self.object {
+            ids.push(object.id());
+        }
+        if let Some(procedure) = &self.procedure {
+            ids.push(procedure.id());
+        }
+        ids.push(self.editor.id());
+        ids
+    }
+
+    /// The selected object's entry, if any.
+    fn selected_object(&self) -> Option<&ObjectEntry> {
+        self.object_index.and_then(|index| self.objects.get(index))
+    }
 }
 
 /// One open document tab.
@@ -219,6 +301,7 @@ pub struct IdeApp {
     right: Split<Msg>,
     /// The pane containers, kept alive.
     _panels: Vec<Panel<Msg>>,
+    output_panel: Panel<Msg>,
     project_panel: Panel<Msg>,
     _properties_panel: Panel<Msg>,
     /// The centre split's scoped UI, where document tabs are built.
@@ -248,6 +331,22 @@ pub struct IdeApp {
     /// The Output pane's label, rewritten as commands are logged.
     output: Label<Msg>,
     output_lines: Vec<String>,
+    /// The Error List filling the Output pane below the log line.
+    error_list: ListView<Msg>,
+    /// Every diagnostic currently shown, across documents, for the Error List
+    /// and for jumping to an activated row.
+    errors: Vec<ErrorEntry>,
+    /// The debounced background-compile scheduler, shared with the timer
+    /// mapper.
+    diagnostics: Rc<RefCell<CompileScheduler>>,
+    /// The repeating timer that polls the scheduler.
+    _compile_timer: TimerId,
+    /// The last find query text, offered as the prompt's initial value.
+    last_find: String,
+    /// The last replacement text, offered as the prompt's initial value.
+    last_replace: String,
+    /// The query of an in-progress replace-all, between its two prompts.
+    replace_query: Option<Query>,
     /// Set when saving the settings on exit failed; the next Exit quits
     /// without saving, so a read-only config directory cannot trap the user.
     exit_save_failed: bool,
@@ -322,7 +421,7 @@ impl IdeApp {
             Rect::new(8, 8, 132, 28),
             "Toolbox",
         )?);
-        for (index, name) in ["Label", "TextBox", "Button", "CheckBox", "ListBox"]
+        for (index, name) in ["Label", "Edit", "Button", "CheckBox", "ListBox"]
             .iter()
             .enumerate()
         {
@@ -343,6 +442,10 @@ impl IdeApp {
             "Properties",
         )?);
         let output = Label::new(output_panel.ui(), Rect::new(8, 8, 480, 24), "Output")?;
+        // The Error List: one row per compile diagnostic. Activating a row
+        // (double-click or Return) jumps to its position.
+        let error_list = ListView::new(output_panel.ui(), Rect::default(), &[])?
+            .on_activate(|row| Some(Msg::ErrorActivated(row)));
 
         // The Project Explorer: an empty tree until a project is opened.
         let tree = TreeView::new(project_panel.ui(), Rect::default(), &[])?
@@ -371,15 +474,33 @@ impl IdeApp {
             });
 
         let editors: Rc<RefCell<Vec<Rc<Editor<Msg>>>>> = Rc::new(RefCell::new(Vec::new()));
+        let diagnostics = Rc::new(RefCell::new(CompileScheduler::new()));
         {
             let editors = Rc::clone(&editors);
+            let diagnostics = Rc::clone(&diagnostics);
+            let proxy = ui.proxy();
             ui.on_timer(move |id| {
                 for editor in editors.borrow().iter() {
                     editor.handle_timer(id);
                 }
+                // A change armed the debounce; when it comes due, hand the
+                // newest source to a worker. The engine is built there, since
+                // it is not `Send`.
+                if let Some(job) = diagnostics.borrow_mut().take_due(Instant::now()) {
+                    let proxy = proxy.clone();
+                    std::thread::spawn(move || {
+                        let errors = compile::compile_source(&job.source);
+                        let _ = proxy.send(Msg::CompileFinished {
+                            name: job.name,
+                            revision: job.revision,
+                            errors,
+                        });
+                    });
+                }
                 None
             });
         }
+        let compile_timer = ui.set_timer(COMPILE_POLL_MS);
 
         let mut app = IdeApp {
             settings,
@@ -396,7 +517,8 @@ impl IdeApp {
             rest,
             centre,
             right,
-            _panels: vec![toolbox, output_panel],
+            _panels: vec![toolbox],
+            output_panel,
             project_panel,
             _properties_panel: properties_panel,
             docs_ui,
@@ -413,6 +535,13 @@ impl IdeApp {
             pending: None,
             output,
             output_lines: Vec::new(),
+            error_list,
+            errors: Vec::new(),
+            diagnostics,
+            _compile_timer: compile_timer,
+            last_find: String::new(),
+            last_replace: String::new(),
+            replace_query: None,
             exit_save_failed: false,
         };
 
@@ -490,9 +619,96 @@ impl IdeApp {
             self.tree.id(),
             Rect::new(0, 28, panel.width().max(0), panel.height().max(0)),
         )]);
+
+        // The Output pane: the log line on top, the Error List below it.
+        let output = ui.bounds(self.output_panel.id());
+        let header = Dip(24.0).to_px(dpi).value();
+        ui.apply_moves(&[
+            (
+                self.output.id(),
+                Rect::new(0, 0, output.width().max(0), header),
+            ),
+            (
+                self.error_list.id(),
+                Rect::new(0, header, output.width().max(0), output.height().max(0)),
+            ),
+        ]);
+
         if let Some(docs) = &self.docs {
             docs.relayout();
         }
+        self.layout_code_views(ui, dpi);
+    }
+
+    /// Positions the procedure combos and the editor of the selected code
+    /// document within its tab page.
+    ///
+    /// The tab lays every page child over the whole page, so the code view owns
+    /// the finer placement: a combo row at the top for a form, then the editor
+    /// filling the rest.
+    fn layout_code_views(&self, ui: &Ui<Msg>, dpi: u32) {
+        let Some(docs) = &self.docs else {
+            return;
+        };
+        let selected = docs.selected();
+        // A rebuilt procedure combo is not in the tab's own page list, so the
+        // view manages the visibility of every code child itself.
+        for (index, other) in self.documents.iter().enumerate() {
+            if let DocumentView::Code(other) = &other.view {
+                let visible = index + 1 == selected;
+                for id in other.children() {
+                    ui.set_visible(id, visible);
+                }
+            }
+        }
+        let Some(document) = selected
+            .checked_sub(1)
+            .and_then(|index| self.documents.get(index))
+        else {
+            return;
+        };
+        let DocumentView::Code(view) = &document.view else {
+            return;
+        };
+        let node = ui.bounds(docs.id());
+        if node.is_empty() {
+            return;
+        }
+        // The page area of the tab container, in the container's coordinates.
+        let bounds = Rect::from_size(node.size());
+        let page = Dock::new().top(TABS_STRIP).split(bounds, dpi).fill;
+        let header = CODE_HEADER.to_px(dpi).value();
+        let gap = (dpi / 8).max(1) as i32;
+
+        let mut moves = Vec::new();
+        let mut editor_top = page.top;
+        if let (Some(object), Some(procedure)) = (&view.object, &view.procedure) {
+            let half = ((page.width() - gap * 3) / 2).max(0);
+            moves.push((
+                object.id(),
+                Rect::new(
+                    page.left + gap,
+                    page.top,
+                    page.left + gap + half,
+                    page.top + header,
+                ),
+            ));
+            moves.push((
+                procedure.id(),
+                Rect::new(
+                    page.left + gap * 2 + half,
+                    page.top,
+                    page.right - gap,
+                    page.top + header,
+                ),
+            ));
+            editor_top = page.top + header;
+        }
+        moves.push((
+            view.editor.id(),
+            Rect::new(page.left, editor_top, page.right, page.bottom),
+        ));
+        ui.apply_moves(&moves);
     }
 
     /// Pushes `settings.theme` into the window's palette.
@@ -617,19 +833,23 @@ impl IdeApp {
                 }
             }
             Command::ViewCode => {
-                if let Some(name) = self.selected_item_name() {
+                if let Some(name) = self.current_item_name() {
                     self.open_code(&name, ui);
                 } else {
                     self.log(ui, "Select an item in the Project Explorer first.");
                 }
             }
             Command::ViewObject => {
-                if let Some(name) = self.selected_item_name() {
+                if let Some(name) = self.current_item_name() {
                     self.open_object(&name, ui);
                 } else {
                     self.log(ui, "Select an item in the Project Explorer first.");
                 }
             }
+            Command::Find => self.show_prompt(ui, PromptKind::Find),
+            Command::FindNext => self.find_next(ui),
+            Command::Replace => self.show_prompt(ui, PromptKind::ReplaceFind),
+            Command::GoToLine => self.show_prompt(ui, PromptKind::GoToLine),
             Command::ThemeLight => self.set_theme(ui, ThemeChoice::Light),
             Command::ThemeDark => self.set_theme(ui, ThemeChoice::Dark),
             Command::ThemeSystem => self.set_theme(ui, ThemeChoice::System),
@@ -934,11 +1154,38 @@ impl IdeApp {
 
     /// Opens a prompt dialog for `kind`.
     fn show_prompt(&mut self, ui: &mut Ui<Msg>, kind: PromptKind) {
-        let (title, message, initial) = match &kind {
-            PromptKind::NewProject => ("New Project", "Project name:", DEFAULT_PROJECT),
-            PromptKind::Rename(old) => ("Rename Item", "New name:", old.as_str()),
+        let (title, message, initial): (String, String, String) = match &kind {
+            PromptKind::NewProject => (
+                "New Project".to_owned(),
+                "Project name:".to_owned(),
+                DEFAULT_PROJECT.to_owned(),
+            ),
+            PromptKind::Rename(old) => (
+                "Rename Item".to_owned(),
+                "New name:".to_owned(),
+                old.clone(),
+            ),
+            PromptKind::Find | PromptKind::ReplaceFind => (
+                if matches!(kind, PromptKind::Find) {
+                    "Find".to_owned()
+                } else {
+                    "Replace".to_owned()
+                },
+                "Find (wrap it in /…/ to use a regular expression):".to_owned(),
+                self.last_find.clone(),
+            ),
+            PromptKind::ReplaceWith => (
+                "Replace".to_owned(),
+                "Replace with:".to_owned(),
+                self.last_replace.clone(),
+            ),
+            PromptKind::GoToLine => (
+                "Go to Line".to_owned(),
+                "Line number:".to_owned(),
+                String::new(),
+            ),
         };
-        match Dialog::prompt(ui, title, message, initial) {
+        match Dialog::prompt(ui, &title, &message, &initial) {
             Ok(dialog) => {
                 let dialog = dialog.on_action(|action| match action {
                     DialogAction::Accept(text) => Some(Msg::PromptSubmitted(text)),
@@ -957,15 +1204,344 @@ impl IdeApp {
             return;
         };
         drop(dialog);
-        let text = text.trim().to_owned();
-        if text.is_empty() {
-            self.log(ui, "No name given; nothing was changed.");
+        match kind {
+            PromptKind::NewProject => {
+                let name = text.trim().to_owned();
+                if name.is_empty() {
+                    self.log(ui, "No name given; nothing was changed.");
+                } else {
+                    self.new_project(&name, ui);
+                }
+            }
+            PromptKind::Rename(old) => {
+                let name = text.trim().to_owned();
+                if name.is_empty() {
+                    self.log(ui, "No name given; nothing was changed.");
+                } else {
+                    self.rename_item(&old, &name, ui);
+                }
+            }
+            PromptKind::Find => self.start_find(&text, ui),
+            PromptKind::ReplaceFind => {
+                let query = Query::parse(&text);
+                if query.pattern.is_empty() {
+                    self.log(ui, "Nothing to find.");
+                    return;
+                }
+                self.last_find = text;
+                self.replace_query = Some(query);
+                self.show_prompt(ui, PromptKind::ReplaceWith);
+            }
+            PromptKind::ReplaceWith => self.replace_all(&text, ui),
+            PromptKind::GoToLine => self.go_to_line(&text, ui),
+        }
+    }
+
+    /// Starts a find from the accepted query.
+    fn start_find(&mut self, text: &str, ui: &mut Ui<Msg>) {
+        let query = Query::parse(text);
+        if query.pattern.is_empty() {
+            self.log(ui, "Nothing to find.");
             return;
         }
-        match kind {
-            PromptKind::NewProject => self.new_project(&text, ui),
-            PromptKind::Rename(old) => self.rename_item(&old, &text, ui),
+        self.last_find = text.to_owned();
+        self.search(&query, true, ui);
+    }
+
+    /// Repeats the last find in the forward direction (F3).
+    fn find_next(&mut self, ui: &mut Ui<Msg>) {
+        let text = self.last_find.clone();
+        let query = Query::parse(&text);
+        if query.pattern.is_empty() {
+            self.log(ui, "Use Find first, or F3 with a previous search.");
+            return;
         }
+        self.search(&query, true, ui);
+    }
+
+    /// Selects the next (or previous) match in the active code document.
+    fn search(&mut self, query: &Query, forward: bool, ui: &mut Ui<Msg>) {
+        let Some((_, editor)) = self.active_code_editor() else {
+            self.log(ui, "Open a code window first.");
+            return;
+        };
+        match editor.find_next(query, self.find_case_sensitive(), forward) {
+            Ok(true) => {
+                editor.focus();
+            }
+            Ok(false) => self.log(ui, "No matches."),
+            Err(error) => self.log(ui, format!("Invalid regular expression: {error}")),
+        }
+    }
+
+    /// Replaces every match of the pending query in the active code document.
+    fn replace_all(&mut self, replacement: &str, ui: &mut Ui<Msg>) {
+        let Some(query) = self.replace_query.take() else {
+            return;
+        };
+        self.last_replace = replacement.to_owned();
+        let Some((name, editor)) = self.active_code_editor() else {
+            self.log(ui, "Open a code window first.");
+            return;
+        };
+        match lazyrad_editor::find::replace_all(
+            &editor.text(),
+            &query,
+            self.find_case_sensitive(),
+            replacement,
+        ) {
+            Ok(Some(text)) => {
+                editor.set_text(&text);
+                self.after_programmatic_edit(&name, ui);
+                self.log(ui, "Replaced all matches.");
+            }
+            Ok(None) => self.log(ui, "No matches."),
+            Err(error) => self.log(ui, format!("Invalid regular expression: {error}")),
+        }
+    }
+
+    /// Jumps the active code document to the accepted line number.
+    fn go_to_line(&mut self, text: &str, ui: &mut Ui<Msg>) {
+        let Ok(line) = text.trim().parse::<usize>() else {
+            self.log(ui, "Enter a line number.");
+            return;
+        };
+        if line == 0 {
+            self.log(ui, "Line numbers start at 1.");
+            return;
+        }
+        let Some((_, editor)) = self.active_code_editor() else {
+            self.log(ui, "Open a code window first.");
+            return;
+        };
+        editor.goto(line - 1, 0);
+        editor.focus();
+    }
+
+    /// Whether find and replace match case. VB's Match Case is off by default.
+    fn find_case_sensitive(&self) -> bool {
+        false
+    }
+
+    /// The active code document's name and editor, if a code tab is in front.
+    fn active_code_editor(&self) -> Option<(String, Rc<Editor<Msg>>)> {
+        let docs = self.docs.as_ref()?;
+        let selected = docs.selected();
+        if selected == 0 {
+            return None;
+        }
+        let document = self.documents.get(selected - 1)?;
+        if document.kind != DocKind::Code {
+            return None;
+        }
+        match &document.view {
+            DocumentView::Code(view) => Some((document.name.clone(), Rc::clone(&view.editor))),
+            DocumentView::Designer { .. } => None,
+        }
+    }
+
+    /// Marks a document dirty after a programmatic edit, mirrors the editor's
+    /// text into the session and arms the background compile.
+    fn after_programmatic_edit(&mut self, name: &str, ui: &mut Ui<Msg>) {
+        let Some(text) = self
+            .documents
+            .iter()
+            .find(|document| document.name == name && document.kind == DocKind::Code)
+            .and_then(|document| match &document.view {
+                DocumentView::Code(view) => Some(view.editor.text()),
+                DocumentView::Designer { .. } => None,
+            })
+        else {
+            return;
+        };
+        if let Some(session) = self.session.as_mut() {
+            session.set_code(name, text.clone());
+        }
+        if let Some(document) = self
+            .documents
+            .iter_mut()
+            .find(|document| document.name == name && document.kind == DocKind::Code)
+        {
+            document.dirty = true;
+        }
+        self.schedule_compile(name, &text);
+        self.update_title(ui);
+    }
+
+    // ---- Code window: compile diagnostics and procedure combos -------------
+
+    /// Arms the background compile for a document's newest text.
+    fn schedule_compile(&self, name: &str, source: &str) {
+        self.diagnostics
+            .borrow_mut()
+            .schedule(name, source, Instant::now());
+    }
+
+    /// Applies a finished compile: refreshes the Error List and the editor's
+    /// markers. A result older than the newest scheduled revision is dropped.
+    fn apply_compile(
+        &mut self,
+        name: &str,
+        revision: u64,
+        errors: Vec<CodeDiagnostic>,
+        ui: &mut Ui<Msg>,
+    ) {
+        if self.diagnostics.borrow().revision() != revision {
+            return;
+        }
+        self.errors.retain(|entry| entry.name != name);
+        self.errors
+            .extend(errors.iter().cloned().map(|diagnostic| ErrorEntry {
+                name: name.to_owned(),
+                diagnostic,
+            }));
+        self.refresh_error_list();
+        if let Some(editor) = self.code_editor(name) {
+            let markers = errors
+                .iter()
+                .map(|diagnostic| {
+                    let line = diagnostic.line.saturating_sub(1);
+                    let col = diagnostic.col.saturating_sub(1);
+                    Marker::new(line, col, col + 1, MarkerKind::Error)
+                })
+                .collect();
+            editor.set_markers(markers);
+        }
+        if errors.is_empty() {
+            self.log(ui, format!("{name}: no syntax errors."));
+        } else {
+            for error in &errors {
+                self.log(ui, format!("{name}{}", error.label()));
+            }
+        }
+    }
+
+    /// Rebuilds the Error List rows from the collected diagnostics.
+    fn refresh_error_list(&self) {
+        let labels: Vec<String> = self
+            .errors
+            .iter()
+            .map(|entry| format!("{}{}", entry.name, entry.diagnostic.label()))
+            .collect();
+        let rows: Vec<&str> = labels.iter().map(String::as_str).collect();
+        self.error_list.set_items(&rows);
+    }
+
+    /// Opens the document an Error List row belongs to and jumps to its
+    /// position.
+    fn activate_error(&mut self, row: usize, ui: &mut Ui<Msg>) {
+        let Some(entry) = self.errors.get(row).cloned() else {
+            return;
+        };
+        self.open_code(&entry.name, ui);
+        if let Some(editor) = self.code_editor(&entry.name) {
+            editor.goto(
+                entry.diagnostic.line.saturating_sub(1),
+                entry.diagnostic.col.saturating_sub(1),
+            );
+            editor.focus();
+        }
+    }
+
+    /// Handles a change of the object combo: rebuilds the procedure combo for
+    /// the chosen object.
+    ///
+    /// xui's [`ComboBox`] cannot replace its items, so the procedure combo is
+    /// destroyed and recreated with the new object's events.
+    fn change_object(&mut self, name: &str, index: usize, ui: &mut Ui<Msg>) {
+        let Some(scoped) = self.docs.as_ref().map(|docs| docs.ui().clone()) else {
+            return;
+        };
+        let mut failure = None;
+        {
+            let Some(document) = self
+                .documents
+                .iter_mut()
+                .find(|document| document.name == name && document.kind == DocKind::Code)
+            else {
+                return;
+            };
+            let DocumentView::Code(view) = &mut document.view else {
+                return;
+            };
+            let Some(entry) = view.objects.get(index).cloned() else {
+                return;
+            };
+            view.object_index = Some(index);
+            let items: Vec<&str> = entry
+                .events
+                .iter()
+                .map(|event| event.name.as_str())
+                .collect();
+            match ComboBox::new(&scoped, Rect::default(), &items) {
+                Ok(combo) => {
+                    let name = name.to_owned();
+                    view.procedure =
+                        Some(combo.on_select(move |index| {
+                            Some(Msg::ProcedureChanged(name.clone(), index))
+                        }));
+                }
+                Err(error) => failure = Some(error.to_string()),
+            }
+        }
+        if let Some(error) = failure {
+            self.log(
+                ui,
+                format!("the procedure list could not be rebuilt: {error}"),
+            );
+        }
+        self.layout_code_views(ui, ui.dpi());
+    }
+
+    /// Inserts the handler for the chosen event (or jumps to it when it already
+    /// exists) and places the caret inside the new function.
+    fn insert_procedure(&mut self, name: &str, index: usize, ui: &mut Ui<Msg>) {
+        let Some((signature, args, editor)) = self.procedure_target(name, index) else {
+            return;
+        };
+        if let Some(offset) = procedures::find_handler(&editor.text(), &signature) {
+            editor.set_caret(offset);
+            editor.focus();
+            return;
+        }
+        let text = editor.text();
+        let end = text.chars().count();
+        let separator = if text.is_empty() || text.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
+        let snippet = procedures::handler_snippet(&signature, &args);
+        let insert = format!("{separator}{snippet}");
+        // The caret lands just after the opening brace of the new handler.
+        let before_brace = format!("fn {signature}({args}) ").chars().count();
+        editor.set_caret(end);
+        editor.insert_text(&insert);
+        editor.set_caret(end + separator.chars().count() + before_brace + 1);
+        editor.focus();
+        self.after_programmatic_edit(name, ui);
+    }
+
+    /// The signature, argument list and editor for a procedure selection.
+    fn procedure_target(
+        &self,
+        name: &str,
+        index: usize,
+    ) -> Option<(String, String, Rc<Editor<Msg>>)> {
+        let document = self
+            .documents
+            .iter()
+            .find(|document| document.name == name && document.kind == DocKind::Code)?;
+        let DocumentView::Code(view) = &document.view else {
+            return None;
+        };
+        let object = view.selected_object()?;
+        let event = object.events.get(index)?;
+        Some((
+            procedures::signature(&object.prefix, &event.name),
+            procedures::argument_list(event),
+            Rc::clone(&view.editor),
+        ))
     }
 
     // ---- Explorer and context menu ----------------------------------------
@@ -995,6 +1571,34 @@ impl IdeApp {
             .and_then(|node| self.explorer.entry(node))
             .and_then(ExplorerItem::name)
             .map(str::to_owned)
+    }
+
+    /// The item the Object/Code toggle acts on: the active document's item when
+    /// one is open, otherwise the explorer selection.
+    ///
+    /// This is what makes F7/Shift+F7 flip the form in front of the user rather
+    /// than whatever row happens to be highlighted in the tree.
+    fn current_item_name(&self) -> Option<String> {
+        if let Some(docs) = &self.docs {
+            let selected = docs.selected();
+            if selected > 0
+                && let Some(document) = self.documents.get(selected - 1)
+            {
+                return Some(document.name.clone());
+            }
+        }
+        self.selected_item_name()
+    }
+
+    /// The editor of an open code document named `name`, if it is open.
+    fn code_editor(&self, name: &str) -> Option<Rc<Editor<Msg>>> {
+        self.documents
+            .iter()
+            .find(|document| document.name == name && document.kind == DocKind::Code)
+            .and_then(|document| match &document.view {
+                DocumentView::Code(view) => Some(Rc::clone(&view.editor)),
+                DocumentView::Designer { .. } => None,
+            })
     }
 
     /// Handles a row selection: a second click on the same row opens it.
@@ -1043,6 +1647,8 @@ impl IdeApp {
             return;
         }
         self.documents.retain(|document| document.name != name);
+        self.errors.retain(|entry| entry.name != name);
+        self.refresh_error_list();
         if let Err(error) = self.rebuild_tabs() {
             self.log(ui, format!("the document area could not be reset: {error}"));
         }
@@ -1069,6 +1675,12 @@ impl IdeApp {
                 if let Err(error) = self.rebuild_tabs() {
                     self.log(ui, format!("the document area could not be reset: {error}"));
                 }
+                for entry in &mut self.errors {
+                    if entry.name == old {
+                        entry.name = new.to_owned();
+                    }
+                }
+                self.refresh_error_list();
                 self.after_structure_change(ui);
                 self.log(ui, format!("Renamed {old} to {new}."));
             }
@@ -1136,7 +1748,7 @@ impl IdeApp {
             .expect("the document tabs exist")
             .ui()
             .clone();
-        let (view, id, title) = self.build_view(&scoped, name, kind)?;
+        let (view, ids, title) = self.build_view(&scoped, name, kind)?;
         let tabs = self.docs.take().expect("the document tabs exist");
         self.documents.push(Document {
             name: name.to_owned(),
@@ -1145,18 +1757,24 @@ impl IdeApp {
             dirty: false,
             view,
         });
-        self.docs = Some(tabs.page(&title, &[id]));
+        self.docs = Some(tabs.page(&title, &ids));
+        // Bring the new document to the front (page 0 is the Start Page).
+        if let Some(docs) = &self.docs {
+            docs.select(self.documents.len());
+        }
+        let docs_ui = self.docs_ui.clone();
+        self.layout_code_views(&docs_ui, docs_ui.dpi());
         Ok(())
     }
 
-    /// Builds the widgets behind a document, returning the view, its node id
-    /// and the tab title.
+    /// Builds the widgets behind a document, returning the view, the ids of its
+    /// page children and the tab title.
     fn build_view(
         &mut self,
         ui: &Ui<Msg>,
         name: &str,
         kind: DocKind,
-    ) -> UiResult<(DocumentView, WidgetId, String)> {
+    ) -> UiResult<(DocumentView, Vec<WidgetId>, String)> {
         match kind {
             DocKind::Designer => {
                 let panel = Panel::new(ui, Rect::default())?;
@@ -1178,22 +1796,87 @@ impl IdeApp {
                         _panel: panel,
                         _labels: labels,
                     },
-                    id,
+                    vec![id],
                     name.to_owned(),
                 ))
             }
             DocKind::Code => {
+                let catalog = lazyrad_project::lazyrad_catalog();
+                let is_form = self.session.as_ref().and_then(|s| s.form(name)).is_some();
+                let objects = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.form(name))
+                    .map(|form| procedures::objects(&catalog, form))
+                    .unwrap_or_default();
+
+                let object = if is_form {
+                    let items: Vec<&str> =
+                        objects.iter().map(|entry| entry.label.as_str()).collect();
+                    Some(ComboBox::new(ui, Rect::default(), &items)?.on_select({
+                        let name = name.to_owned();
+                        move |index| Some(Msg::ObjectChanged(name.clone(), index))
+                    }))
+                } else {
+                    None
+                };
+                let procedure = if is_form {
+                    let items = objects
+                        .first()
+                        .map(ObjectEntry::event_names)
+                        .unwrap_or_default();
+                    let items: Vec<&str> = items.iter().map(String::as_str).collect();
+                    Some(ComboBox::new(ui, Rect::default(), &items)?.on_select({
+                        let name = name.to_owned();
+                        move |index| Some(Msg::ProcedureChanged(name.clone(), index))
+                    }))
+                } else {
+                    None
+                };
+
                 let editor = Editor::new(ui, Rect::default())?.on_change({
                     let name = name.to_owned();
                     move |text| Some(Msg::DocumentEdited(name.clone(), text.to_string()))
                 });
                 let editor = Rc::new(editor);
                 self.editors.borrow_mut().push(Rc::clone(&editor));
-                if let Some(source) = self.session.as_ref().and_then(|s| s.code(name)) {
-                    editor.set_text(source);
+                let source = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.code(name))
+                    .unwrap_or_default()
+                    .to_owned();
+                editor.set_text(&source);
+                // Re-apply diagnostics an earlier compile left for this item.
+                let markers: Vec<Marker> = self
+                    .errors
+                    .iter()
+                    .filter(|entry| entry.name == name)
+                    .map(|entry| {
+                        let line = entry.diagnostic.line.saturating_sub(1);
+                        let col = entry.diagnostic.col.saturating_sub(1);
+                        Marker::new(line, col, col + 1, MarkerKind::Error)
+                    })
+                    .collect();
+                editor.set_markers(markers);
+                self.schedule_compile(name, &source);
+
+                let mut ids = Vec::new();
+                if let Some(combo) = &object {
+                    ids.push(combo.id());
                 }
-                let id = editor.id();
-                Ok((DocumentView::Code(editor), id, format!("{name}.rhai")))
+                if let Some(combo) = &procedure {
+                    ids.push(combo.id());
+                }
+                ids.push(editor.id());
+                let view = CodeView {
+                    object,
+                    procedure,
+                    editor: Rc::clone(&editor),
+                    objects,
+                    object_index: is_form.then_some(0),
+                };
+                Ok((DocumentView::Code(view), ids, format!("{name}.rhai")))
             }
         }
     }
@@ -1205,6 +1888,8 @@ impl IdeApp {
         }
         self.editors.borrow_mut().clear();
         self.documents.clear();
+        self.errors.clear();
+        self.error_list.set_items(&[]);
         self.rebuild_tabs()
     }
 
@@ -1228,7 +1913,8 @@ impl IdeApp {
         self.docs = None;
         self.start_label = None;
 
-        let tabs = Tabs::new(&self.docs_ui, Rect::default())?;
+        let tabs = Tabs::new(&self.docs_ui, Rect::default())?
+            .on_change(|index| Some(Msg::TabChanged(index)));
         let welcome = Label::new(tabs.ui(), Rect::new(16, 16, 560, 48), WELCOME)?;
         self.start_label = Some(welcome);
         let welcome_id = self
@@ -1252,12 +1938,12 @@ impl IdeApp {
     /// Copies every open code document's text back into the project.
     fn sync_documents(&mut self) {
         for document in &self.documents {
-            if let DocumentView::Code(editor) = &document.view
+            if let DocumentView::Code(view) = &document.view
                 && let Some(session) = self.session.as_mut()
             {
                 // Only write back real edits: `set_code` marks the project
                 // dirty, and an unchanged document must not.
-                let text = editor.text();
+                let text = view.editor.text();
                 if session.code(&document.name) != Some(text.as_str()) {
                     session.set_code(&document.name, text);
                 }
@@ -1283,6 +1969,7 @@ impl App for IdeApp {
             }
             Msg::SaveChoice(choice) => self.resolve_save_prompt(choice, ui),
             Msg::DocumentEdited(name, text) => {
+                self.schedule_compile(&name, &text);
                 if let Some(session) = self.session.as_mut() {
                     session.set_code(&name, text);
                 }
@@ -1295,6 +1982,17 @@ impl App for IdeApp {
                 }
                 self.update_title(ui);
             }
+            Msg::TabChanged(_) => {
+                self.layout_code_views(ui, ui.dpi());
+            }
+            Msg::CompileFinished {
+                name,
+                revision,
+                errors,
+            } => self.apply_compile(&name, revision, errors, ui),
+            Msg::ErrorActivated(row) => self.activate_error(row, ui),
+            Msg::ObjectChanged(name, index) => self.change_object(&name, index, ui),
+            Msg::ProcedureChanged(name, index) => self.insert_procedure(&name, index, ui),
         }
     }
 }
@@ -1413,7 +2111,10 @@ fn build_menu(
                 .item(ids.id(Command::Delete), "&Delete")
                 .separator()
                 .item(ids.id(Command::SelectAll), "Select &All")
-                .item(ids.id(Command::Find), "&Find…");
+                .item(ids.id(Command::Find), "&Find…")
+                .item(ids.id(Command::FindNext), "Find &Next")
+                .item(ids.id(Command::Replace), "&Replace…")
+                .item(ids.id(Command::GoToLine), "&Go To Line…");
         });
         bar.submenu(ids.plain(), "&View", |view| {
             view.item(ids.id(Command::ViewCode), "&Code")
@@ -1592,7 +2293,7 @@ mod tests {
 
     #[test]
     fn a_control_rect_maps_the_geometry() {
-        let mut control = lazyrad_project::Node::new("CommandButton", "cmdGo");
+        let mut control = lazyrad_project::Node::new("Button", "go_button");
         control.set_prop("left", lazyrad_project::Value::Int(16));
         control.set_prop("top", lazyrad_project::Value::Int(32));
         control.set_prop("width", lazyrad_project::Value::Int(120));
@@ -1604,5 +2305,60 @@ mod tests {
     fn session_errors_read_well() {
         let error = SessionError::InvalidName("`bad` is not valid".to_owned());
         assert_eq!(error.to_string(), "`bad` is not valid");
+    }
+
+    #[test]
+    fn a_code_window_shows_diagnostics_and_inserts_handlers() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-code-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        let backend_for_app = Rc::clone(&backend);
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app = IdeApp::build(ui, Settings::default(), Vec::new(), backend_for_app)
+                .expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Code)
+                .expect("the code document opens");
+
+            // A finished compile fills the Error List and the editor markers.
+            let revision = app.diagnostics.borrow().revision();
+            app.apply_compile(
+                crate::project::DEFAULT_FORM,
+                revision,
+                vec![CodeDiagnostic::new(1, 1, "boom")],
+                ui,
+            );
+            assert_eq!(app.errors.len(), 1);
+            assert_eq!(app.error_list.len(), 1);
+
+            // Choosing the form's second event inserts the missing handler.
+            app.insert_procedure(crate::project::DEFAULT_FORM, 1, ui);
+            let text = app
+                .code_editor(crate::project::DEFAULT_FORM)
+                .expect("the editor is open")
+                .text();
+            assert!(text.contains("fn form_close(cancel) {"), "text was: {text}");
+
+            // Rebuilding the procedure combo replaces a page child, so a
+            // following re-layout must tolerate the destroyed old node.
+            app.change_object(crate::project::DEFAULT_FORM, 1, ui);
+            app.layout_frame(ui);
+
+            // A clean compile clears both the list and the errors.
+            let revision = app.diagnostics.borrow().revision();
+            app.apply_compile(crate::project::DEFAULT_FORM, revision, Vec::new(), ui);
+            assert!(app.errors.is_empty());
+            assert_eq!(app.error_list.len(), 0);
+
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
     }
 }

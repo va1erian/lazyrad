@@ -15,7 +15,9 @@ use xui_core::backend::{Cursor, NodeKind, NodeSpec, Result, TimerId, WidgetId};
 use xui_core::geometry::Rect;
 
 use crate::buffer::Buffer;
+use crate::edit;
 use crate::events;
+use crate::find;
 use crate::markers::Marker;
 use crate::options::Options;
 use crate::paint;
@@ -177,6 +179,130 @@ impl<M: 'static> Editor<M> {
         self.control.invalidate();
     }
 
+    /// The caret's char offset.
+    pub fn caret(&self) -> usize {
+        self.state.borrow().view.caret
+    }
+
+    /// Moves the caret to the char offset `offset`, clearing any selection and
+    /// scrolling it into view.
+    pub fn set_caret(&self, offset: usize) {
+        let ui = self.control.ui().clone();
+        {
+            let mut state = self.state.borrow_mut();
+            let offset = offset.min(state.buffer.len_chars());
+            state.view.caret = offset;
+            state.view.anchor = offset;
+            state.view.goal_col = None;
+            events::ensure_visible(&mut state, &ui, self.control.id());
+        }
+        self.control.invalidate();
+    }
+
+    /// Selects the char range `start..end` (ordered) and scrolls to it.
+    pub fn select(&self, start: usize, end: usize) {
+        let ui = self.control.ui().clone();
+        {
+            let mut state = self.state.borrow_mut();
+            let (start, end) = (start.min(end), start.max(end));
+            state.view.anchor = start.min(state.buffer.len_chars());
+            state.view.caret = end.min(state.buffer.len_chars());
+            state.view.goal_col = None;
+            events::ensure_visible(&mut state, &ui, self.control.id());
+        }
+        self.control.invalidate();
+    }
+
+    /// Inserts `text` at the caret, replacing the selection. Returns whether the
+    /// text changed.
+    ///
+    /// Unlike typing, this does not raise [`Editor::on_change`]; the caller owns
+    /// the edit and is responsible for any dirty tracking.
+    pub fn insert_text(&self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            edit::splice(&mut state.buffer, &mut state.view, text, false);
+            state.sync_highlight();
+        }
+        self.control.invalidate();
+        true
+    }
+
+    /// Replaces the char range `start..end` with `text`. Returns whether the
+    /// text changed.
+    pub fn replace(&self, start: usize, end: usize, text: &str) -> bool {
+        let ui = self.control.ui().clone();
+        {
+            let mut state = self.state.borrow_mut();
+            let len = state.buffer.len_chars();
+            let (start, end) = (start.min(end).min(len), start.max(end).min(len));
+            if start == end && text.is_empty() {
+                return false;
+            }
+            state.buffer.replace(start..end, text, false);
+            state.view.caret = start + text.chars().count();
+            state.view.anchor = state.view.caret;
+            state.view.goal_col = None;
+            state.sync_highlight();
+            events::ensure_visible(&mut state, &ui, self.control.id());
+        }
+        self.control.invalidate();
+        true
+    }
+
+    /// Finds `query` relative to the caret, returning the matched char range.
+    ///
+    /// A forward search starts at the caret and wraps to the top; a backward
+    /// search takes the last match before the caret and wraps to the bottom. An
+    /// invalid regular expression is reported as an error message.
+    pub fn find(
+        &self,
+        query: &find::Query,
+        case_sensitive: bool,
+        forward: bool,
+    ) -> std::result::Result<Option<(usize, usize)>, String> {
+        let state = self.state.borrow();
+        let text = state.buffer.text();
+        let found = find::matches(&text, query, case_sensitive)?;
+        let caret = state.view.caret;
+        let chosen = if forward {
+            found
+                .iter()
+                .copied()
+                .find(|(start, _)| *start >= caret)
+                .or_else(|| found.first().copied())
+        } else {
+            found
+                .iter()
+                .rev()
+                .copied()
+                .find(|(_, end)| *end <= caret)
+                .or_else(|| found.last().copied())
+        };
+        Ok(chosen)
+    }
+
+    /// Selects the next (or previous) match of `query`. Returns whether one was
+    /// found; an invalid regular expression is reported as an error.
+    pub fn find_next(
+        &self,
+        query: &find::Query,
+        case_sensitive: bool,
+        forward: bool,
+    ) -> std::result::Result<bool, String> {
+        match self.find(query, case_sensitive, forward)? {
+            Some((start, end)) => {
+                self.select(start, end);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Replaces the display options.
     pub fn set_options(&self, options: Options) {
         self.state.borrow_mut().options = options;
@@ -284,6 +410,52 @@ mod tests {
         let captured = shot.borrow();
         let image = captured.as_ref().expect("the editor painted something");
         assert!(image.width() > 0 && image.height() > 0);
+    }
+
+    #[test]
+    fn programmatic_edits_and_find_work_on_a_live_widget() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use xui_canvas::OffscreenBackend;
+        use xui_core::backend::PlatformSpec;
+        use xui_core::geometry::Rect;
+        use xui_core::units::Dip;
+        use xui_core::{App, run_app};
+
+        use crate::find::Query;
+
+        struct Empty;
+
+        impl App for Empty {
+            type Msg = ();
+            fn update(&mut self, _msg: (), _ui: &mut xui_core::Ui<()>) {}
+        }
+
+        let check = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&check);
+        run_app(
+            Rc::new(OffscreenBackend::new()),
+            PlatformSpec::new("edits").size(Dip(300.0), Dip(200.0)),
+            move |ui| {
+                let editor = crate::Editor::new(ui, Rect::new(0, 0, 300, 200)).expect("editor");
+                assert!(editor.insert_text("fn Form_Load() {\n}\n"));
+                assert_eq!(editor.text(), "fn Form_Load() {\n}\n");
+
+                let query = Query::literal("Form_Load");
+                assert!(editor.find_next(&query, true, true).expect("valid query"));
+                assert_eq!(editor.selection(), Some((3, 12)));
+                assert!(editor.replace(3, 12, "Form_Resize"));
+                assert_eq!(editor.text(), "fn Form_Resize() {\n}\n");
+
+                editor.set_caret(0);
+                assert_eq!(editor.caret(), 0);
+                *sink.borrow_mut() = Some(());
+                Empty
+            },
+        )
+        .expect("run_app");
+        assert!(check.borrow().is_some());
     }
 
     use crate::platform::Clipboard;

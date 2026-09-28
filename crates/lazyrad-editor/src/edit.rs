@@ -14,7 +14,7 @@ use crate::text::leading_whitespace;
 use crate::view::View;
 
 /// Replaces the selection (or inserts at the caret) with `text`.
-fn splice(buffer: &mut Buffer, view: &mut View, text: &str, coalesce: bool) {
+pub(crate) fn splice(buffer: &mut Buffer, view: &mut View, text: &str, coalesce: bool) {
     match view.selection() {
         Some((start, end)) => {
             buffer.replace(start..end, text, coalesce);

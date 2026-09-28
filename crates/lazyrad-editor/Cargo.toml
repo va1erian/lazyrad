@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 lazyrad-runtime.workspace = true
+regex.workspace = true
 rhai.workspace = true
 ropey = "1"
 xui-core.workspace = true
