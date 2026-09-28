@@ -1195,30 +1195,35 @@ mod tests {
 
         #[test]
         fn our_classes_agree_with_rhai_on_identifiers() {
-            let engine = Engine::new();
-            let text = "let total = add(a, b);";
-            let (iterator, _control) = engine.lex([&text]);
-            let mut rhai_identifiers = Vec::new();
-            for (token, position) in iterator {
-                if matches!(token, Token::EOF) {
-                    break;
+            // Rhai only reports token starts, but an identifier's content gives
+            // its exact length, so both ends can be compared, including for a
+            // final identifier followed by trailing whitespace.
+            for text in ["let  total = add(a, b);", "let final_name   "] {
+                let engine = Engine::new();
+                let (iterator, _control) = engine.lex([&text]);
+                let mut rhai_identifiers = Vec::new();
+                for (token, position) in iterator {
+                    if matches!(token, Token::EOF) {
+                        break;
+                    }
+                    if let Token::Identifier(name) = &token
+                        && let Some(column) = position.position()
+                    {
+                        let start = column - 1;
+                        rhai_identifiers.push((start, start + name.chars().count()));
+                    }
                 }
-                if matches!(token, Token::Identifier(..))
-                    && let Some(column) = position.position()
-                {
-                    rhai_identifiers.push(column - 1);
-                }
-            }
 
-            let (tokens, _) = lex_line(text, LexState::default());
-            let ours: Vec<usize> = tokens
-                .iter()
-                .filter(|token| {
-                    matches!(token.class, TokenClass::Identifier | TokenClass::Function)
-                })
-                .map(|token| token.start)
-                .collect();
-            assert_eq!(ours, rhai_identifiers);
+                let (tokens, _) = lex_line(text, LexState::default());
+                let ours: Vec<(usize, usize)> = tokens
+                    .iter()
+                    .filter(|token| {
+                        matches!(token.class, TokenClass::Identifier | TokenClass::Function)
+                    })
+                    .map(|token| (token.start, token.start + token.len()))
+                    .collect();
+                assert_eq!(ours, rhai_identifiers, "in {text:?}");
+            }
         }
     }
 }
