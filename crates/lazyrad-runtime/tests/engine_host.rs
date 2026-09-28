@@ -136,6 +136,18 @@ fn form_state_outlives_a_single_event() {
 }
 
 #[test]
+fn assigning_a_non_map_to_form_state_is_an_error() {
+    let doc = greeting_doc();
+    run_form(&doc, |host, _form| {
+        let ast = host
+            .compile("fn bad() { form.state = 5; }")
+            .expect("the handler compiles");
+        let error = host.call(&ast, "bad").expect_err("a non-map state fails");
+        assert!(error.message.contains("must be a map"), "{}", error.message);
+    });
+}
+
+#[test]
 fn form_title_persists_across_calls() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {
