@@ -269,3 +269,25 @@ tab_index = 0
     assert_eq!(unknown.file, temp.path().join("frmBroken.lfm"));
     assert_eq!(unknown.line, Some(5), "the `type` line is located");
 }
+
+#[test]
+fn a_project_file_named_differently_from_its_project_is_rejected() {
+    let temp = TempDir::new("name-mismatch");
+    fs::write(
+        temp.path().join("App.lrp"),
+        "name = \"Hello\"\nversion = \"0.1.0\"\nstartup = \"Hello\"\nitems = []\n",
+    )
+    .expect("project file is written");
+
+    let error = Project::load(temp.path()).expect_err("a mismatched name is rejected");
+    let lazyrad_project::Error::Diagnostic(diagnostic) = error else {
+        panic!("expected a diagnostic, got {error:?}");
+    };
+    assert_eq!(diagnostic.kind, DiagnosticKind::ProjectFile);
+    assert_eq!(diagnostic.file, temp.path().join("App.lrp"));
+    assert!(
+        diagnostic.message.contains("Hello.lrp"),
+        "{}",
+        diagnostic.message
+    );
+}

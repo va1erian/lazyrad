@@ -132,11 +132,27 @@ impl Project {
     /// Loads the single `.lrp` file in `dir`.
     ///
     /// Returns a [`DiagnosticKind::ProjectFile`] error when the directory has
-    /// no `.lrp`, or more than one.
+    /// no `.lrp`, more than one, or when the file name is not `<name>.lrp` for
+    /// the `name` inside it. [`Project::save`] and [`Project::validate`] use
+    /// `<name>.lrp`, so a mismatch would make a save create a second file.
     pub fn load(dir: &Path) -> Result<Self, Error> {
         let path = find_project_file(dir)?;
         let text = read_text(&path)?;
-        toml::from_str(&text).map_err(|source| parse_error(&path, &text, source))
+        let project: Self =
+            toml::from_str(&text).map_err(|source| parse_error(&path, &text, source))?;
+        let expected = project.file_name();
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
+            return Err(Error::Diagnostic(Diagnostic::new(
+                DiagnosticKind::ProjectFile,
+                path.clone(),
+                format!(
+                    "project file is named `{}` but its `name` is `{}`; rename it to `{expected}`",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    project.name,
+                ),
+            )));
+        }
+        Ok(project)
     }
 
     /// Serialises the project to `<dir>/<name>.lrp`, writing it only if it
