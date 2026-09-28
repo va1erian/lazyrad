@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use lazyrad_project::{
     Catalog, Diagnostic, Error as ProjectError, FormDoc, Project, ProjectItem, SaveReport,
-    lazyrad_catalog, load_form, save_form, write_if_changed,
+    is_plain_file_name, lazyrad_catalog, load_form, save_form, write_if_changed,
 };
 
 /// The form a "Standard EXE" project starts with.
@@ -82,6 +82,17 @@ impl ProjectSession {
                 "`{name}` is not a valid project name"
             )));
         }
+
+        // Never overwrite: refuse a folder that already holds a project or any
+        // of the files the template writes.
+        refuse_existing(
+            dir,
+            &[
+                format!("{name}.lrp"),
+                format!("{DEFAULT_FORM}.lfm"),
+                format!("{DEFAULT_FORM}.rhai"),
+            ],
+        )?;
 
         let mut project = Project::new(name);
         project.startup = DEFAULT_FORM.to_owned();
@@ -159,7 +170,9 @@ impl ProjectSession {
         // Only now, with every current file written and the `.lrp` pointing at
         // them, remove the files renamed items left behind.
         for stale in std::mem::take(&mut self.stale_files) {
-            if self.references(&stale) {
+            // Delete only plain names inside the project folder, and never a
+            // file a current item still uses.
+            if !is_plain_file_name(&stale) || self.references(&stale) {
                 continue;
             }
             let path = self.dir.join(&stale);
@@ -189,10 +202,35 @@ impl ProjectSession {
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.project.name.clone());
-        self.project.name = name;
-        self.dir = dir;
-        self.dirty = true;
-        self.save()
+        if !is_identifier(&name) {
+            return Err(SessionError::InvalidName(format!(
+                "`{name}` is not a valid project name"
+            )));
+        }
+        // Saving into another folder must not overwrite what is already there.
+        if dir != self.dir {
+            let mut files = vec![format!("{name}.lrp")];
+            for item in &self.project.items {
+                files.extend(
+                    std::iter::once(item.code())
+                        .chain(item.layout())
+                        .map(|path| path.display().to_string()),
+                );
+            }
+            refuse_existing(&dir, &files)?;
+        }
+
+        let old_name = std::mem::replace(&mut self.project.name, name);
+        let old_dir = std::mem::replace(&mut self.dir, dir);
+        let was_dirty = std::mem::replace(&mut self.dirty, true);
+        let result = self.save();
+        if result.is_err() {
+            // A failed Save As leaves the session where it was.
+            self.project.name = old_name;
+            self.dir = old_dir;
+            self.dirty = was_dirty;
+        }
+        result
     }
 
     /// Adds a new form from the form template, returning its name.
@@ -475,6 +513,28 @@ fn io_error(path: &Path, source: std::io::Error) -> SessionError {
     }
 }
 
+/// Fails when `dir` already holds a `.lrp` project or any of `files`.
+fn refuse_existing(dir: &Path, files: &[String]) -> Result<(), SessionError> {
+    if let Some(taken) = files.iter().find(|file| dir.join(file).exists()) {
+        return Err(SessionError::InvalidName(format!(
+            "`{taken}` already exists in {}",
+            dir.display()
+        )));
+    }
+    let has_project = fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension().is_some_and(|ext| ext == "lrp"))
+    });
+    if has_project {
+        return Err(SessionError::InvalidName(format!(
+            "{} already contains a project",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Whether `name` is a valid Rhai-style identifier.
 fn is_identifier(name: &str) -> bool {
     let mut characters = name.chars();
@@ -628,6 +688,54 @@ mod tests {
         assert!(reopened.diagnostics().is_empty());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_refuses_a_folder_that_already_holds_a_project() {
+        let dir = scratch("create-existing");
+        ProjectSession::create("MyApp", &dir).expect("first create succeeds");
+        fs::write(dir.join(format!("{DEFAULT_FORM}.rhai")), "// mine").expect("edit code");
+
+        assert!(matches!(
+            ProjectSession::create("Other", &dir),
+            Err(SessionError::InvalidName(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("{DEFAULT_FORM}.rhai"))).expect("still there"),
+            "// mine",
+            "the existing code is untouched"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_save_as_keeps_the_session_where_it_was() {
+        let dir = scratch("save-as-bad");
+        let target = scratch("save-as-bad-target");
+        let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
+
+        assert!(matches!(
+            session.save_as(&target.join("not valid.lrp")),
+            Err(SessionError::InvalidName(_))
+        ));
+        assert_eq!(session.name(), "MyApp");
+        assert_eq!(session.dir(), dir.as_path());
+
+        fs::create_dir_all(&target).expect("target folder");
+        fs::write(target.join(format!("{DEFAULT_FORM}.rhai")), "// theirs").expect("write");
+        assert!(matches!(
+            session.save_as(&target.join("Copy.lrp")),
+            Err(SessionError::InvalidName(_))
+        ));
+        assert_eq!(session.dir(), dir.as_path(), "the session did not move");
+        assert_eq!(
+            fs::read_to_string(target.join(format!("{DEFAULT_FORM}.rhai"))).expect("still there"),
+            "// theirs"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&target);
     }
 
     #[test]

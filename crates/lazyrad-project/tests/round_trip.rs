@@ -292,3 +292,33 @@ fn a_project_file_named_differently_from_its_project_is_rejected() {
         diagnostic.message
     );
 }
+
+#[test]
+fn item_paths_outside_the_project_folder_are_rejected() {
+    for bad in ["../evil.rhai", "sub/frmMain.rhai", "/etc/evil.rhai"] {
+        let temp = TempDir::new("unsafe-path");
+        fs::write(
+            temp.path().join("App.lrp"),
+            format!(
+                "name = \"App\"\nversion = \"0.1.0\"\nstartup = \"modX\"\n\n[[items]]\nkind = \"module\"\nname = \"modX\"\ncode = {bad:?}\n"
+            ),
+        )
+        .expect("project file is written");
+        let error = Project::load(temp.path()).expect_err("an unsafe item path is rejected");
+        let lazyrad_project::Error::Diagnostic(diagnostic) = error else {
+            panic!("expected a diagnostic for {bad}, got {error:?}");
+        };
+        assert_eq!(diagnostic.kind, DiagnosticKind::ProjectFile, "{bad}");
+    }
+}
+
+#[test]
+fn a_plain_file_name_is_a_single_normal_component() {
+    use lazyrad_project::is_plain_file_name;
+    assert!(is_plain_file_name(Path::new("frmMain.lfm")));
+    assert!(!is_plain_file_name(Path::new("../frmMain.lfm")));
+    assert!(!is_plain_file_name(Path::new("forms/frmMain.lfm")));
+    assert!(!is_plain_file_name(Path::new("/frmMain.lfm")));
+    assert!(!is_plain_file_name(Path::new("")));
+    assert!(!is_plain_file_name(Path::new(".")));
+}

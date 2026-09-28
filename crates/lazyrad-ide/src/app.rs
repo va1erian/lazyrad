@@ -122,12 +122,16 @@ pub enum SaveChoice {
 }
 
 /// What to do once an unsaved project has been dealt with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Pending {
     /// Quit the IDE.
     Exit,
     /// Close the project but keep the IDE open.
     Close,
+    /// Show the New Project prompt.
+    NewProject,
+    /// Open the project in this folder.
+    Open(PathBuf),
 }
 
 /// The map from each command menu entry's [`MenuId`] to the command it raises,
@@ -570,9 +574,25 @@ impl IdeApp {
         match command {
             Command::Exit => self.request_exit(ui),
             Command::CloseProject => self.request_close(ui),
-            Command::NewProject => self.show_prompt(ui, PromptKind::NewProject),
-            Command::OpenProject => self.choose_open(ui),
-            Command::OpenRecent(index) => self.open_recent(index, ui),
+            // Each of these replaces the open project, so unsaved work goes
+            // through the save prompt first, as Exit and Close do.
+            Command::NewProject => {
+                if self.project_dirty() {
+                    self.show_save_prompt(ui, Pending::NewProject);
+                } else {
+                    self.show_prompt(ui, PromptKind::NewProject);
+                }
+            }
+            Command::OpenProject => {
+                if let Some(file) = dialogs::open_project_file() {
+                    self.open_replacing(dialogs::containing_folder(&file), ui);
+                }
+            }
+            Command::OpenRecent(index) => {
+                if let Some(dir) = self.settings.recent_projects.get(index).cloned() {
+                    self.open_replacing(dir, ui);
+                }
+            }
             Command::Save | Command::SaveAll => self.save_project(ui),
             Command::SaveAs => self.save_project_as(ui),
             Command::AddForm => {
@@ -667,17 +687,23 @@ impl IdeApp {
         }
     }
 
-    /// Asks for an `.lrp` file and opens its project.
-    fn choose_open(&mut self, ui: &mut Ui<Msg>) {
-        if let Some(file) = dialogs::open_project_file() {
-            self.open_dir(dialogs::containing_folder(&file), ui);
+    /// Opens the project in `dir` in place of the current one, asking to save
+    /// unsaved changes first.
+    fn open_replacing(&mut self, dir: PathBuf, ui: &mut Ui<Msg>) {
+        if self.project_dirty() {
+            self.show_save_prompt(ui, Pending::Open(dir));
+        } else {
+            self.open_dir(dir, ui);
         }
     }
 
-    /// Opens the project at `index` in the recent list.
-    fn open_recent(&mut self, index: usize, ui: &mut Ui<Msg>) {
-        if let Some(dir) = self.settings.recent_projects.get(index).cloned() {
-            self.open_dir(dir, ui);
+    /// Carries out the action the save prompt was guarding.
+    fn continue_pending(&mut self, pending: Pending, ui: &mut Ui<Msg>) {
+        match pending {
+            Pending::Exit => self.finish_exit(ui),
+            Pending::Close => self.close_project(ui),
+            Pending::NewProject => self.show_prompt(ui, PromptKind::NewProject),
+            Pending::Open(dir) => self.open_dir(dir, ui),
         }
     }
 
@@ -885,10 +911,7 @@ impl IdeApp {
         };
         match choice {
             SaveChoice::Cancel => {}
-            SaveChoice::Discard => match pending {
-                Pending::Exit => self.finish_exit(ui),
-                Pending::Close => self.close_project(ui),
-            },
+            SaveChoice::Discard => self.continue_pending(pending, ui),
             SaveChoice::Save => {
                 let saved = {
                     self.sync_documents();
@@ -901,10 +924,7 @@ impl IdeApp {
                         document.dirty = false;
                     }
                     self.update_title(ui);
-                    match pending {
-                        Pending::Exit => self.finish_exit(ui),
-                        Pending::Close => self.close_project(ui),
-                    }
+                    self.continue_pending(pending, ui);
                 } else {
                     self.log(ui, "The project could not be saved; it is still open.");
                 }
@@ -956,6 +976,9 @@ impl IdeApp {
             Some(session) => Explorer::build(session),
             None => Explorer::empty(),
         };
+        // Tree node ids are row indexes, so a click pending from the old rows
+        // must not pair with a click on whatever now sits at the same index.
+        self.double_click = DoubleClick::new();
         self.tree.set_rows(&self.explorer.rows);
     }
 
@@ -1232,7 +1255,12 @@ impl IdeApp {
             if let DocumentView::Code(editor) = &document.view
                 && let Some(session) = self.session.as_mut()
             {
-                session.set_code(&document.name, editor.text());
+                // Only write back real edits: `set_code` marks the project
+                // dirty, and an unchanged document must not.
+                let text = editor.text();
+                if session.code(&document.name) != Some(text.as_str()) {
+                    session.set_code(&document.name, text);
+                }
             }
         }
     }

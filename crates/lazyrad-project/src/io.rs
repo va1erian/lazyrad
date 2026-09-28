@@ -125,6 +125,16 @@ impl Project {
                 ),
             )));
         }
+        if let Some(bad) = project.unsafe_item_path() {
+            return Err(Error::Diagnostic(Diagnostic::new(
+                DiagnosticKind::ProjectFile,
+                path.clone(),
+                format!(
+                    "item path `{}` must be a plain file name in the project folder",
+                    bad.display()
+                ),
+            )));
+        }
         Ok(project)
     }
 
