@@ -94,6 +94,17 @@ const TAB_HEIGHT: Dip = Dip(22.0);
 const ROW_HEIGHT: Dip = Dip(22.0);
 /// How many rows one mouse-wheel notch scrolls.
 const WHEEL_ROWS: i32 = 3;
+/// The wheel delta of one notch. Both backends report `WHEEL_DELTA` units:
+/// Win32 passes them through and the canvas backend scales winit's line
+/// deltas by it (and passes a touchpad's pixel deltas as-is).
+const WHEEL_NOTCH: i32 = 120;
+
+/// The scroll offset change for a wheel `delta`: [`WHEEL_ROWS`] rows per
+/// notch, proportionally for partial (touchpad) deltas. A positive delta is
+/// "away from the user", which shows earlier rows, so it scrolls up.
+fn wheel_scroll(delta: i16, row_h: i32) -> i32 {
+    -(i32::from(delta) * WHEEL_ROWS * row_h / WHEEL_NOTCH)
+}
 /// The height of a category header, in design units.
 const HEADER_HEIGHT: Dip = Dip(22.0);
 /// The text size for labels and values, in design units.
@@ -1381,10 +1392,10 @@ fn grid_message<M: 'static>(
             if shared.borrow().objects_open {
                 return None;
             }
-            // A notch scrolls three rows; a positive delta is "away from the
-            // user", which shows earlier rows.
-            let step = layout.row_h * WHEEL_ROWS;
-            Some(wrap(PropertyGridMsg::Scroll(-i32::from(*delta) * step)))
+            Some(wrap(PropertyGridMsg::Scroll(wheel_scroll(
+                *delta,
+                layout.row_h,
+            ))))
         }
         Event::KeyDown {
             key,
@@ -1571,5 +1582,28 @@ mod tests {
         );
         let row = rows.iter().find(|row| row.name == "shown").expect("row");
         assert!(!row.editable());
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::wheel_scroll;
+
+    #[test]
+    fn one_notch_scrolls_three_rows() {
+        assert_eq!(
+            wheel_scroll(-120, 22),
+            66,
+            "towards the user shows later rows"
+        );
+        assert_eq!(wheel_scroll(120, 22), -66);
+        assert_eq!(wheel_scroll(-240, 22), 132, "two notches");
+    }
+
+    #[test]
+    fn a_partial_delta_scrolls_proportionally() {
+        // A touchpad reports pixel-sized deltas; a third of a notch is a row.
+        assert_eq!(wheel_scroll(-40, 22), 22);
+        assert_eq!(wheel_scroll(0, 22), 0);
     }
 }
