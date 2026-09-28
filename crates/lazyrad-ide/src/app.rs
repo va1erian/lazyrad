@@ -370,16 +370,9 @@ impl IdeApp {
                     .map(|(_, action)| Msg::ContextAction(*action))
             });
 
+        // Each editor blinks its caret on its own widget timer, stopped when
+        // the editor is dropped, so there is no window timer to forward.
         let editors: Rc<RefCell<Vec<Rc<Editor<Msg>>>>> = Rc::new(RefCell::new(Vec::new()));
-        {
-            let editors = Rc::clone(&editors);
-            ui.on_timer(move |id| {
-                for editor in editors.borrow().iter() {
-                    editor.handle_timer(id);
-                }
-                None
-            });
-        }
 
         let mut app = IdeApp {
             settings,
@@ -1206,9 +1199,6 @@ impl IdeApp {
 
     /// Closes every document and rebuilds the tabs with just the Start Page.
     fn reset_documents(&mut self) -> UiResult<()> {
-        for editor in self.editors.borrow().iter() {
-            self.docs_ui.kill_timer(editor.timer_id());
-        }
         self.editors.borrow_mut().clear();
         self.documents.clear();
         self.rebuild_tabs()
@@ -1225,10 +1215,6 @@ impl IdeApp {
             .iter()
             .map(|document| (document.name.clone(), document.kind))
             .collect();
-        // Stop the old editors' blink timers before their widgets go away.
-        for editor in self.editors.borrow().iter() {
-            self.docs_ui.kill_timer(editor.timer_id());
-        }
         self.editors.borrow_mut().clear();
         self.documents.clear();
         self.docs = None;
