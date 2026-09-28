@@ -32,6 +32,11 @@ xui-canvas = { git = "https://github.com/va1erian/xui", rev = "d89f39257b2f058aa
 # xui's single-threaded widgets (PLAN.md §1).
 rhai = { version = "1", features = ["debugging", "metadata", "internals"] }
 
+# The editor's find/replace supports an optional regular expression (PLAN.md
+# §5): `regex` is the same engine Rhai uses, so the syntax matches the language
+# the user is editing.
+regex = "1"
+
 # Project and form files are plain TOML (PLAN.md §1, §3): serde derives the
 # model, `toml` does the (de)serialisation, and `thiserror` types the errors
 # that carry the file and, where possible, a line number.

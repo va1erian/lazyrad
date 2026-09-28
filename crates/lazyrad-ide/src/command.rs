@@ -51,6 +51,12 @@ pub enum Command {
     SelectAll,
     /// Edit → Find.
     Find,
+    /// Edit → Find Next.
+    FindNext,
+    /// Edit → Replace.
+    Replace,
+    /// Edit → Go To Line.
+    GoToLine,
     /// View → Code.
     ViewCode,
     /// View → Object.
@@ -135,12 +141,15 @@ impl Shortcut {
 /// A human-readable name for the keys the IDE binds.
 fn key_name(key: Key) -> &'static str {
     match key {
+        Key::F3 => "F3",
         Key::F5 => "F5",
         Key::F7 => "F7",
         Key::S => "S",
         Key::N => "N",
         Key::O => "O",
         Key::F => "F",
+        Key::G => "G",
+        Key::H => "H",
         _ => "?",
     }
 }
@@ -168,6 +177,9 @@ impl Command {
         Command::Delete,
         Command::SelectAll,
         Command::Find,
+        Command::FindNext,
+        Command::Replace,
+        Command::GoToLine,
         Command::ViewCode,
         Command::ViewObject,
         Command::ViewProject,
@@ -204,6 +216,9 @@ impl Command {
             Command::Delete => "Delete".to_string(),
             Command::SelectAll => "Select All".to_string(),
             Command::Find => "Find".to_string(),
+            Command::FindNext => "Find Next".to_string(),
+            Command::Replace => "Replace".to_string(),
+            Command::GoToLine => "Go To Line".to_string(),
             Command::ViewCode => "Code".to_string(),
             Command::ViewObject => "Object".to_string(),
             Command::ViewProject => "Project".to_string(),
@@ -233,6 +248,9 @@ impl Command {
             Command::ViewCode => Some(Shortcut::new(false, false, false, Key::F7)),
             Command::ViewObject => Some(Shortcut::new(false, true, false, Key::F7)),
             Command::Find => Some(Shortcut::new(true, false, false, Key::F)),
+            Command::FindNext => Some(Shortcut::new(false, false, false, Key::F3)),
+            Command::Replace => Some(Shortcut::new(true, false, false, Key::H)),
+            Command::GoToLine => Some(Shortcut::new(true, false, false, Key::G)),
             _ => None,
         }
     }
@@ -264,6 +282,9 @@ impl Command {
                 | Command::Delete
                 | Command::SelectAll
                 | Command::Find
+                | Command::FindNext
+                | Command::Replace
+                | Command::GoToLine
                 | Command::ViewCode
                 | Command::ViewObject
                 | Command::AddForm
@@ -422,6 +443,24 @@ mod tests {
             Some(Command::ViewObject)
         );
         assert_eq!(Command::from_keydown(Key::F, ctrl()), Some(Command::Find));
+    }
+
+    #[test]
+    fn the_editing_find_shortcuts_map_to_their_commands() {
+        assert_eq!(
+            Command::from_keydown(Key::F3, Modifiers::NONE),
+            Some(Command::FindNext)
+        );
+        assert_eq!(
+            Command::from_keydown(Key::G, ctrl()),
+            Some(Command::GoToLine)
+        );
+        assert_eq!(
+            Command::from_keydown(Key::H, ctrl()),
+            Some(Command::Replace)
+        );
+        assert_eq!(Command::GoToLine.shortcut_text().as_deref(), Some("Ctrl+G"));
+        assert_eq!(Command::FindNext.shortcut_text().as_deref(), Some("F3"));
     }
 
     #[test]
