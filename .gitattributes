@@ -1,0 +1,3 @@
+# Keep LF everywhere: the project/form round-trip tests compare bytes, and
+# Windows checkouts would otherwise turn sample files into CRLF.
+* text=auto eol=lf

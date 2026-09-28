@@ -1,0 +1,14 @@
+name = "Hello"
+version = "0.1.0"
+startup = "frmMain"
+
+[[items]]
+kind = "form"
+name = "frmMain"
+layout = "frmMain.lfm"
+code = "frmMain.rhai"
+
+[[items]]
+kind = "module"
+name = "modUtil"
+code = "modUtil.rhai"
