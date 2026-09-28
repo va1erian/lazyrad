@@ -4,7 +4,7 @@
 mod common;
 
 use xui_core::geometry::{Rect, Size};
-use xui_form::{BuildOptions, Catalog, FormDoc, Node, Value};
+use xui_form::{BuildOptions, Catalog, FormDoc, Node, Value, ValueType};
 
 use common::{Msg, aliased_catalog, click_node, with_form};
 
@@ -328,6 +328,24 @@ fn relayout_fills_and_anchors_bottom_right() {
     });
     assert_eq!(panel, Some(Rect::new(0, 0, 500, 400)));
     assert_eq!(button, Some(Rect::new(380, 350, 430, 390)));
+}
+
+#[test]
+fn a_form_reports_a_node_kind_and_property_type() {
+    let doc = click_doc();
+    with_form(&doc, &Catalog::xui(), BuildOptions::default(), |form| {
+        assert_eq!(form.kind("cmdGo"), Some("Button"));
+        assert_eq!(form.kind("ghost"), None);
+        assert_eq!(
+            form.property_type("cmdGo", "text"),
+            Some(ValueType::Text { multiline: false })
+        );
+        assert_eq!(
+            form.property_type("cmdGo", "enabled"),
+            Some(ValueType::Bool)
+        );
+        assert_eq!(form.property_type("cmdGo", "nope"), None);
+    });
 }
 
 #[test]

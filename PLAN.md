@@ -117,6 +117,11 @@ then globals such as `app`. Controls are registered custom types that wrap an `R
 handle, so a property setter changes the live widget. (A value *returned* by `on_var`
 is read-only in Rhai, so the resolver pushes the control into the scope instead.)
 
+The resolver **pushes the value into the scope** rather than returning it from the
+callback: Rhai marks a value returned by `on_var` read-only, so a setter such as
+`lbl.caption = …` would fail with a "cannot modify property of constant" error,
+while a pushed variable is an ordinary mutable entry.
+
 ```rhai
 fn hello_button_click() {
     result_label.text = `Hello, ${name_edit.text}!`;
