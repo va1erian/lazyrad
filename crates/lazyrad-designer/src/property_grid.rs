@@ -758,6 +758,11 @@ impl<M: 'static> PropertyGrid<M> {
         self.state.borrow().target.clone()
     }
 
+    /// The message of the last rejected edit, if it is still shown.
+    pub fn error(&self) -> Option<String> {
+        self.state.borrow().error.clone()
+    }
+
     /// Re-reads the designer's selection and document into the grid.
     pub fn sync(&self, ui: &Ui<M>) {
         refresh_rows(
@@ -796,6 +801,16 @@ impl<M: 'static> PropertyGrid<M> {
             }
             PropertyGridMsg::BeginEdit(index) => self.begin_edit(index, ui),
             PropertyGridMsg::CommitText(text) => {
+                // A commit can arrive after its editor closed (Enter, then the
+                // focus loss the close causes); only a live text editor with an
+                // active row commits.
+                let live = {
+                    let state = self.state.borrow();
+                    matches!(state.editor, Some(Editor::Text(_))) && state.active_row.is_some()
+                };
+                if !live {
+                    return;
+                }
                 let parsed = {
                     let state = self.state.borrow();
                     state
@@ -959,12 +974,14 @@ impl<M: 'static> PropertyGrid<M> {
             .designer
             .borrow()
             .set_property(&target, &name, value, ui);
-        {
-            let mut state = self.state.borrow_mut();
-            state.editor = None;
-            state.error = result.err().map(|error| error.to_string());
-        }
+        self.state.borrow_mut().editor = None;
+        // Refresh first: `sync` rebuilds the rows, which clears the error, so a
+        // rejected commit's message is set afterwards and stays visible.
         self.sync(ui);
+        if let Err(error) = result {
+            self.state.borrow_mut().error = Some(error.to_string());
+            ui.invalidate(self.id());
+        }
     }
 }
 

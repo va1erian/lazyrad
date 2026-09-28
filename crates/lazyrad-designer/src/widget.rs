@@ -513,7 +513,11 @@ impl<M: 'static> Designer<M> {
             .surface
             .borrow_mut()
             .set_property(target, name, value.clone())?;
-        if let (Some(old), Value::Text(new)) = (old_name, &value) {
+        // Only a real rename reaches the host (it rewrites the form's script).
+        if let (Some(old), Value::Text(new)) = (old_name, &value)
+            && change.any()
+            && old != *new
+        {
             self.notify_rename(&old, new);
         }
         self.refresh(ui, change);

@@ -899,6 +899,13 @@ impl Surface {
                 return Err(PropertyError::DuplicateName(new_name));
             }
             self.doc.rename(node, &new_name);
+            // Keep the renamed control selected under its new name, so the
+            // property grid and the selection outline follow it.
+            if let Selection::Nodes(names) = &mut self.selection {
+                for selected in names.iter_mut().filter(|selected| *selected == node) {
+                    *selected = new_name.clone();
+                }
+            }
             self.history.record(&self.doc);
             return Ok(Change::STRUCTURE);
         }

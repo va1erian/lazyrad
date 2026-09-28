@@ -251,6 +251,12 @@ fn renaming_a_control_fires_the_rename_sink() {
         editor
             .grid
             .update(PropertyGridMsg::CommitText("go_button".into()), ui);
+        // The renamed control stays selected, so the grid keeps showing it.
+        assert_eq!(
+            editor.designer.borrow().selection(),
+            lazyrad_designer::Selection::Nodes(vec!["go_button".to_owned()])
+        );
+        assert!(!editor.grid.rows().is_empty(), "the grid is not blank");
         *doc_for_app.borrow_mut() = Some(editor.designer.borrow().doc());
         editor
     })
@@ -280,7 +286,7 @@ fn renaming_a_control_fires_the_rename_sink() {
 
 #[test]
 fn an_invalid_name_keeps_the_control_and_reports_an_error() {
-    let (_, doc) = with_editor(button_doc(), |editor, ui| {
+    let (error, doc) = with_editor(button_doc(), |editor, ui| {
         editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(editor, "name");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
@@ -288,8 +294,11 @@ fn an_invalid_name_keeps_the_control_and_reports_an_error() {
         editor
             .grid
             .update(PropertyGridMsg::CommitText("1bad".into()), ui);
+        editor.grid.error()
     });
     assert!(doc.expect("a document").node("ok_button").is_some());
+    let error = error.expect("the grid reports the rejected name");
+    assert!(!error.is_empty());
 }
 
 #[test]
