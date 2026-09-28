@@ -1269,6 +1269,10 @@ impl<M: 'static> PropertyGrid<M> {
         let editor = self.state.borrow_mut().editor.take();
         if editor.is_some() {
             drop(editor);
+            // The editor usually held the keyboard focus, and neither backend
+            // hands it back when its node goes: take it so navigation keys keep
+            // reaching the grid. (Every caller is a grid interaction.)
+            ui.focus(self.id());
             ui.invalidate(self.id());
         }
     }
