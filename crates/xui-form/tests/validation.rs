@@ -3,7 +3,7 @@
 use xui_form::{Catalog, FormDoc, Node, Severity, Value};
 
 fn doc_with(node: Node) -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     doc.insert(node);
     doc
 }
@@ -11,7 +11,7 @@ fn doc_with(node: Node) -> FormDoc {
 #[test]
 fn a_valid_form_has_no_diagnostics() {
     let catalog = Catalog::xui();
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut button = Node::new("Button", "cmdGo");
     button.set_prop("text", Value::Text("Go".to_owned()));
     button.set_prop("width", Value::Int(100));
@@ -32,7 +32,7 @@ fn an_invalid_name_is_an_error() {
 
 #[test]
 fn duplicate_names_are_an_error() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     doc.insert(Node::new("Button", "cmdGo"));
     doc.insert(Node::new("Button", "cmdGo"));
     let diagnostics = doc.validate(&Catalog::xui());
@@ -115,7 +115,7 @@ fn a_missing_parent_is_an_error() {
 
 #[test]
 fn a_cycle_is_an_error() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut a = Node::new("Panel", "panA");
     a.parent = Some("panB".to_owned());
     let mut b = Node::new("Panel", "panB");
@@ -128,7 +128,7 @@ fn a_cycle_is_an_error() {
 
 #[test]
 fn a_duplicate_tab_index_is_a_warning() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut one = Node::new("Button", "cmdOne");
     one.set_prop("tab_index", Value::Int(0));
     let mut two = Node::new("Button", "cmdTwo");

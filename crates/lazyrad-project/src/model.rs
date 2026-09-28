@@ -109,17 +109,17 @@ mod tests {
     #[test]
     fn project_item_accessors_cover_both_variants() {
         let form = ProjectItem::Form {
-            name: "frmMain".to_owned(),
-            layout: PathBuf::from("frmMain.lfm"),
-            code: PathBuf::from("frmMain.rhai"),
+            name: "main_form".to_owned(),
+            layout: PathBuf::from("main_form.lfm"),
+            code: PathBuf::from("main_form.rhai"),
         };
         let module = ProjectItem::Module {
-            name: "modUtil".to_owned(),
-            code: PathBuf::from("modUtil.rhai"),
+            name: "util".to_owned(),
+            code: PathBuf::from("util.rhai"),
         };
-        assert_eq!(form.name(), "frmMain");
-        assert_eq!(form.code(), Path::new("frmMain.rhai"));
-        assert_eq!(form.layout(), Some(Path::new("frmMain.lfm")));
+        assert_eq!(form.name(), "main_form");
+        assert_eq!(form.code(), Path::new("main_form.rhai"));
+        assert_eq!(form.layout(), Some(Path::new("main_form.lfm")));
         assert!(form.is_form());
         assert_eq!(module.layout(), None);
         assert!(!module.is_form());
@@ -129,15 +129,12 @@ mod tests {
     fn startup_item_resolves() {
         let mut project = Project::new("MyApp");
         project.items.push(ProjectItem::Module {
-            name: "modUtil".to_owned(),
-            code: PathBuf::from("modUtil.rhai"),
+            name: "util".to_owned(),
+            code: PathBuf::from("util.rhai"),
         });
         assert!(project.startup_item().is_none());
-        project.startup = "modUtil".to_owned();
-        assert_eq!(
-            project.startup_item().map(ProjectItem::name),
-            Some("modUtil")
-        );
+        project.startup = "util".to_owned();
+        assert_eq!(project.startup_item().map(ProjectItem::name), Some("util"));
         assert_eq!(project.file_name(), "MyApp.lrp");
     }
 }

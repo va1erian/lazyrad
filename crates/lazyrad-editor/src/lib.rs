@@ -8,12 +8,14 @@
 //! not a Scintilla port, so it stays pure Rust and needs no C++ toolchain on
 //! LazyOS. See PLAN.md §5.
 //!
-//! This issue builds the core: the buffer, caret, selection, scrolling, editing,
-//! clipboard and undo. Highlighting and completion come in later issues.
+//! The buffer, caret, selection, scrolling, editing, clipboard and undo are
+//! here, along with the hand-written Rhai [`lexer`] and its incremental
+//! highlighting. Completion comes in a later issue.
 //!
 //! # Layout
 //!
 //! * [`buffer`] — the rope, line index and coalescing undo stack. No UI code.
+//! * [`lexer`] — the UI-free, line-incremental Rhai lexer and bracket matcher.
 //! * [`view`] — the caret, selection and scroll state and its navigation rules.
 //! * [`editor`] — the [`Editor`] widget that ties them to a `Custom` node.
 //! * [`paint`] — the monospace grid painter.
@@ -36,6 +38,7 @@ pub mod buffer;
 mod edit;
 mod editor;
 mod events;
+pub mod lexer;
 pub mod markers;
 mod metrics;
 pub mod options;
@@ -49,6 +52,7 @@ pub mod view;
 
 pub use buffer::Buffer;
 pub use editor::Editor;
+pub use lexer::{LexState, LineLexer, Token, TokenClass};
 pub use markers::{Marker, MarkerKind};
 pub use options::{FontConfig, Options};
 pub use platform::Clipboard;
