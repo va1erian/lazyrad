@@ -98,6 +98,9 @@ pub struct IdeApp {
     /// The Output pane's label, rewritten as commands are logged.
     output: Label<Msg>,
     output_lines: Vec<String>,
+    /// Set when saving the settings on exit failed; the next Exit quits
+    /// without saving, so a read-only config directory cannot trap the user.
+    exit_save_failed: bool,
 }
 
 impl IdeApp {
@@ -207,6 +210,7 @@ impl IdeApp {
             _labels: labels,
             output,
             output_lines: Vec::new(),
+            exit_save_failed: false,
         };
 
         app.apply_theme(ui);
@@ -314,10 +318,21 @@ impl IdeApp {
     /// Runs a command: applying the ones that exist and logging the rest.
     fn run_command(&mut self, command: Command, ui: &mut Ui<Msg>) {
         match command {
-            Command::Exit => {
-                let _ = self.settings.save();
-                ui.quit();
-            }
+            Command::Exit => match self.settings.save() {
+                Ok(()) => ui.quit(),
+                Err(_) if self.exit_save_failed => ui.quit(),
+                Err(error) => {
+                    // Keep the IDE open so the user sees why; a second Exit
+                    // (or window close) quits and discards the unsaved layout.
+                    self.exit_save_failed = true;
+                    self.log(
+                        ui,
+                        format!(
+                            "Settings could not be saved ({error}). Exit again to quit without saving them."
+                        ),
+                    );
+                }
+            },
             Command::ThemeLight => self.set_theme(ui, ThemeChoice::Light),
             Command::ThemeDark => self.set_theme(ui, ThemeChoice::Dark),
             Command::ThemeSystem => self.set_theme(ui, ThemeChoice::System),

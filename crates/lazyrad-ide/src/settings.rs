@@ -18,6 +18,27 @@ pub const RECENT_LIMIT: usize = 10;
 /// The config directory's application name.
 const APP: &str = "LazyRAD";
 
+/// A temporary path next to `path` that no other save uses: two IDE instances
+/// saving at once, or two saves in one process, never share a temporary file.
+fn unique_temp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "settings".to_owned());
+    path.with_file_name(format!(
+        ".{name}.{}.{nanos}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
 /// Which theme the IDE should use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -144,8 +165,11 @@ impl Settings {
             std::fs::create_dir_all(parent).map_err(SettingsError::Io)?;
         }
         let text = self.to_toml()?;
-        let temp = path.with_extension("toml.tmp");
-        std::fs::write(&temp, text).map_err(SettingsError::Io)?;
+        let temp = unique_temp_path(path);
+        std::fs::write(&temp, text).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            SettingsError::Io(error)
+        })?;
         std::fs::rename(&temp, path).map_err(|error| {
             let _ = std::fs::remove_file(&temp);
             SettingsError::Io(error)
@@ -266,9 +290,23 @@ mod tests {
             .save_to(&path)
             .expect("settings save over an existing file");
         assert_eq!(Settings::load_from(&path).expect("settings load"), settings);
-        assert!(!path.with_extension("toml.tmp").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("settings directory is readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn every_save_gets_its_own_temporary_file() {
+        let path = Path::new("config").join("settings.toml");
+        let first = unique_temp_path(&path);
+        let second = unique_temp_path(&path);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent(), "renames stay on one volume");
     }
 
     #[test]
