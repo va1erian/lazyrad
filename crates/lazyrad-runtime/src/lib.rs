@@ -11,7 +11,16 @@
 //! §4.
 //!
 //! [`engine`] builds the scripting engine and [`shell`] opens the toolkit
-//! window the player and IDE share.
+//! window the player and IDE share. [`control`] holds the Rhai control and form
+//! types, [`value`] is the one place form values and Rhai values are converted,
+//! and [`error`] locates a script failure.
 
+pub mod control;
 pub mod engine;
+pub mod error;
 pub mod shell;
+pub mod value;
+
+pub use control::FormHost;
+pub use engine::{EngineHost, new_engine};
+pub use error::ScriptError;

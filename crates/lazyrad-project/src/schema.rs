@@ -1,32 +1,19 @@
 #![forbid(unsafe_code)]
 
-//! The LazyRAD control catalog: the shared `xui-form` catalog plus the VB-style
-//! control names LazyRAD exposes.
+//! The LazyRAD control catalog.
 //!
-//! The heavy lifting lives in [`xui_form::Catalog`]. LazyRAD only adds aliases,
-//! so `CommandButton` resolves to the portable `Button` spec without copying it.
-//! The designer's toolbox, the property grid and the code editor's completion
-//! all read the same catalog.
+//! LazyRAD uses the portable [`xui_form::Catalog`] as is: control kinds and
+//! property names are xui's own (`Button`, `Edit`, `text`, `selected`…), with
+//! no VB6 aliases. VB6 inspires the IDE's workflow, not the names in code
+//! (PLAN.md §1). This function stays the single place LazyRAD adds its own
+//! kinds or catalog tweaks, so the designer's toolbox, the property grid and
+//! the code editor's completion all read the same catalog.
 
 use xui_form::Catalog;
 
-/// The LazyRAD catalog: [`Catalog::xui`] with the VB6 control names as aliases.
-///
-/// | VB name | Portable kind |
-/// |---|---|
-/// | `CommandButton` | `Button` |
-/// | `TextBox` | `Edit` |
-/// | `Frame` | `GroupBox` |
-/// | `ListBox` | `ListView` |
-/// | `OptionButton` | `RadioGroup` |
+/// The LazyRAD catalog: currently exactly [`Catalog::xui`].
 pub fn lazyrad_catalog() -> Catalog {
-    let mut catalog = Catalog::xui();
-    catalog.alias("CommandButton", "Button");
-    catalog.alias("TextBox", "Edit");
-    catalog.alias("Frame", "GroupBox");
-    catalog.alias("ListBox", "ListView");
-    catalog.alias("OptionButton", "RadioGroup");
-    catalog
+    Catalog::xui()
 }
 
 #[cfg(test)]
@@ -34,20 +21,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vb_names_resolve_to_portable_kinds() {
+    fn the_catalog_uses_the_portable_kind_names() {
         let catalog = lazyrad_catalog();
-        for (vb, kind) in [
-            ("CommandButton", "Button"),
-            ("TextBox", "Edit"),
-            ("Frame", "GroupBox"),
-            ("ListBox", "ListView"),
-            ("OptionButton", "RadioGroup"),
-        ] {
-            assert_eq!(catalog.resolve(vb), Some(kind), "{vb}");
-            assert!(catalog.get(vb).is_some(), "{vb} resolves");
+        for kind in ["Button", "Edit", "GroupBox", "ListView", "RadioGroup"] {
+            assert!(catalog.get(kind).is_some(), "{kind}");
         }
-        // The portable kinds remain available under their own names.
-        assert!(catalog.get("Button").is_some());
-        assert!(catalog.get("ListView").is_some());
+        for vb in [
+            "CommandButton",
+            "TextBox",
+            "Frame",
+            "ListBox",
+            "OptionButton",
+        ] {
+            assert!(catalog.get(vb).is_none(), "no VB alias for {vb}");
+        }
     }
 }

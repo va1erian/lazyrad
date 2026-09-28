@@ -230,7 +230,7 @@ enum DocumentView {
         _labels: Vec<Label<Msg>>,
     },
     /// The code editor, with the two procedure combos for a form's code.
-    Code(CodeView),
+    Code(Box<CodeView>),
 }
 
 /// One open code document: the editor and, for a form, its procedure combos.
@@ -423,7 +423,7 @@ impl IdeApp {
             Rect::new(8, 8, 132, 28),
             "Toolbox",
         )?);
-        for (index, name) in ["Label", "Edit", "Button", "CheckBox", "ListBox"]
+        for (index, name) in ["Label", "Edit", "Button", "CheckBox", "ListView"]
             .iter()
             .enumerate()
         {
@@ -475,16 +475,16 @@ impl IdeApp {
                     .map(|(_, action)| Msg::ContextAction(*action))
             });
 
+        // Each editor blinks its caret on its own widget timer, stopped when
+        // the editor is dropped, so there is no window timer to forward.
         let editors: Rc<RefCell<Vec<Rc<Editor<Msg>>>>> = Rc::new(RefCell::new(Vec::new()));
+        // Editors blink their carets on their own widget timers; the window
+        // timer only drives the compile debounce.
         let diagnostics = Rc::new(RefCell::new(CompileScheduler::new()));
         {
-            let editors = Rc::clone(&editors);
             let diagnostics = Rc::clone(&diagnostics);
             let proxy = ui.proxy();
-            ui.on_timer(move |id| {
-                for editor in editors.borrow().iter() {
-                    editor.handle_timer(id);
-                }
+            ui.on_timer(move |_id| {
                 // A change armed the debounce; when it comes due, hand the
                 // newest source to a worker. The engine is built there, since
                 // it is not `Send`.
@@ -1884,16 +1884,17 @@ impl IdeApp {
                     objects,
                     object_index: is_form.then_some(0),
                 };
-                Ok((DocumentView::Code(view), ids, format!("{name}.rhai")))
+                Ok((
+                    DocumentView::Code(Box::new(view)),
+                    ids,
+                    format!("{name}.rhai"),
+                ))
             }
         }
     }
 
     /// Closes every document and rebuilds the tabs with just the Start Page.
     fn reset_documents(&mut self) -> UiResult<()> {
-        for editor in self.editors.borrow().iter() {
-            self.docs_ui.kill_timer(editor.timer_id());
-        }
         self.editors.borrow_mut().clear();
         self.documents.clear();
         self.errors.clear();
@@ -1912,10 +1913,6 @@ impl IdeApp {
             .iter()
             .map(|document| (document.name.clone(), document.kind))
             .collect();
-        // Stop the old editors' blink timers before their widgets go away.
-        for editor in self.editors.borrow().iter() {
-            self.docs_ui.kill_timer(editor.timer_id());
-        }
         self.editors.borrow_mut().clear();
         self.documents.clear();
         self.docs = None;

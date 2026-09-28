@@ -58,10 +58,54 @@ pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<SaveReport, Erro
         {
             fs::create_dir_all(parent).map_err(|source| Error::io(parent, source))?;
         }
-        fs::write(path, contents).map_err(|source| Error::io(path, source))?;
+        write_no_follow(path, contents).map_err(|source| Error::io(path, source))?;
         report.written.push(path.to_path_buf());
     }
     Ok(report)
+}
+
+/// Writes `contents` to `path` without following a symbolic link at `path`.
+///
+/// The link check happens on the opened handle, not before the open, so a file
+/// swapped for a link after the project was loaded cannot redirect the write
+/// outside the project folder.
+fn write_no_follow(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Opening a link fails with `ELOOP`.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Open the link itself rather than its target; it is refused below.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(not(any(unix, windows)))]
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(symlink_refused());
+    }
+    let mut file = options.open(path)?;
+    if file.metadata()?.file_type().is_symlink() {
+        return Err(symlink_refused());
+    }
+    // Truncate only after the handle is known to be the file itself.
+    file.set_len(0)?;
+    file.write_all(contents)
+}
+
+/// The error for a write that would go through a symbolic link.
+fn symlink_refused() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "refusing to write through a symbolic link",
+    )
 }
 
 /// The bytes of `path`, or `None` when the file does not exist.
@@ -134,6 +178,24 @@ impl Project {
                     bad.display()
                 ),
             )));
+        }
+        // A plain name can still be a symlink pointing elsewhere; following it
+        // would read (and later write) outside the project folder.
+        for item in &project.items {
+            for relative in std::iter::once(item.code()).chain(item.layout()) {
+                let linked = fs::symlink_metadata(dir.join(relative))
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+                if linked {
+                    return Err(Error::Diagnostic(Diagnostic::new(
+                        DiagnosticKind::ProjectFile,
+                        path.clone(),
+                        format!(
+                            "item file `{}` is a symbolic link; project files must be regular files in the project folder",
+                            relative.display()
+                        ),
+                    )));
+                }
+            }
         }
         Ok(project)
     }
@@ -258,6 +320,21 @@ mod tests {
         let path = dir.join("a/b/file.txt");
         let report = write_if_changed(&path, b"x").expect("write creates parents");
         assert_eq!(report.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_if_changed_does_not_follow_a_symlink() {
+        let dir = scratch("no-follow");
+        let outside = dir.join("outside.txt");
+        fs::write(&outside, b"keep").expect("target is written");
+        let link = dir.join("item.rhai");
+        std::os::unix::fs::symlink(&outside, &link).expect("link is created");
+
+        write_if_changed(&link, b"overwrite").expect_err("a link is refused");
+        assert_eq!(fs::read(&outside).expect("target is readable"), b"keep");
+
         let _ = fs::remove_dir_all(&dir);
     }
 

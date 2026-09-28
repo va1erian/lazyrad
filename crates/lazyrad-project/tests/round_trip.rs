@@ -85,7 +85,7 @@ fn sample_project_round_trips_byte_for_byte() {
     let project = Project::load(temp.path()).expect("sample project loads");
     assert_eq!(
         project.startup_item().map(|item| item.name()),
-        Some("frmMain")
+        Some("main_form")
     );
     let forms = project
         .load_forms(temp.path(), &catalog)
@@ -93,11 +93,11 @@ fn sample_project_round_trips_byte_for_byte() {
     assert_eq!(forms.len(), 1);
 
     let (name, form) = &forms[0];
-    assert_eq!(name, "frmMain");
-    let command = form.node("cmdHello").expect("command button exists");
-    assert_eq!(command.kind, "CommandButton");
+    assert_eq!(name, "main_form");
+    let button = form.node("hello_button").expect("the button exists");
+    assert_eq!(button.kind, "Button");
     assert_eq!(
-        command.prop("text"),
+        button.prop("text"),
         Some(&Value::Text("Say hello".to_owned()))
     );
 
@@ -161,9 +161,9 @@ fn editing_one_control_writes_only_its_form() {
     let catalog = lazyrad_catalog();
 
     let project = Project::load(temp.path()).expect("sample project loads");
-    let form_path = temp.path().join("frmMain.lfm");
+    let form_path = temp.path().join("main_form.lfm");
     let mut form = load_form(&form_path, &catalog).expect("form loads");
-    form.node_mut("cmdHello")
+    form.node_mut("hello_button")
         .expect("command button exists")
         .set_prop("left", Value::Int(24));
 
@@ -321,4 +321,35 @@ fn a_plain_file_name_is_a_single_normal_component() {
     assert!(!is_plain_file_name(Path::new("/frmMain.lfm")));
     assert!(!is_plain_file_name(Path::new("")));
     assert!(!is_plain_file_name(Path::new(".")));
+}
+
+/// Symlinks need no privilege on Unix; on Windows creating one usually does, so
+/// the check is exercised on Linux CI.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_item_file_is_rejected() {
+    let temp = TempDir::new("symlink-item");
+    let outside = TempDir::new("symlink-target");
+    fs::write(outside.path().join("secret.rhai"), "// outside").expect("target");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.rhai"),
+        temp.path().join("util.rhai"),
+    )
+    .expect("symlink");
+    fs::write(
+        temp.path().join("app.lrp"),
+        "name = \"app\"\nversion = \"0.1.0\"\nstartup = \"util\"\n\n[[items]]\nkind = \"module\"\nname = \"util\"\ncode = \"util.rhai\"\n",
+    )
+    .expect("project file");
+
+    let error = Project::load(temp.path()).expect_err("a symlinked item is rejected");
+    let lazyrad_project::Error::Diagnostic(diagnostic) = error else {
+        panic!("expected a diagnostic, got {error:?}");
+    };
+    assert_eq!(diagnostic.kind, DiagnosticKind::ProjectFile);
+    assert!(
+        diagnostic.message.contains("symbolic link"),
+        "{}",
+        diagnostic.message
+    );
 }
