@@ -68,7 +68,10 @@ impl ThemeChoice {
 }
 
 /// The persisted sizes of the IDE's docked panes, in design units.
+///
+/// A partial `[panes]` table keeps the defaults for the sizes it omits.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaneSizes {
     /// The toolbox's width on the left.
     pub toolbox: f32,
@@ -138,13 +141,14 @@ impl Settings {
         }
     }
 
-    /// Reads settings from `path`; a missing file yields the defaults.
+    /// Reads settings from `path`; a missing file yields the defaults, and any
+    /// other I/O error is reported.
     pub fn load_from(path: &Path) -> Result<Settings, SettingsError> {
-        if !path.exists() {
-            return Ok(Settings::default());
+        match std::fs::read_to_string(path) {
+            Ok(text) => Settings::from_toml(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+            Err(error) => Err(SettingsError::Io(error)),
         }
-        let text = std::fs::read_to_string(path).map_err(SettingsError::Io)?;
-        Settings::from_toml(&text)
     }
 
     /// Writes the settings to the default path, creating the directory.
@@ -316,5 +320,26 @@ mod tests {
             Settings::load_from(&path).expect("a missing file is not an error"),
             Settings::default()
         );
+    }
+
+    #[test]
+    fn a_partial_panes_table_keeps_the_other_defaults() {
+        let settings =
+            Settings::from_toml("[panes]\ntoolbox = 150.0\n").expect("partial panes load");
+        let defaults = PaneSizes::default();
+        assert_eq!(settings.panes.toolbox, 150.0);
+        assert_eq!(settings.panes.right, defaults.right);
+        assert_eq!(settings.panes.output, defaults.output);
+        assert_eq!(settings.panes.project, defaults.project);
+    }
+
+    #[test]
+    fn an_unreadable_path_is_an_error_not_defaults() {
+        // A directory exists but cannot be read as a file.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(matches!(
+            Settings::load_from(dir),
+            Err(SettingsError::Io(_))
+        ));
     }
 }
