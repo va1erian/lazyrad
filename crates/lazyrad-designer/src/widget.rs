@@ -47,7 +47,8 @@ use xui_form::{
 
 use crate::geometry::{DesignRect, Handle};
 use crate::surface::{
-    Change, CursorHint, DEFAULT_GRID, KeyInput, KeyPress, Outcome, Selection, Surface,
+    Change, CursorHint, DEFAULT_GRID, KeyInput, KeyPress, Outcome, PropertyError, Selection,
+    Surface, Target,
 };
 use crate::toolbox::ToolboxMsg;
 
@@ -119,6 +120,10 @@ fn first_message(diagnostics: &[xui_form::Diagnostic]) -> &str {
 /// A callback the host registers to observe selection changes.
 type SelectionSink = Rc<dyn Fn(&Selection)>;
 
+/// A callback the host registers to observe node renames, so it can rewrite the
+/// form's `.rhai` handler names (see [`rename_handlers`](crate::rename_handlers)).
+type RenameSink = Rc<dyn Fn(&str, &str)>;
+
 /// The binder used for the design preview; design mode never consults it.
 struct NoopBinder;
 
@@ -143,7 +148,8 @@ pub struct Designer<M: 'static> {
     binder: NoopBinder,
     catalog: Rc<Catalog>,
     wrap: Rc<dyn Fn(DesignerMsg) -> M>,
-    on_selection: RefCell<Option<SelectionSink>>,
+    on_selection: RefCell<Vec<SelectionSink>>,
+    on_rename: RefCell<Option<RenameSink>>,
     design_mode: Cell<bool>,
 }
 
@@ -201,7 +207,8 @@ impl<M: 'static> Designer<M> {
             binder: NoopBinder,
             catalog,
             wrap: Rc::new(wrap),
-            on_selection: RefCell::new(None),
+            on_selection: RefCell::new(Vec::new()),
+            on_rename: RefCell::new(None),
             design_mode: Cell::new(true),
         };
         designer.rebuild(ui).map_err(restore)?;
@@ -227,12 +234,32 @@ impl<M: 'static> Designer<M> {
     /// Registers a sink called whenever the selection changes (the property
     /// grid of issue #14 connects here). Replaces any previous sink.
     pub fn set_selection_sink(&self, sink: impl Fn(&Selection) + 'static) {
-        *self.on_selection.borrow_mut() = Some(Rc::new(sink));
+        let mut sinks = self.on_selection.borrow_mut();
+        sinks.clear();
+        sinks.push(Rc::new(sink));
     }
 
-    /// Removes the selection sink.
+    /// Adds a selection sink without removing the ones already registered, so a
+    /// property grid and a host can both observe the selection.
+    pub fn add_selection_sink(&self, sink: impl Fn(&Selection) + 'static) {
+        self.on_selection.borrow_mut().push(Rc::new(sink));
+    }
+
+    /// Removes every selection sink.
     pub fn clear_selection_sink(&self) {
-        *self.on_selection.borrow_mut() = None;
+        self.on_selection.borrow_mut().clear();
+    }
+
+    /// Registers a sink called when a control is renamed, with the old and new
+    /// names. The host rewrites the form's `.rhai` handlers from this (see
+    /// [`rename_handlers`](crate::rename_handlers)). Replaces any previous sink.
+    pub fn set_rename_sink(&self, sink: impl Fn(&str, &str) + 'static) {
+        *self.on_rename.borrow_mut() = Some(Rc::new(sink));
+    }
+
+    /// Removes the rename sink.
+    pub fn clear_rename_sink(&self) {
+        *self.on_rename.borrow_mut() = None;
     }
 
     /// Whether the window is in design mode, as the designer set it.
@@ -248,6 +275,13 @@ impl<M: 'static> Designer<M> {
     /// A clone of the document being edited.
     pub fn doc(&self) -> FormDoc {
         self.surface.borrow().doc().clone()
+    }
+
+    /// The value of `prop` on the live widget named `name`, if the preview
+    /// built and the widget reports it. Useful to confirm an edit reached the
+    /// live form without a rebuild.
+    pub fn live_value(&self, name: &str, prop: &str) -> Option<Value> {
+        self.live.borrow().as_ref()?.get(name, prop)
     }
 
     /// The grid spacing in design units.
@@ -436,6 +470,82 @@ impl<M: 'static> Designer<M> {
         });
     }
 
+    /// Selects the node named `name`, if it exists, returning whether the
+    /// selection changed.
+    pub fn select_node(&self, name: &str, ui: &Ui<M>) -> bool {
+        self.apply(ui, |surface| {
+            if surface.select_node(name) {
+                Outcome::changed(Change::SELECTION)
+            } else {
+                Outcome::none()
+            }
+        })
+    }
+
+    /// Selects a property-grid target (the form or a node), returning whether
+    /// the selection changed.
+    pub fn select_object(&self, target: &Target, ui: &Ui<M>) -> bool {
+        match target {
+            Target::Form => {
+                let changed = !self.selection().is_form();
+                self.apply(ui, |surface| {
+                    surface.select_form();
+                    Outcome::changed(Change::SELECTION)
+                });
+                changed
+            }
+            Target::Node(name) => self.select_node(name, ui),
+        }
+    }
+
+    /// Applies one undoable property edit (the property grid's command) and
+    /// refreshes the live preview. Renaming a node also notifies the rename
+    /// sink. Returns whether anything changed.
+    pub fn set_property(
+        &self,
+        target: &Target,
+        name: &str,
+        value: Value,
+        ui: &Ui<M>,
+    ) -> Result<bool, PropertyError> {
+        let old_name = match (target, name) {
+            (Target::Node(node), "name") => self
+                .surface
+                .borrow()
+                .doc()
+                .node(node)
+                .map(|node| node.name.clone()),
+            _ => None,
+        };
+        let change = self
+            .surface
+            .borrow_mut()
+            .set_property(target, name, value.clone())?;
+        // Only a real rename reaches the host (it rewrites the form's script).
+        if let (Some(old), Value::Text(new)) = (old_name, &value)
+            && change.any()
+            && old != *new
+        {
+            self.notify_rename(&old, new);
+        }
+        self.refresh(ui, change);
+        Ok(change.any())
+    }
+
+    /// The form's name followed by every control's name, in document order,
+    /// paired with the property-grid target each identifies.
+    pub fn objects(&self) -> Vec<(String, Target)> {
+        let surface = self.surface.borrow();
+        let doc = surface.doc();
+        let mut objects = vec![(doc.window.name.clone(), Target::Form)];
+        objects.extend(
+            doc.nodes
+                .iter()
+                .map(|node| (node.name.clone(), Target::Node(node.name.clone()))),
+        );
+        objects
+    }
+
     /// Runs a surface command and refreshes the live preview, returning whether
     /// anything changed.
     fn apply(&self, ui: &Ui<M>, command: impl FnOnce(&mut Surface) -> Outcome) -> bool {
@@ -456,6 +566,8 @@ impl<M: 'static> Designer<M> {
             ui.focus(self.id());
         } else if change.geometry {
             self.sync_geometry(ui);
+        } else if change.property {
+            self.sync_properties();
         }
         if change.selection {
             self.notify_selection();
@@ -534,6 +646,23 @@ impl<M: 'static> Designer<M> {
         ui.apply_moves(&[(self.id(), bounds)]);
     }
 
+    /// Pushes every node's stored property into the live widgets, so a
+    /// non-geometry edit (`text`, `enabled`, `visible`, `checked`, …) shows
+    /// immediately without a full rebuild. Values a widget does not report are
+    /// ignored.
+    fn sync_properties(&self) {
+        {
+            let surface = self.surface.borrow();
+            if let Some(live) = self.live.borrow().as_ref() {
+                for node in &surface.doc().nodes {
+                    for (name, value) in &node.props {
+                        let _ = live.set(&node.name, name, value);
+                    }
+                }
+            }
+        }
+    }
+
     /// Sizes the preview panel to the document's client area and returns its
     /// bounds. Called on geometry edits and on every rebuild, so an undo, redo
     /// or `set_doc` that changes the form size keeps panel and overlay in step.
@@ -555,10 +684,18 @@ impl<M: 'static> Designer<M> {
         )
     }
 
-    /// Calls the selection sink, if any, with the current selection.
+    /// Calls every selection sink, if any, with the current selection.
     fn notify_selection(&self) {
-        if let Some(sink) = self.on_selection.borrow().as_ref() {
-            sink(self.surface.borrow().selection());
+        let selection = self.surface.borrow().selection().clone();
+        for sink in self.on_selection.borrow().iter() {
+            sink(&selection);
+        }
+    }
+
+    /// Calls the rename sink, if any, with the old and new control names.
+    fn notify_rename(&self, old: &str, new: &str) {
+        if let Some(sink) = self.on_rename.borrow().as_ref() {
+            sink(old, new);
         }
     }
 }
