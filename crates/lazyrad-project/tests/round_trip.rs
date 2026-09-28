@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lazyrad_project::{
-    DiagnosticKind, FORM_EXTENSION, Form, Project, PropValue, SchemaRegistry, write_if_changed,
+    Diagnostic, DiagnosticKind, FORM_EXTENSION, Project, ProjectItem, lazyrad_catalog, load_form,
+    save_form, write_if_changed,
 };
+use xui_form::Value;
 
 /// The sample project shipped with the repository.
 fn sample_dir() -> PathBuf {
@@ -54,8 +56,7 @@ fn copy_dir(from: &Path, to: &Path) {
         let path = entry.path();
         if path.is_file() {
             let bytes = fs::read(&path).expect("sample file is readable");
-            let normalized = normalize(&bytes);
-            fs::write(to.join(entry.file_name()), normalized).expect("file is copied");
+            fs::write(to.join(entry.file_name()), normalize(&bytes)).expect("file is copied");
         }
     }
 }
@@ -75,12 +76,11 @@ fn normalize(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The `SaveReport` is asserted to be empty in the round-trip test.
 #[test]
 fn sample_project_round_trips_byte_for_byte() {
     let temp = TempDir::new("round-trip");
     copy_dir(&sample_dir(), temp.path());
-    let registry = SchemaRegistry::builtin();
+    let catalog = lazyrad_catalog();
 
     let project = Project::load(temp.path()).expect("sample project loads");
     assert_eq!(
@@ -88,22 +88,23 @@ fn sample_project_round_trips_byte_for_byte() {
         Some("frmMain")
     );
     let forms = project
-        .load_forms(temp.path(), registry)
+        .load_forms(temp.path(), &catalog)
         .expect("sample forms load");
     assert_eq!(forms.len(), 1);
 
     let (name, form) = &forms[0];
     assert_eq!(name, "frmMain");
-    let combo = form.control("cboGreeting").expect("combo exists");
+    let command = form.node("cmdHello").expect("command button exists");
+    assert_eq!(command.kind, "CommandButton");
     assert_eq!(
-        combo.prop("style"),
-        Some(&PropValue::Enum("dropdown".to_owned()))
+        command.prop("text"),
+        Some(&Value::Text("Say hello".to_owned()))
     );
 
     // Saving every kind of file, twice, leaves every byte untouched.
-    save_everything(temp.path(), registry);
+    save_everything(temp.path(), &catalog);
     let first = snapshot(temp.path());
-    save_everything(temp.path(), registry);
+    save_everything(temp.path(), &catalog);
     let second = snapshot(temp.path());
     assert_eq!(first, second, "a save cycle changed the sample project");
     assert_eq!(
@@ -114,20 +115,17 @@ fn sample_project_round_trips_byte_for_byte() {
 }
 
 /// Loads, saves and checks the whole project once.
-///
-/// Every save must be a no-op: the sample is already in the serialiser's
-/// canonical form, and code files are written only when they differ.
-fn save_everything(dir: &Path, registry: &SchemaRegistry) {
+fn save_everything(dir: &Path, catalog: &lazyrad_project::Catalog) {
     let project = Project::load(dir).expect("project loads");
     assert!(project.save(dir).expect("project saves").is_empty());
 
-    for (name, form) in project
-        .load_forms(dir, registry)
-        .expect("forms load")
-        .iter()
-    {
+    for (name, form) in project.load_forms(dir, catalog).expect("forms load").iter() {
         let path = dir.join(format!("{name}.{FORM_EXTENSION}"));
-        assert!(form.save(&path).expect("form saves").is_empty());
+        assert!(
+            save_form(&path, form, catalog)
+                .expect("form saves")
+                .is_empty()
+        );
     }
 
     for item in &project.items {
@@ -160,14 +158,16 @@ fn snapshot(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
 fn editing_one_control_writes_only_its_form() {
     let temp = TempDir::new("only-changed");
     copy_dir(&sample_dir(), temp.path());
-    let registry = SchemaRegistry::builtin();
+    let catalog = lazyrad_catalog();
 
     let project = Project::load(temp.path()).expect("sample project loads");
-    let mut form = Form::load(&temp.path().join("frmMain.lfm"), registry).expect("form loads");
-    form.controls[0].left += 8;
-
     let form_path = temp.path().join("frmMain.lfm");
-    let report = form.save(&form_path).expect("changed form saves");
+    let mut form = load_form(&form_path, &catalog).expect("form loads");
+    form.node_mut("cmdHello")
+        .expect("command button exists")
+        .set_prop("left", Value::Int(24));
+
+    let report = save_form(&form_path, &form, &catalog).expect("changed form saves");
     assert_eq!(report.len(), 1);
     assert!(report.contains(&form_path));
 
@@ -175,7 +175,11 @@ fn editing_one_control_writes_only_its_form() {
     assert!(project.save(temp.path()).expect("project saves").is_empty());
 
     // Saving the edit again is a no-op.
-    assert!(form.save(&form_path).expect("form saves again").is_empty());
+    assert!(
+        save_form(&form_path, &form, &catalog)
+            .expect("form saves again")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -183,7 +187,7 @@ fn the_sample_project_validates_cleanly() {
     let temp = TempDir::new("valid");
     copy_dir(&sample_dir(), temp.path());
     let project = Project::load(temp.path()).expect("sample project loads");
-    let diagnostics = project.validate(temp.path(), SchemaRegistry::builtin());
+    let diagnostics = project.validate(temp.path());
     assert!(
         diagnostics.is_empty(),
         "unexpected diagnostics: {diagnostics:?}"
@@ -197,7 +201,7 @@ fn missing_startup_and_files_are_located_in_the_project_file() {
         name: "Broken".to_owned(),
         version: "0.1.0".to_owned(),
         startup: "ghost".to_owned(),
-        items: vec![lazyrad_project::ProjectItem::Form {
+        items: vec![ProjectItem::Form {
             name: "frmBroken".to_owned(),
             layout: PathBuf::from("frmBroken.lfm"),
             code: PathBuf::from("frmBroken.rhai"),
@@ -205,7 +209,7 @@ fn missing_startup_and_files_are_located_in_the_project_file() {
     };
     project.save(temp.path()).expect("project saves");
 
-    let diagnostics = project.validate(temp.path(), SchemaRegistry::builtin());
+    let diagnostics = project.validate(temp.path());
     let project_file = temp.path().join("Broken.lrp");
 
     let startup = diagnostics
@@ -215,7 +219,7 @@ fn missing_startup_and_files_are_located_in_the_project_file() {
     assert_eq!(startup.file, project_file);
     assert!(startup.line.is_some(), "startup is located");
 
-    let missing: Vec<&lazyrad_project::Diagnostic> = diagnostics
+    let missing: Vec<&Diagnostic> = diagnostics
         .iter()
         .filter(|diagnostic| diagnostic.kind == DiagnosticKind::MissingFile)
         .collect();
@@ -235,7 +239,7 @@ fn form_problems_are_located_in_the_form_file() {
         name: "Broken".to_owned(),
         version: "0.1.0".to_owned(),
         startup: "frmBroken".to_owned(),
-        items: vec![lazyrad_project::ProjectItem::Form {
+        items: vec![ProjectItem::Form {
             name: "frmBroken".to_owned(),
             layout: PathBuf::from("frmBroken.lfm"),
             code: PathBuf::from("frmBroken.rhai"),
@@ -246,28 +250,25 @@ fn form_problems_are_located_in_the_form_file() {
     fs::write(
         temp.path().join("frmBroken.lfm"),
         "\
-[form]
+format = 1
+
+[window]
 name = \"frmBroken\"
 
-[[control]]
-type = \"NoSuchWidget\"
+[[node]]
+kind = \"NoSuchWidget\"
 name = \"bad\"
-left = 0
-top = 0
-width = 10
-height = 10
-tab_index = 0
 ",
     )
     .expect("form is written");
 
-    let diagnostics = project.validate(temp.path(), SchemaRegistry::builtin());
-    let unknown = diagnostics
+    let diagnostics = project.validate(temp.path());
+    let invalid = diagnostics
         .iter()
-        .find(|diagnostic| diagnostic.kind == DiagnosticKind::UnknownControlType)
-        .unwrap_or_else(|| panic!("unknown type is reported: {diagnostics:?}"));
-    assert_eq!(unknown.file, temp.path().join("frmBroken.lfm"));
-    assert_eq!(unknown.line, Some(5), "the `type` line is located");
+        .find(|diagnostic| diagnostic.kind == DiagnosticKind::InvalidForm)
+        .unwrap_or_else(|| panic!("invalid form is reported: {diagnostics:?}"));
+    assert_eq!(invalid.file, temp.path().join("frmBroken.lfm"));
+    assert_eq!(invalid.line, Some(7), "the `kind` line is located");
 }
 
 #[test]

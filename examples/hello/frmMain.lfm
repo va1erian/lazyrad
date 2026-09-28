@@ -1,46 +1,37 @@
-[form]
-name = "frmMain"
-caption = "Hello"
-width = 320
-height = 200
+format = 1
 
-[[control]]
-type = "Label"
+[window]
+name = "frmMain"
+title = "Hello"
+
+[[node]]
+kind = "Label"
 name = "lblPrompt"
 left = 16
 top = 16
-width = 120
-height = 20
-tab_index = 0
-caption = "Enter your name:"
+width = 130
+text = "Enter your name:"
 
-[[control]]
-type = "TextBox"
+[[node]]
+kind = "TextBox"
 name = "txtName"
 left = 16
 top = 44
 width = 200
-height = 24
-tab_index = 1
-text = ""
 
-[[control]]
-type = "ComboBox"
+[[node]]
+kind = "ComboBox"
 name = "cboGreeting"
 left = 16
 top = 76
 width = 200
-height = 24
-tab_index = 2
-style = "dropdown"
+items = ["Hello", "Hi", "Hey"]
 
-[[control]]
-type = "CommandButton"
+[[node]]
+kind = "CommandButton"
 name = "cmdHello"
 left = 16
 top = 108
 width = 120
 height = 32
-tab_index = 3
-caption = "Say hello"
-default = true
+text = "Say hello"

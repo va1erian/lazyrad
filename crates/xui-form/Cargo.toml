@@ -1,6 +1,6 @@
 [package]
-name = "lazyrad-project"
-description = "LazyRAD project and form file model: load, save and validate .lrp/.lfm files"
+name = "xui-form"
+description = "Declarative forms for xui: schema, document, validation and a widget builder"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+xui-core.workspace = true
 serde.workspace = true
-thiserror.workspace = true
 toml.workspace = true
-xui-form.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+xui-canvas.workspace = true
+serde_json = "1"

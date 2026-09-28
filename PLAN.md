@@ -30,7 +30,8 @@ of the **xui gaps** LazyRAD will run into, along with a proposed fix for each.
 lazyrad/
 ├─ Cargo.toml                 (workspace)
 ├─ crates/
-│  ├─ lazyrad-project/        project + form file model (serde), load/save, validation
+│  ├─ xui-form/               declarative forms for xui: schema, document, validation, builder
+│  ├─ lazyrad-project/        .lrp project files + the LazyRAD control catalog
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
 │  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (JSON lines over stdio)
 │  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir, a payload, or --debug
@@ -61,25 +62,33 @@ MyApp/
 └─ clsStack.rhai      # class module (see §4.3)
 ```
 
-A form file looks like this:
+A form file is an [`xui-form`](crates/xui-form) document (`.lfm`), a flat list of
+nodes with `parent` references and a typed schema. The schema comes from
+`xui-form`; LazyRAD registers the VB-style control names as aliases
+(`CommandButton`→`Button`, `TextBox`→`Edit`, `Frame`→`GroupBox`,
+`ListBox`→`ListView`, `OptionButton`→`RadioGroup`) in `lazyrad_catalog()`. It
+looks like this:
 
 ```toml
-[form]
-name = "frmMain"
-caption = "Hello"
-width = 320
-height = 200
+format = 1
 
-[[control]]
-type = "CommandButton"
+[window]
+name = "frmMain"
+title = "Hello"
+
+[[node]]
+kind = "CommandButton"
 name = "cmdHello"
 left = 16
 top = 16
 width = 120
 height = 32
-caption = "Say hello"
-tab_index = 0
+text = "Say hello"
 ```
+
+`xui-form` owns the schema, the `FormDoc` document, validation, and the builder
+that turns a document into live `xui` widgets. `lazyrad-project` keeps only the
+`.lrp` project file and the LazyRAD catalog; it has no form model of its own.
 
 **Event binding** follows VB naming conventions. The runtime looks for
 `fn <control>_<event>(args…)` in the form's script (`cmdHello_Click`, `Form_Load`,
@@ -230,15 +239,18 @@ designer uses both. Only the portable versions remain; see the note under §10.
   top draws the dot grid, the selection rectangle, eight resize handles, alignment
   guides and the rubber-band marquee. The overlay handles all mouse input: hit-testing
   against the model's rectangles, capture for drags, and `set_cursor` for handles.
-- **Model-first:** the designer edits the `lazyrad-project` form model and re-applies
-  it to the widgets through `apply_moves` and `set_property`. Undo and redo operate on
-  the model.
+- **Model-first:** the designer edits the `xui-form` [`FormDoc`](crates/xui-form)
+  and re-applies it to the live widgets through `LiveForm::set` / `apply_moves`.
+  Undo and redo operate on the model. The preview is built with
+  `build_with(.., BuildOptions { design_mode: true })`, which consults no event
+  binder, while the host has called `Ui::set_design_mode(true)`.
 - **Toolbox:** a grid of control types. You either click a type and draw it, or
   double-click to drop it at a default size. It needs icon buttons (gap G9).
 - **Property grid:** a two-column list of name and value with editors per type: text,
   number, bool, enum dropdown, colour, font, and a `…` button for dialogs. It is a new
-  widget (gap G5). A `Properties` extension supplies each control's schema (gap G6).
-  An object combo above the grid selects the control.
+  widget (gap G5). The `xui-form` `Catalog` supplies each control's typed schema,
+  with its category, description and access rule. An object combo above the grid
+  selects the control.
 - **Double-click on a control:** this opens the code window at
   `fn <name>_<default event>()`, creating the function if it does not exist, exactly
   as VB does. The procedure combos at the top of the code window list the control's

@@ -4,6 +4,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/xui-form",
     "crates/lazyrad-project",
     "crates/lazyrad-runtime",
     "crates/lazyrad-player",
@@ -44,6 +45,7 @@ thiserror = "2"
 directories = "6"
 dark-light = "3"
 
+xui-form = { path = "crates/xui-form" }
 lazyrad-project = { path = "crates/lazyrad-project" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime" }
 lazyrad-editor = { path = "crates/lazyrad-editor" }
