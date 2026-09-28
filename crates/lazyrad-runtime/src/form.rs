@@ -390,6 +390,8 @@ impl FormInstance {
             .map(|function| (function.name.to_owned(), function.params.len()))
             .collect();
         register_form_refs(&mut host, runtime);
+        // Top-level code runs once, here; handlers run on the imports-only AST.
+        let ast = host.prepare(&ast)?;
 
         let instance = FormInstance {
             name: source.name.clone(),
@@ -421,11 +423,14 @@ impl FormInstance {
         let Some(&arity) = self.functions.get(&function) else {
             return Ok(());
         };
-        let arguments: Vec<Dynamic> = args
+        // Rhai matches a function by name *and* arity, so a handler declaring
+        // more parameters than the event carries gets `()` for the rest.
+        let mut arguments: Vec<Dynamic> = args
             .iter()
             .take(arity)
             .map(crate::value::to_dynamic)
             .collect();
+        arguments.resize(arity, Dynamic::UNIT);
         let _ = self.host.call_with(&self.ast, &function, arguments)?;
         Ok(())
     }
