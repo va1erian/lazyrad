@@ -36,8 +36,14 @@ rhai = { version = "1", features = ["debugging", "metadata", "internals"] }
 # model, `toml` does the (de)serialisation, and `thiserror` types the errors
 # that carry the file and, where possible, a line number.
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.9"
 thiserror = "2"
+
+# `now()` and `today()` report the local clock. Only the offset lookup and
+# the core date/time types are needed; formatting is done by the runtime, so
+# the macros and parsing features are left off (PLAN.md §4.4).
+time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
 
 # The IDE shell persists its settings (theme, editor font, recent projects and
 # pane sizes) as TOML in the OS config directory resolved by `directories`
