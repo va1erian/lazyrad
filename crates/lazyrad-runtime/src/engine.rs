@@ -12,11 +12,11 @@
 //! Rhai functions cannot see the enclosing scope, so `txtName.text` inside
 //! `fn cmdHello_Click()` would not resolve by itself. [`EngineHost`] installs an
 //! [`Engine::on_var`] resolver that, for an unknown name, looks up the active
-//! form's controls, then `Me`, then the registered globals.
+//! form's controls, then `form`, then the registered globals.
 //!
 //! The resolver *pushes the value into the scope* rather than returning it. A
 //! value returned from `on_var` is marked read-only by Rhai, so a setter such as
-//! `lbl.caption = …` would fail with a "cannot modify property of constant"
+//! `label.text = …` would fail with a "cannot modify property of constant"
 //! error; a pushed variable is a normal mutable entry and the setter works.
 //!
 //! # Limits and stopping
@@ -68,7 +68,7 @@ struct Progress {
 
 /// A Rhai engine wired to one form, with the compiled-script helpers around it.
 ///
-/// The host owns the resolver, the form object (`Me`) and the globals, so a
+/// The host owns the resolver, the form object (`form`) and the globals, so a
 /// script sees the same form across events. Compile errors and runtime errors
 /// are both returned as a located [`ScriptError`].
 pub struct EngineHost {
@@ -83,7 +83,7 @@ pub struct EngineHost {
 
 impl EngineHost {
     /// Creates an engine whose unknown names resolve to `host`'s controls,
-    /// `Me`, then the globals (which start empty).
+    /// `form`, then the globals (which start empty).
     ///
     /// `catalog` supplies the property names each control accepts and the
     /// schema used to decode script values. `stdlib` connects the Iteration 1
@@ -128,7 +128,7 @@ impl EngineHost {
             }
             if let Some(control) = controls.get(name) {
                 context.scope_mut().push(name, control.clone());
-            } else if name == "Me" {
+            } else if name == "form" {
                 context.scope_mut().push(name, form.clone());
             } else if let Some(value) = globals_resolver.borrow().get(name) {
                 context.scope_mut().push(name, value.clone());
@@ -162,7 +162,7 @@ impl EngineHost {
         &self.file
     }
 
-    /// Adds or replaces a global, resolved after controls and `Me`.
+    /// Adds or replaces a global, resolved after controls and `form`.
     ///
     /// The stdlib's `App` and `Debug` objects are registered this way.
     pub fn set_global(&mut self, name: impl Into<String>, value: Dynamic) {

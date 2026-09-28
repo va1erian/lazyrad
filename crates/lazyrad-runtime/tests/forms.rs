@@ -91,11 +91,13 @@ fn clicking_the_sample_hello_button_updates_the_label() {
     let slot = Rc::clone(&capture);
 
     run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
-        let app = runtime.build_app(ui, "frmMain").expect("frmMain builds");
+        let app = runtime
+            .build_app(ui, "main_form")
+            .expect("main_form builds");
         let form = app.root_form().expect("the form is live").clone();
-        form.set("txtName", "text", &Value::Text("World".to_owned()))
+        form.set("name_edit", "text", &Value::Text("World".to_owned()))
             .expect("the name field is writable");
-        click(&backend_for_click, ui, &form, "cmdHello");
+        click(&backend_for_click, ui, &form, "hello_button");
         *slot.borrow_mut() = Some(form);
         app
     })
@@ -103,15 +105,15 @@ fn clicking_the_sample_hello_button_updates_the_label() {
 
     let form = capture.borrow_mut().take().expect("the form was captured");
     assert_eq!(
-        form.get("lblOut", "text"),
+        form.get("result_label", "text"),
         Some(Value::Text("Hello, World!".to_owned()))
     );
 }
 
 #[test]
 fn a_missing_handler_leaves_the_event_unwired() {
-    let mut doc = FormDoc::new("frmMain");
-    let mut button = Node::new("CommandButton", "cmdNo");
+    let mut doc = FormDoc::new("main_form");
+    let mut button = Node::new("Button", "cmdNo");
     button.set_prop("left", Value::Int(10));
     button.set_prop("top", Value::Int(10));
     button.set_prop("width", Value::Int(100));
@@ -119,7 +121,7 @@ fn a_missing_handler_leaves_the_event_unwired() {
     button.set_prop("text", Value::Text("No handler".to_owned()));
     doc.insert(button);
 
-    let mut label = Node::new("Label", "lblOut");
+    let mut label = Node::new("Label", "result_label");
     label.set_prop("left", Value::Int(10));
     label.set_prop("top", Value::Int(50));
     label.set_prop("width", Value::Int(160));
@@ -128,9 +130,9 @@ fn a_missing_handler_leaves_the_event_unwired() {
 
     let runtime = FormRuntime::from_sources(
         vec![FormSource::new(
-            "frmMain",
+            "main_form",
             doc,
-            "fn something_else() { lblOut.caption = \"after\"; }",
+            "fn something_else() { result_label.text = \"after\"; }",
         )],
         Vec::new(),
     );
@@ -141,7 +143,9 @@ fn a_missing_handler_leaves_the_event_unwired() {
     let slot = Rc::clone(&capture);
 
     run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
-        let app = runtime.build_app(ui, "frmMain").expect("frmMain builds");
+        let app = runtime
+            .build_app(ui, "main_form")
+            .expect("main_form builds");
         let form = app.root_form().expect("the form is live").clone();
         click(&backend_for_click, ui, &form, "cmdNo");
         *slot.borrow_mut() = Some(form);
@@ -151,7 +155,7 @@ fn a_missing_handler_leaves_the_event_unwired() {
 
     let form = capture.borrow_mut().take().expect("the form was captured");
     assert_eq!(
-        form.get("lblOut", "text"),
+        form.get("result_label", "text"),
         Some(Value::Text("before".to_owned())),
         "clicking a control with no handler must not run anything"
     );
@@ -159,8 +163,8 @@ fn a_missing_handler_leaves_the_event_unwired() {
 
 #[test]
 fn showing_another_form_opens_a_secondary_window() {
-    let mut main = FormDoc::new("frmMain");
-    let mut open = Node::new("CommandButton", "cmdOpen");
+    let mut main = FormDoc::new("main_form");
+    let mut open = Node::new("Button", "open_button");
     open.set_prop("left", Value::Int(10));
     open.set_prop("top", Value::Int(10));
     open.set_prop("width", Value::Int(100));
@@ -170,8 +174,12 @@ fn showing_another_form_opens_a_secondary_window() {
 
     let runtime = FormRuntime::from_sources(
         vec![
-            FormSource::new("frmMain", main, "fn cmdOpen_Click() { frmOther.show(); }"),
-            FormSource::new("frmOther", FormDoc::new("frmOther"), ""),
+            FormSource::new(
+                "main_form",
+                main,
+                "fn open_button_click() { other_form.show(); }",
+            ),
+            FormSource::new("other_form", FormDoc::new("other_form"), ""),
         ],
         Vec::new(),
     );
@@ -181,24 +189,24 @@ fn showing_another_form_opens_a_secondary_window() {
     let runtime_for_app = Rc::clone(&runtime);
     run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
         let app = runtime_for_app
-            .build_app(ui, "frmMain")
-            .expect("frmMain builds");
+            .build_app(ui, "main_form")
+            .expect("main_form builds");
         let form = app.root_form().expect("the form is live").clone();
-        click(&backend_for_click, ui, &form, "cmdOpen");
+        click(&backend_for_click, ui, &form, "open_button");
         app
     })
     .expect("the event loop runs");
 
     assert!(
-        runtime.is_open("frmOther"),
-        "frmOther.show() opens a secondary window"
+        runtime.is_open("other_form"),
+        "other_form.show() opens a secondary window"
     );
 }
 
 #[test]
 fn a_standard_module_can_be_imported_by_name() {
-    let mut doc = FormDoc::new("frmMain");
-    let mut label = Node::new("Label", "lblOut");
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
     label.set_prop("left", Value::Int(10));
     label.set_prop("top", Value::Int(10));
     label.set_prop("width", Value::Int(160));
@@ -206,19 +214,19 @@ fn a_standard_module_can_be_imported_by_name() {
 
     let runtime = FormRuntime::from_sources(
         vec![FormSource::new(
-            "frmMain",
+            "main_form",
             doc,
-            "fn Form_Load() { import \"modUtil\" as util; lblOut.caption = util::Greeting(\"Grace\"); }",
+            "fn form_load() { import \"util\" as util; result_label.text = util::greeting(\"Grace\"); }",
         )],
         vec![ModuleSource::new(
-            "modUtil",
-            "fn Greeting(name) { `Hello, ${name}!` }",
+            "util",
+            "fn greeting(name) { `Hello, ${name}!` }",
         )],
     );
 
-    let form = capture_form(runtime, "frmMain");
+    let form = capture_form(runtime, "main_form");
     assert_eq!(
-        form.get("lblOut", "text"),
+        form.get("result_label", "text"),
         Some(Value::Text("Hello, Grace!".to_owned()))
     );
 }
@@ -276,8 +284,8 @@ fn a_form_script_can_use_the_standard_library() {
 
 #[test]
 fn a_standard_module_function_is_callable_from_a_form() {
-    let mut doc = FormDoc::new("frmMain");
-    let mut label = Node::new("Label", "lblOut");
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
     label.set_prop("left", Value::Int(10));
     label.set_prop("top", Value::Int(10));
     label.set_prop("width", Value::Int(160));
@@ -285,19 +293,19 @@ fn a_standard_module_function_is_callable_from_a_form() {
 
     let runtime = FormRuntime::from_sources(
         vec![FormSource::new(
-            "frmMain",
+            "main_form",
             doc,
-            "fn Form_Load() { lblOut.caption = Greeting(\"Ada\"); }",
+            "fn form_load() { result_label.text = greeting(\"Ada\"); }",
         )],
         vec![ModuleSource::new(
-            "modUtil",
-            "fn Greeting(name) { `Hello, ${name}!` }",
+            "util",
+            "fn greeting(name) { `Hello, ${name}!` }",
         )],
     );
 
-    let form = capture_form(runtime, "frmMain");
+    let form = capture_form(runtime, "main_form");
     assert_eq!(
-        form.get("lblOut", "text"),
+        form.get("result_label", "text"),
         Some(Value::Text("Hello, Ada!".to_owned()))
     );
 }

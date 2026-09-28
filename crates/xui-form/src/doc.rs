@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn duplicate_and_cycle_edits_are_plain_data() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut a = Node::new("Panel", "panA");
         a.set_prop("width", Value::Int(200));
         a.set_prop("height", Value::Int(120));
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn remove_cascades_to_descendants() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut panel = Node::new("Panel", "panA");
         panel.set_prop("width", Value::Int(10));
         doc.insert(panel);

@@ -17,13 +17,13 @@
 //! nothing. [`FormApp::update`] runs the matching Rhai function through the
 //! form's [`EngineHost`].
 //!
-//! VB event names differ from `xui`'s: a list's double-click is `xui`'s
-//! `Activate`, a check box's click is its `Toggle`, and so on. [`vb_event_names`]
-//! maps each `xui` event to the handler suffixes to look for.
+//! A handler's name is the control name and `xui`'s event name in snake_case,
+//! joined by `_` ([`handler_name`]): `hello_button_click`, `name_edit_change`,
+//! `agree_check_toggle` (PLAN.md §1.1).
 //!
 //! # Window events
 //!
-//! `Form_Load` runs once the form is built and `Form_Unload` runs when the
+//! `form_load` runs once the form is built and `form_close` runs when the
 //! window is asked to close (the window then closes for real). The window spec
 //! itself comes from [`Catalog::window_spec`](xui_form::Catalog::window_spec).
 //!
@@ -31,11 +31,11 @@
 //!
 //! Every [`ProjectItem::Module`](lazyrad_project::ProjectItem) is compiled and
 //! registered as a Rhai module on each form's engine, so a form can either
-//! `import "modUtil" as util` or call the module's functions directly.
+//! `import "util" as util` or call the module's functions directly.
 //!
 //! # Multiple forms
 //!
-//! A script calls `frmOther.show()` (or `frmOther.unload()`) on a form object;
+//! A script calls `other_form.show()` (or `other_form.unload()`) on a form object;
 //! [`FormRef`] records the request and [`FormApp`] opens a non-modal secondary
 //! window with [`Ui::open_window`]. Modal display is not supported in Iteration
 //! 1 (PLAN.md §10, G14).
@@ -76,7 +76,7 @@ pub struct FormSource {
     pub doc: FormDoc,
     /// The `.rhai` code-behind.
     pub code: String,
-    /// The code file, for error locations (for example `frmMain.rhai`).
+    /// The code file, for error locations (for example `main_form.rhai`).
     pub code_file: String,
 }
 
@@ -301,12 +301,12 @@ impl FormRuntime {
             .ok_or_else(|| RuntimeError::UnknownForm(form.to_owned()))?;
         let root = Rc::new(FormInstance::build(ui, source, self)?);
 
-        // `Form_Unload` runs in the close mapper and then the runtime performs
+        // `form_close` runs in the close mapper and then the runtime performs
         // its normal close: a primary window quits the loop, a secondary one
         // does not. Intercepting the close with a message would skip that quit.
         let root_for_close = Rc::clone(&root);
         ui.on_close(move || {
-            if let Err(error) = root_for_close.run("Form", "Unload", &[]) {
+            if let Err(error) = root_for_close.run(FORM, "Close", &[]) {
                 eprintln!("lazyrad: {error}");
             }
             None
@@ -346,7 +346,7 @@ pub struct FormInstance {
 }
 
 impl FormInstance {
-    /// Builds `source`'s widgets, wires its handlers and runs `Form_Load`.
+    /// Builds `source`'s widgets, wires its handlers and runs `form_load`.
     fn build(
         ui: &mut Ui<Msg>,
         source: &FormSource,
@@ -398,7 +398,7 @@ impl FormInstance {
             ast,
             functions,
         };
-        instance.run("Form", "Load", &[])?;
+        instance.run(FORM, "Load", &[])?;
         Ok(instance)
     }
 
@@ -415,13 +415,9 @@ impl FormInstance {
     /// Runs the handler for `control`'s `event`, if the script defines one.
     ///
     /// A missing handler is not an error: the event is simply ignored. Window
-    /// events pass `control = "Form"`, so `Load` maps to `Form_Load`.
+    /// events pass [`FORM`] as the control, so `Load` maps to `form_load`.
     pub fn run(&self, control: &str, event: &str, args: &[Value]) -> Result<(), ScriptError> {
-        let function = if control == "Form" {
-            format!("Form_{event}")
-        } else {
-            format!("{control}_{event}")
-        };
+        let function = handler_name(control, event);
         let Some(&arity) = self.functions.get(&function) else {
             return Ok(());
         };
@@ -623,7 +619,7 @@ impl App for FormApp {
     }
 }
 
-/// The `frmOther` object a script calls `show`/`unload` on.
+/// The `other_form` object a script calls `show`/`unload` on.
 #[derive(Clone)]
 pub struct FormRef {
     name: String,
@@ -678,14 +674,13 @@ struct ScriptBinder {
 
 impl Binder<Msg> for ScriptBinder {
     fn bind(&self, event: EventRef<'_>) -> Option<EventHandler<Msg>> {
-        let candidates = vb_event_names(event.event);
-        let event_name = candidates
-            .iter()
-            .find(|candidate| {
-                self.functions
-                    .contains(&format!("{}_{candidate}", event.node))
-            })
-            .map(|candidate| (*candidate).to_owned())?;
+        if !self
+            .functions
+            .contains(&handler_name(event.node, event.event))
+        {
+            return None;
+        }
+        let event_name = event.event.to_owned();
 
         let form = self.form.clone();
         let control = event.node.to_owned();
@@ -700,20 +695,31 @@ impl Binder<Msg> for ScriptBinder {
     }
 }
 
-/// The VB-style handler suffixes to look for, given an `xui` event name.
-///
-/// The first match wins, so `Click` is preferred where a VB control's click is
-/// the common spelling and an explicit `Toggle`/`Activate` name is a fallback.
-fn vb_event_names(event: &str) -> Vec<&str> {
-    match event {
-        "Click" => vec!["Click"],
-        "Change" => vec!["Change"],
-        "Commit" => vec!["Change", "Commit"],
-        "Toggle" => vec!["Click", "Toggle"],
-        "Select" => vec!["Click", "Select"],
-        "Activate" => vec!["DblClick", "Activate"],
-        other => vec![other],
+/// The control name window events are raised for: `form_load`, `form_close`.
+pub const FORM: &str = "form";
+
+/// The script function that handles `control`'s `event`: the control name and
+/// the event name in snake_case, joined by `_` (PLAN.md §1.1). `xui`'s events
+/// are PascalCase (`Click`, `Toggle`), so `hello_button` + `Click` becomes
+/// `hello_button_click`.
+pub fn handler_name(control: &str, event: &str) -> String {
+    format!("{control}_{}", snake_case(event))
+}
+
+/// `PascalCase` or `camelCase` to `snake_case`.
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
+        if character.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
     }
+    out
 }
 
 /// The function names `source` defines, or a located parse error.
@@ -803,20 +809,26 @@ mod tests {
     }
 
     #[test]
-    fn vb_event_names_map_to_vb_spellings() {
-        assert_eq!(vb_event_names("Click"), vec!["Click"]);
-        assert_eq!(vb_event_names("Change"), vec!["Change"]);
-        assert_eq!(vb_event_names("Toggle"), vec!["Click", "Toggle"]);
-        assert_eq!(vb_event_names("Activate"), vec!["DblClick", "Activate"]);
-        assert_eq!(vb_event_names("Select"), vec!["Click", "Select"]);
-        assert_eq!(vb_event_names("Custom"), vec!["Custom"]);
+    fn handler_names_are_snake_case() {
+        assert_eq!(handler_name("hello_button", "Click"), "hello_button_click");
+        assert_eq!(handler_name("agree_check", "Toggle"), "agree_check_toggle");
+        assert_eq!(
+            handler_name("items_list", "Activate"),
+            "items_list_activate"
+        );
+        assert_eq!(handler_name(FORM, "Load"), "form_load");
+        assert_eq!(handler_name(FORM, "Close"), "form_close");
+        assert_eq!(
+            handler_name("grid", "SelectionChanged"),
+            "grid_selection_changed"
+        );
     }
 
     #[test]
     fn a_missing_handler_is_not_bound() {
         let binder = ScriptBinder {
-            form: "frmMain".to_owned(),
-            functions: Rc::new(BTreeSet::from(["cmdGo_Click".to_owned()])),
+            form: "main_form".to_owned(),
+            functions: Rc::new(BTreeSet::from(["go_button_click".to_owned()])),
         };
         let spec = Catalog::xui()
             .get("Button")
@@ -825,30 +837,30 @@ mod tests {
             .expect("Button has a Click event");
 
         let bound = binder.bind(EventRef {
-            node: "cmdGo",
+            node: "go_button",
             event: "Click",
             spec: &spec,
         });
-        assert!(bound.is_some(), "cmdGo_Click is defined");
+        assert!(bound.is_some(), "go_button_click is defined");
 
         let missing = binder.bind(EventRef {
-            node: "cmdOther",
+            node: "other_button",
             event: "Click",
             spec: &spec,
         });
-        assert!(missing.is_none(), "cmdOther_Click is not defined");
+        assert!(missing.is_none(), "other_button_click is not defined");
     }
 
     #[test]
     fn script_functions_collects_every_definition() {
         let names = script_functions(
-            "fn Form_Load() {}\nfn cmdGo_Click(x) {}\nfn helper() {}",
-            "frmMain.rhai",
+            "fn form_load() {}\nfn go_button_click(x) {}\nfn helper() {}",
+            "main_form.rhai",
         )
         .expect("the script compiles");
         assert_eq!(names.len(), 3);
-        assert!(names.contains("Form_Load"));
-        assert!(names.contains("cmdGo_Click"));
+        assert!(names.contains("form_load"));
+        assert!(names.contains("go_button_click"));
     }
 
     #[test]

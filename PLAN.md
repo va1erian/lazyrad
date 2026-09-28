@@ -1,6 +1,6 @@
 # LazyRAD — Plan
 
-LazyRAD is a RAD IDE in the spirit of Visual Basic 6. It is written in Rust, uses the
+LazyRAD is a RAD IDE with the development workflow of Visual Basic 6. It is written in Rust, uses the
 [xui](https://github.com/va1erian/xui) toolkit for its UI, and uses
 [Rhai](https://rhai.rs) as its scripting language. You draw a form, double-click a
 button, write the handler, press F5, step through it in the debugger, then export a
@@ -21,6 +21,17 @@ of the **xui gaps** LazyRAD will run into, along with a proposed fix for each.
 | Running the user program | **A separate process**: the same "player" binary that export uses, launched with `--debug` | The IDE stays responsive while the program is paused or stuck in a loop. What you debug is exactly what you ship, and a crash never takes down the IDE. |
 | Executable format | A prebuilt player stub with the project appended as a payload | It needs no compiler or linker on the user's machine. It works for PE (as an overlay) and ELF alike, including musl builds for LazyOS. |
 | File formats | Plain text: TOML for the project and forms, `.rhai` for code | It diffs well, merges well, and can be edited by hand, like VB6's `.vbp`/`.frm`. |
+| VB6's role | **The workflow, not the code.** Draw a form, double-click a control to jump to its handler, F5 to run, an integrated debugger: that is what LazyRAD takes from VB6. Everything in code follows modern conventions (§1.1) | The goal is VB6's ease of use in a modern tool, not a VB6 clone. |
+
+### 1.1 Code conventions
+
+These apply to everything a user writes or sees in code, and to LazyRAD's own APIs:
+
+- **Control kinds and properties are xui's names**, with no VB aliases: `Button`, `Edit`, `Label`, `CheckBox`, `RadioGroup`, `GroupBox`, `ListView`, `ComboBox`; `text`, `selected`, `checked`, `enabled`, `visible`, `left`/`top`/`width`/`height`.
+- **Names are snake_case.** Default control names are the kind plus a number (`button1`, `edit1`); projects, forms and modules too (`main_form`, `util`).
+- **Handlers are `fn <control>_<event>(args…)`** in snake_case, with xui's event names lowercased: `fn hello_button_click()`, `fn name_edit_change(text)`. The form's own events use the `form` prefix: `fn form_load()`, `fn form_close()`.
+- **The current form is `form`** in scripts (`form.title`, `form.state`, `form.show()`), replacing VB's `Me`.
+- **The stdlib is snake_case, 0-based and small.** It leans on Rhai's built-in string, math and collection functions and only adds what they lack (`msg_box`, `app`, `debug`, time). There are no VB-compatibility helpers (`Left$`, `Mid$`, `Val`…).
 
 ---
 
@@ -54,31 +65,28 @@ available so xui fixes can be made in a local checkout and upstreamed.
 ## 3. Project model
 
 ```text
-MyApp/
-├─ MyApp.lrp          # project: name, version, startup form/module, icon, references
-├─ frmMain.lfm        # form layout (TOML) — controls, properties, menu tree
-├─ frmMain.rhai       # form code-behind: event handlers + form-level functions
-├─ modUtil.rhai       # standard module: shared functions, exported as a Rhai module
-└─ clsStack.rhai      # class module (see §4.3)
+my_app/
+├─ my_app.lrp         # project: name, version, startup form/module, icon, references
+├─ main_form.lfm      # form layout (TOML) — controls, properties, menu tree
+├─ main_form.rhai     # form code-behind: event handlers + form-level functions
+├─ util.rhai          # module: shared functions, exported as a Rhai module
+└─ stack.rhai         # class module (see §4.3)
 ```
 
 A form file is an [`xui-form`](crates/xui-form) document (`.lfm`), a flat list of
-nodes with `parent` references and a typed schema. The schema comes from
-`xui-form`; LazyRAD registers the VB-style control names as aliases
-(`CommandButton`→`Button`, `TextBox`→`Edit`, `Frame`→`GroupBox`,
-`ListBox`→`ListView`, `OptionButton`→`RadioGroup`) in `lazyrad_catalog()`. It
-looks like this:
+nodes with `parent` references and a typed schema. The schema is `xui-form`'s own,
+read through `lazyrad_catalog()`, with no aliases. It looks like this:
 
 ```toml
 format = 1
 
 [window]
-name = "frmMain"
+name = "main_form"
 title = "Hello"
 
 [[node]]
-kind = "CommandButton"
-name = "cmdHello"
+kind = "Button"
+name = "hello_button"
 left = 16
 top = 16
 width = 120
@@ -90,9 +98,9 @@ text = "Say hello"
 that turns a document into live `xui` widgets. `lazyrad-project` keeps only the
 `.lrp` project file and the LazyRAD catalog; it has no form model of its own.
 
-**Event binding** follows VB naming conventions. The runtime looks for
-`fn <control>_<event>(args…)` in the form's script (`cmdHello_Click`, `Form_Load`,
-`txtName_Change`) and connects each one to the matching xui `on_*` closure. When a
+**Event binding** is by naming convention (§1.1). The runtime looks for
+`fn <control>_<event>(args…)` in the form's script (`hello_button_click`, `form_load`,
+`name_edit_change`) and connects each one to the matching xui `on_*` closure. When a
 function is missing, the event is not wired.
 
 ---
@@ -102,11 +110,12 @@ function is missing, the event is not wired.
 ### 4.1 How scripts see controls (a Rhai gotcha)
 
 Rhai functions are pure: **they cannot see variables from the enclosing scope**, so
-`txtName.text = "x"` inside `fn cmdHello_Click()` would normally fail. LazyRAD gets
-around this with an `Engine::on_var` resolver. When a name is not found, the resolver
-looks it up among the active form's controls, then the form itself (`Me`), then
-globals such as `App`, `Screen` and `Clipboard`. Controls are registered custom types
-that wrap an `Rc` handle, so a property setter changes the live widget:
+`name_edit.text = "x"` inside `fn hello_button_click()` would normally fail. LazyRAD
+gets around this with an `Engine::on_var` resolver. When a name is not found, the
+resolver looks it up among the active form's controls, then the form itself (`form`),
+then globals such as `app`. Controls are registered custom types that wrap an `Rc`
+handle, so a property setter changes the live widget. (A value *returned* by `on_var`
+is read-only in Rhai, so the resolver pushes the control into the scope instead.)
 
 The resolver **pushes the value into the scope** rather than returning it from the
 callback: Rhai marks a value returned by `on_var` read-only, so a setter such as
@@ -114,14 +123,13 @@ callback: Rhai marks a value returned by `on_var` read-only, so a setter such as
 while a pushed variable is an ordinary mutable entry.
 
 ```rhai
-fn cmdHello_Click() {
-    lblOut.caption = `Hello, ${txtName.text}!`;
-    Me.caption = "Greeted";
+fn hello_button_click() {
+    result_label.text = `Hello, ${name_edit.text}!`;
+    form.title = "Greeted";
 }
 ```
 
-Form-level state that outlives a single event lives in `Me.state`, an object map. The
-alternative is module-level `const` values plus a registered `Static` store.
+Form-level state that outlives a single event lives in `form.state`, an object map.
 
 ### 4.2 Execution model
 
@@ -131,9 +139,9 @@ alternative is module-level `const` values plus a registered `Static` store.
 - `Engine::on_progress` implements Ctrl+Break, an operation budget per event (to catch
   runaway loops), and debugger pause checks.
 - `Engine::set_max_*` limits apply by default, but are relaxed for exported apps.
-- `MsgBox` and `InputBox` use xui `Dialog`. A VB-style blocking `MsgBox` would need
+- `msg_box` and `input_box` use xui `Dialog`. A blocking `msg_box` would need
   `Ui::open_modal`, which **does not work on canvas today** (G14). So in Iteration 1,
-  `MsgBox` is non-blocking and takes an optional callback. It becomes blocking once
+  `msg_box` is non-blocking and takes an optional callback. It becomes blocking once
   canvas implements `run_modal`.
 
 ### 4.3 Object orientation
@@ -148,31 +156,34 @@ Rhai has no `class` keyword. LazyRAD provides objects through two mechanisms:
    Rhai supports natively. The IDE's class-module template produces this shape:
 
    ```rhai
-   // clsStack.rhai
+   // stack.rhai
    fn new() {
        #{ items: [], push: |x| this.items.push(x), pop: || this.items.pop(),
-          count: || this.items.len(), __class: "clsStack" }
+          len: || this.items.len(), __class: "stack" }
    }
    ```
 
    The editor's completion recognises `__class` and offers the map's members.
-   Inheritance works by composition: `let o = clsBase::new(); o.extra = …; o`.
+   Inheritance works by composition: `let o = base::new(); o.extra = …; o`.
 
 ### 4.4 Standard library: small but usable
 
-The stdlib is grouped as Rhai static modules and written in Rust. Every item gets doc
-comments, which the `metadata` feature surfaces in completion and tooltips.
+The stdlib is written in Rust and registered as snake_case Rhai functions and static
+modules. It relies on Rhai's own built-ins for strings (`len`, `sub_string`,
+`index_of`, `trim`, `to_upper`, `split`…), maths and collections, and only adds what
+they lack. Every item gets doc comments, which the `metadata` feature surfaces in
+completion and tooltips.
 
 | Module | Contents |
 |---|---|
-| Core | `Str` helpers (`Left`/`Mid`/`Right`/`Trim`/`Split`/`Join`/`Format`/`Val`), `Math`, `Rnd`, conversions |
-| Collections | `List` (Rhai array plus helpers), `Dictionary`, `Set`, `Queue`, `Stack`, `sort_by` |
-| Time | `DateTime` (`Now`, `Date`, formatting, arithmetic), `Timer` control, `Stopwatch` |
-| IO | `File` (`read_text`, `write_text`, `append`, `lines`, `exists`, `delete`), `Dir`, `Path`, `TextReader`/`TextWriter` classes |
-| App | `App` (`path`, `title`, `version`, `args`, `quit`), `Environ`, `Clipboard` (text only), `Screen` |
-| UI | `Form` (`show`/`hide`/`show_modal`/`unload`, `caption`, `left`/`top`/…), `MsgBox`, `InputBox`, `CommonDialog` (open/save/color) |
-| Controls | `Label`, `TextBox` (single and multi-line), `CommandButton`, `CheckBox`, `OptionButton` (a `RadioGroup` item), `Frame`, `ListBox`, `ComboBox`, `HScrollBar`/`VScrollBar` (`Slider`), `ProgressBar`, `Timer`, `PictureBox`/`Image`, `TreeView`, `ListView`, `TabStrip`, `Menu` |
-| Data (later) | `Json` (parse/stringify to maps), `Csv`, `Ini`/`Settings` (VB `GetSetting`/`SaveSetting`) |
+| Core | `debug(value)` to the Output pane, formatting helpers, `random`/`random_range`, conversions Rhai lacks |
+| Collections | Rhai arrays and maps, plus `set`, `queue`, `stack` helpers and `sort_by` |
+| Time | `now()`, `today()`, a `DateTime` type (formatting, arithmetic), a `Timer` control, `stopwatch` |
+| IO | `file` (`read_text`, `write_text`, `append`, `lines`, `exists`, `delete`), `dir`, `path` |
+| App | `app` (`path`, `title`, `version`, `args`, `quit()`), `env`, `clipboard` (text only), `screen` |
+| UI | `form` (`show`/`hide`/`show_modal`/`close`, `title`, `left`/`top`/…), `msg_box`, `input_box`, `dialogs` (open/save/colour) |
+| Controls | xui's kinds: `Label`, `Edit`/`MultilineEdit`, `Button`, `CheckBox`, `RadioGroup`, `GroupBox`, `ListView`, `ComboBox`, `Slider`, `ProgressBar`, `TreeView`, `Tabs`, `Menu`, plus a `Timer` and an image control |
+| Data (later) | `json` (parse/stringify to maps), `csv`, `settings` (per-app key/value storage) |
 
 Exported apps must not be surprising, so filesystem access is allowed by default. The
 IDE's run configuration can sandbox it.
@@ -272,21 +283,21 @@ The debugger is built on Rhai's `debugging` feature, running in the player proce
 
 ```text
 IDE  ──spawn── lazyrad-player --debug <project dir>
- │   stdin : {"cmd":"setBreakpoints","file":"frmMain.rhai","lines":[12,30]}
+ │   stdin : {"cmd":"setBreakpoints","file":"main_form.rhai","lines":[12,30]}
  │           {"cmd":"continue"|"stepInto"|"stepOver"|"stepOut"|"pause"|"stop"}
- │           {"cmd":"evaluate","expr":"txtName.text","frame":0}
+ │           {"cmd":"evaluate","expr":"name_edit.text","frame":0}
  │   stdout: {"event":"stopped","reason":"breakpoint","file":…,"line":12}
  │           {"event":"output","text":"…"}   {"event":"error", …}  {"event":"exited"}
 ```
 
 - The player registers a debugger callback. When the program stops, it serialises the
   call stack (`Debugger::call_stack`), the locals of the selected frame (from `Scope`)
-  and `Me`'s controls. It then **blocks, reading stdin**, until it receives a resume
+  and the form's controls. It then **blocks, reading stdin**, until it receives a resume
   command. The paused app freezes, just as it did in VB6. The IDE stays responsive
   because it is a separate process.
 - IDE panes:
   - **Immediate window:** runs `evaluate` against the paused frame, or in run mode
-    against the global context. `Debug.Print` output lands here.
+    against the global context. `debug(...)` output lands here.
   - **Locals**
   - **Watches**
   - **Call stack**
@@ -370,13 +381,13 @@ contributed to xui.
 | G11 | **Menu shortcut text and runtime rebuilds are missing (spike result, xui#185).** `MenuScope::item` takes only an id and label and `Node` has no accelerator field, so an item cannot display `Ctrl+S`. `Menu::build` consumes the menu and fills a private model with no public rebuild call, so menus cannot change at runtime (the Recent list, or a user program's menu tree); `set_enabled`/`set_checked` are the only mutations | IDE menus and the runtime `Menu` control | Workaround: build the menu once, keep the accelerator table in the command dispatcher, and replace the whole `Menu` when the recent list changes. Upstream (xui#185): an optional shortcut on each entry that the popup painter right-aligns, plus `Menu::rebuild` |
 | G12 | **No drag and drop of OS files** | Dropping a `.lrp` file onto the IDE. Nice to have | Upstream later, via winit `DroppedFile` |
 | G13 | **No image or picture widget and no `Image` loading helper** in the catalogue (only `draw_image`) | `PictureBox`, `Image`, form icons, toolbox icons | Build a small `Picture` widget on `Custom` + `draw_image`, and decode with the `image` crate (PNG/BMP/JPG) |
-| G14 | **Modal windows don't work on canvas** (confirmed: xui#146, tracked in emusic#417). `run_modal` returns `Unsupported`, so `Ui::open_modal` closes the child window immediately | Blocking `MsgBox`/`InputBox` and `Form.show_modal` | Iteration 1: `MsgBox` is an in-window `Dialog` and is **non-blocking** (with an optional callback). Upstream: implement `run_modal`/`set_window_enabled` on `WinitBackend` (a nested loop), then make `MsgBox` blocking |
+| G14 | **Modal windows don't work on canvas** (confirmed: xui#146, tracked in emusic#417). `run_modal` returns `Unsupported`, so `Ui::open_modal` closes the child window immediately | Blocking `msg_box`/`input_box` and `form.show_modal` | Iteration 1: `msg_box` is an in-window `Dialog` and is **non-blocking** (with an optional callback). Upstream: implement `run_modal`/`set_window_enabled` on `WinitBackend` (a nested loop), then make `msg_box` blocking |
 | G15 | **`xui-canvas` hard-depends on `winit`, `softbuffer` and `glutin`.** LazyOS vendors a patched copy (`set_default_font`, `Surface::pixels`) | The LazyOS build of the player and IDE | Track the `xui-skia` split proposed in `lazyos/docs/xui-plan.md`. LazyRAD adds nothing new beyond it |
 | G16 | **Single window per task on LazyOS** (see `lazyos/docs/xui-plan.md`) | Multi-form apps and IDE secondary windows | On LazyOS, show secondary forms as in-window `Dialog`-style surfaces until multi-window lands |
 | G17 | **No per-control font, colour or back-colour overrides.** Widgets draw only from theme tokens | VB users expect `ForeColor`, `BackColor` and `Font` properties | Upstream: optional per-node style overrides. For v1, support `Font.Size`/`Bold` on `Label` only and leave colours theme-driven (a deliberate trade-off) |
 | G18 | **No per-widget timers.** `Ui::on_timer` is one window-level mapping, and the per-widget timer listeners are `pub(crate)` | The editor's caret blink (and any self-animating custom widget) needs the host to forward ticks | Workaround: `Editor::handle_timer`, called from the host's `on_timer`. Upstream: a public per-widget timer listener (`Control::on_timer`) |
 
-**G11** is worth a one-day spike before M0 ends. **G14** is confirmed and shapes the `MsgBox` API. The rest have workarounds and are not blockers.
+**G11** is worth a one-day spike before M0 ends. **G14** is confirmed and shapes the `msg_box` API. The rest have workarounds and are not blockers.
 
 **Designer seam status.** The Win32 clean-up (xui#173, tag `pre-win32ui-controls-removal`) deleted the *native-layer* `Properties` impls in `xui-win32/src/properties.rs`. The portable seam survives in `xui-core`: `Ui::set_design_mode`, which about 25 widgets honour by ignoring input, and `Properties` impls on about 25 widgets. Those impls report only a few names (`text`, `enabled`, `checked`, `value`, `selected`…), with no bounds, font or schema. Per xui#16, selection and handle painting, serialisation and schemas belong to the RAD app, not to xui. So LazyRAD owns the designer overlay and the property schema (G6), and uses xui's `Properties` only to push values into live widgets.
 
@@ -389,7 +400,7 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M | Name | Deliverable | Size |
 |---|---|---|---|
 | M0 | Skeleton | Workspace; xui pinned; IDE window with menu, toolbar and split panes; open/save `.lrp`; project tree. Spike for G11 | 1–2 wk |
-| M1 | Runtime | `lazyrad-runtime` + player: loads a hand-written project, builds forms from `.lfm`, wires `Control_Event` handlers, `on_var` control resolution, `MsgBox`, 8 basic controls, Core/Collections stdlib. "Hello" and "Calculator" samples run | 2–3 wk |
+| M1 | Runtime | `lazyrad-runtime` + player: loads a hand-written project, builds forms from `.lfm`, wires `control_event` handlers, `on_var` control resolution, `msg_box`, 8 basic controls, Core/Collections stdlib. "Hello" and "Calculator" samples run | 2–3 wk |
 | M2 | Editor v1 | Custom editor: rope, caret, selection, undo, scroll, highlight, gutter, find, compile diagnostics, run with F5 (spawning the player) | 3–4 wk |
 | M3 | Designer v1 | Design surface, toolbox, select/move/resize, property grid (text/num/bool/enum), double-click to create a handler, save `.lfm` | 3–4 wk |
 | M4 | Debugger | Debug protocol, breakpoints, step into/over/out, call stack, locals, immediate window, break on error | 2–3 wk |
@@ -423,11 +434,11 @@ editor move to 1.x.
 
 | Risk | Mitigation |
 |---|---|
-| Rhai's C-like syntax feels nothing like BASIC to VB users | Accept it and embrace it: VB-style *names* (`Form_Load`, `MsgBox`, `Left$`-like helpers) and good completion. Do not build a BASIC-to-Rhai transpiler |
+| Rhai's C-like syntax feels nothing like BASIC to VB users | Accept it: LazyRAD takes VB6's workflow, not its language (§1.1). Good completion, templates and the double-click-to-handler flow carry the ease of use. Do not build a BASIC-to-Rhai transpiler |
 | Rhai performance for tight loops | Fine for RAD apps. Ship native stdlib types for heavy work (sort, string building, `Dictionary`) |
 | Scope creep in the editor | A monospace-only v1, no word wrap, no proportional fonts |
 | xui churn (the project is young) | Pin the revision, keep a patch fork, upstream small PRs for G1/G2/G9/G10 |
-| Blocking `MsgBox` on canvas (G14, confirmed) | Ship a non-blocking `MsgBox` with a callback now, and fix `run_modal` upstream |
+| Blocking `msg_box` on canvas (G14, confirmed) | Ship a non-blocking `msg_box` with a callback now, and fix `run_modal` upstream |
 
 ---
 
