@@ -1,0 +1,16 @@
+[package]
+name = "lazyrad-designer"
+description = "The LazyRAD xui form-designer surface, toolbox and property grid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lazyrad-project.workspace = true
+lazyrad-runtime.workspace = true
+xui-core.workspace = true

@@ -1,6 +1,49 @@
-[package]
-name = "lazyrad"
+# The LazyRAD workspace. See PLAN.md §2 for the layout and the reasoning behind
+# each crate. `lazyrad-debug-proto` and `lazyrad-packager` join the members list
+# when their milestones (M4 and M5) start.
+[workspace]
+resolver = "3"
+members = [
+    "crates/lazyrad-project",
+    "crates/lazyrad-runtime",
+    "crates/lazyrad-player",
+    "crates/lazyrad-editor",
+    "crates/lazyrad-designer",
+    "crates/lazyrad-ide",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/va1erian/lazyrad"
 
-[dependencies]
+[workspace.dependencies]
+# The UI toolkit, pinned to the revision LazyOS builds against (PLAN.md §1).
+# A `[patch]` for local xui fixes is kept at the bottom of this file.
+xui-core = { git = "https://github.com/va1erian/xui", rev = "ec94d605258be5bd19abe876fccd285091c05fdb" }
+xui-canvas = { git = "https://github.com/va1erian/xui", rev = "ec94d605258be5bd19abe876fccd285091c05fdb" }
+
+# The scripting language. `debugging` gives breakpoints and call stacks,
+# `metadata` feeds completion and signature help, and `internals` exposes the
+# tokenizer. `sync` is deliberately left off so the engine keeps `Rc`, matching
+# xui's single-threaded widgets (PLAN.md §1).
+rhai = { version = "1", features = ["debugging", "metadata", "internals"] }
+
+lazyrad-project = { path = "crates/lazyrad-project" }
+lazyrad-runtime = { path = "crates/lazyrad-runtime" }
+lazyrad-editor = { path = "crates/lazyrad-editor" }
+lazyrad-designer = { path = "crates/lazyrad-designer" }
+
+# `#![forbid(unsafe_code)]` is also written at the top of every crate, so a
+# module cannot opt out by dropping the workspace opt-in.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Uncomment to build against a local xui checkout while preparing an upstream
+# fix (PLAN.md §2). The `[patch]` key matches the git dependency's URL exactly,
+# and the patched crates take precedence over the pinned `rev`.
+# [patch."https://github.com/va1erian/xui"]
+# xui-core = { path = "../xui/crates/xui-core" }
+# xui-canvas = { path = "../xui/crates/xui-canvas" }

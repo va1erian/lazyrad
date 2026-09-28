@@ -1,0 +1,18 @@
+[package]
+name = "lazyrad-player"
+description = "The LazyRAD runtime host: runs a project dir, an exported payload, or a debug session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lazyrad-player"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lazyrad-runtime.workspace = true
