@@ -247,6 +247,7 @@ enum Drag {
 }
 
 /// The designer's document, selection, clipboard, history and live gesture.
+#[derive(Clone)]
 pub struct Surface {
     doc: FormDoc,
     catalog: Rc<Catalog>,
