@@ -18,6 +18,7 @@
 //! [`stdlib`] is the Iteration 1 standard library, and [`error`] locates a
 //! script failure.
 
+pub mod check;
 pub mod control;
 pub mod engine;
 pub mod error;
@@ -27,12 +28,13 @@ pub mod shell;
 pub mod stdlib;
 pub mod value;
 
+pub use check::{CheckReport, check_project};
 pub use control::FormHost;
 pub use engine::{EngineHost, new_engine};
 pub use error::ScriptError;
 pub use form::{
     FormApp, FormRuntime, FormSource, ModuleSource, Msg, RuntimeError, run_project,
-    run_project_with,
+    run_project_with, run_runtime, run_runtime_with,
 };
 pub use message::{MsgBoxButtons, Pending};
 pub use stdlib::StdlibContext;

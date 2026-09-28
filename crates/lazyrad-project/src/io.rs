@@ -109,15 +109,22 @@ fn project_to_toml(path: &Path, project: &Project) -> Result<String, Error> {
 impl Project {
     /// Loads the single `.lrp` file in `dir`.
     pub fn load(dir: &Path) -> Result<Self, Error> {
-        let path = find_project_file(dir)?;
-        let text = read_text(&path)?;
+        Self::load_file(&find_project_file(dir)?)
+    }
+
+    /// Loads a specific `.lrp` file.
+    ///
+    /// As with [`Project::load`], the file name must be `<name>.lrp`; a mismatch
+    /// is reported against the given path.
+    pub fn load_file(path: &Path) -> Result<Self, Error> {
+        let text = read_text(path)?;
         let project: Self =
-            toml::from_str(&text).map_err(|source| parse_error(&path, &text, source))?;
+            toml::from_str(&text).map_err(|source| parse_error(path, &text, source))?;
         let expected = project.file_name();
         if path.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
             return Err(Error::Diagnostic(Diagnostic::new(
                 DiagnosticKind::ProjectFile,
-                path.clone(),
+                path,
                 format!(
                     "project file is named `{}` but its `name` is `{}`; rename it to `{expected}`",
                     path.file_name().unwrap_or_default().to_string_lossy(),

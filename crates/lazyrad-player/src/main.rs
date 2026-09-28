@@ -1,22 +1,11 @@
 #![forbid(unsafe_code)]
 
-//! The LazyRAD runtime host.
+//! The LazyRAD runtime host binary.
 //!
-//! `lazyrad-player` runs a project directory, an exported payload appended to
-//! its own executable, or a debug session (`--debug`). Given a directory it
-//! loads the project and opens its startup form through [`lazyrad_runtime::form`];
-//! with no argument it falls back to the empty-window shell. The exported payload
-//! and the debug protocol land in later milestones (PLAN.md §4, §7, §8).
+//! This is a thin wrapper around [`lazyrad_player::run_cli`]: the command line,
+//! the diagnostics and the exit codes live in the library so they can be tested
+//! without opening a window. See the library for the output format.
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let result = match args.next() {
-        Some(dir) => lazyrad_runtime::form::run_project(dir),
-        None => lazyrad_runtime::shell::run_empty_window("LazyRAD Player")
-            .map_err(lazyrad_runtime::RuntimeError::from),
-    };
-    if let Err(error) = result {
-        eprintln!("lazyrad-player: {error}");
-        std::process::exit(1);
-    }
+    std::process::exit(lazyrad_player::run_cli());
 }

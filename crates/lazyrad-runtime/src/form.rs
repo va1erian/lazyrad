@@ -174,8 +174,17 @@ impl FormRuntime {
     /// Loads the project in `dir`: its `.lrp`, every form's `.lfm` and `.rhai`,
     /// and every standard module.
     pub fn load(dir: impl AsRef<Path>) -> Result<Rc<FormRuntime>, RuntimeError> {
-        let dir = dir.as_ref();
-        let project = Project::load(dir)?;
+        Self::load_path(dir)
+    }
+
+    /// Loads the project named by `path`, which may be a project directory or an
+    /// `.lrp` file.
+    ///
+    /// A directory case loads its single `.lrp` ([`Project::load`]); an `.lrp`
+    /// file is loaded directly and its parent becomes the project directory
+    /// (the value scripts see as `app.path`).
+    pub fn load_path(path: impl AsRef<Path>) -> Result<Rc<FormRuntime>, RuntimeError> {
+        let (dir, project) = open_project(path.as_ref())?;
         let catalog = lazyrad_catalog();
         let mut forms = BTreeMap::new();
         let mut modules = Vec::new();
@@ -213,7 +222,7 @@ impl FormRuntime {
             modules,
             catalog,
             pending: Rc::new(RefCell::new(Vec::new())),
-            path: dir.to_path_buf(),
+            path: dir,
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
         }))
@@ -511,6 +520,23 @@ impl FormApp {
         self.runtime.mark_closed(name);
     }
 
+    /// Reports a handler's runtime error without stopping the program.
+    ///
+    /// A widget handler's failure is not fatal: the error is shown in a
+    /// message box (the script's own `msg_box`, non-blocking like any other)
+    /// and the application keeps running, so the player's exit code stays 0.
+    /// Only a failure that prevents the window from opening is fatal.
+    fn report_handler_error(&mut self, ui: &mut Ui<Msg>, form: &str, error: ScriptError) {
+        self.open_msg_box(
+            ui,
+            form,
+            &error.to_string(),
+            "LazyRAD",
+            MsgBoxButtons::Ok,
+            None,
+        );
+    }
+
     /// Shows a non-blocking message box in the window.
     ///
     /// The dialog's shape follows `buttons`. Its action is turned into a
@@ -578,7 +604,7 @@ impl App for FormApp {
                 if form.as_str() == root.name()
                     && let Err(error) = root.run(&control, &event, &args)
                 {
-                    eprintln!("lazyrad: {error}");
+                    self.report_handler_error(ui, root.name(), error);
                 }
                 self.flush(ui);
             }
@@ -608,7 +634,7 @@ impl App for FormApp {
                 if form.as_str() == root.name()
                     && let Err(error) = root.call_callback(&callback, result)
                 {
-                    eprintln!("lazyrad: {error}");
+                    self.report_handler_error(ui, root.name(), error);
                 }
                 self.flush(ui);
             }
@@ -754,13 +780,30 @@ fn window_spec(doc: &FormDoc) -> PlatformSpec {
     PlatformSpec::new(title).size(Dip(width), Dip(height))
 }
 
+/// Resolves `path` to the project directory and `.lrp` project it names.
+///
+/// A directory is searched for its single `.lrp`; an `.lrp` file is loaded
+/// directly and its parent directory becomes the project directory. Any other
+/// path is treated as a file and fails with an I/O error.
+pub(crate) fn open_project(path: &Path) -> Result<(PathBuf, Project), RuntimeError> {
+    if path.is_dir() {
+        Ok((path.to_path_buf(), Project::load(path)?))
+    } else {
+        let dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        Ok((dir, Project::load_file(path)?))
+    }
+}
+
 /// Runs the project in `dir` on the portable `winit` backend.
 pub fn run_project(dir: impl AsRef<Path>) -> Result<(), RuntimeError> {
     let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
     run_project_with(backend, dir)
 }
 
-/// Runs the project in `dir` on `backend`, opening its startup form.
+/// Loads the project in `dir` and runs it on `backend`.
 ///
 /// The backend is passed in so the same path runs on `winit` and, in tests, on
 /// the offscreen backend.
@@ -769,6 +812,25 @@ pub fn run_project_with(
     dir: impl AsRef<Path>,
 ) -> Result<(), RuntimeError> {
     let runtime = FormRuntime::load(dir)?;
+    run_runtime_with(backend, runtime)
+}
+
+/// Runs an already-loaded project on the portable `winit` backend.
+pub fn run_runtime(runtime: Rc<FormRuntime>) -> Result<(), RuntimeError> {
+    let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
+    run_runtime_with(backend, runtime)
+}
+
+/// Runs an already-loaded runtime's startup form on `backend`.
+///
+/// A failure that prevents the startup window from opening (the form cannot be
+/// built, or its `form_load` handler fails) is returned when the event loop
+/// ends. An event handler's runtime error does not come back here: it is shown
+/// in a message box and the program keeps running.
+pub fn run_runtime_with(
+    backend: Rc<dyn Backend>,
+    runtime: Rc<FormRuntime>,
+) -> Result<(), RuntimeError> {
     let startup = runtime.startup_name()?;
     let doc = runtime
         .form(&startup)
@@ -776,15 +838,20 @@ pub fn run_project_with(
         .ok_or_else(|| RuntimeError::UnknownForm(startup.clone()))?;
     let spec = window_spec(&doc);
 
+    // `run_app` reports nothing about the app it built, so a fatal build error
+    // is parked here and returned once the loop has ended.
+    let failure: Rc<RefCell<Option<RuntimeError>>> = Rc::new(RefCell::new(None));
     let runtime_for_app = Rc::clone(&runtime);
+    let startup_for_app = startup.clone();
+    let failure_for_app = Rc::clone(&failure);
     run_app(backend, spec, move |ui| {
-        match runtime_for_app.build_app(ui, &startup) {
+        match runtime_for_app.build_app(ui, &startup_for_app) {
             Ok(app) => {
-                runtime_for_app.mark_open(&startup);
+                runtime_for_app.mark_open(&startup_for_app);
                 app
             }
             Err(error) => {
-                eprintln!("lazyrad: cannot open `{startup}`: {error}");
+                *failure_for_app.borrow_mut() = Some(error);
                 ui.quit_with(1);
                 FormApp {
                     root: None,
@@ -794,7 +861,10 @@ pub fn run_project_with(
             }
         }
     })?;
-    Ok(())
+    match failure.borrow_mut().take() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -925,5 +995,59 @@ mod tests {
         .expect("the event loop runs");
 
         assert_eq!(capture.borrow().as_ref(), Some(&true));
+    }
+
+    #[test]
+    fn a_handler_error_shows_a_message_box() {
+        let runtime = FormRuntime::from_sources(
+            vec![FormSource::new("main_form", FormDoc::new("main_form"), "")],
+            Vec::new(),
+        );
+        let backend = Rc::new(OffscreenBackend::new());
+        let capture: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&capture);
+
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let mut app = runtime
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
+            let error = ScriptError::new(
+                "main_form.rhai",
+                rhai::Position::new(1, 1),
+                "division by zero",
+            );
+            app.report_handler_error(ui, "main_form", error);
+            *slot.borrow_mut() = Some(app.dialogs.last().is_some_and(Dialog::is_open));
+            app
+        })
+        .expect("the event loop runs");
+
+        assert_eq!(
+            capture.borrow().as_ref(),
+            Some(&true),
+            "a handler error opens a non-blocking message box"
+        );
+    }
+
+    #[test]
+    fn a_fatal_build_error_is_returned_by_runtime_with() {
+        // A `form_load` that fails prevents the window from opening, so the
+        // error must come back as a fatal runtime error rather than a dialog.
+        // `from_sources` names its project "runtime" and uses that as startup,
+        // so the failing startup form is named for it.
+        let runtime = FormRuntime::from_sources(
+            vec![FormSource::new(
+                "runtime",
+                FormDoc::new("runtime"),
+                "fn form_load() { let x = 1 / 0; }",
+            )],
+            Vec::new(),
+        );
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        let error = run_runtime_with(backend, runtime).expect_err("form_load fails");
+        let RuntimeError::Script(script) = error else {
+            panic!("a located script error is expected, got {error:?}");
+        };
+        assert_eq!(script.file, "runtime.rhai");
     }
 }
