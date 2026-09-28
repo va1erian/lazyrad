@@ -418,3 +418,43 @@ fn a_list_view_without_selected_has_no_selection() {
     });
     assert_eq!(selected, Some(Value::Int(-1)));
 }
+
+/// A form with a three-option radio group pinned to the bottom-right corner.
+fn radio_doc() -> FormDoc {
+    let mut doc = FormDoc::new("frmMain");
+    let mut group = Node::new("RadioGroup", "optSize");
+    group.set_prop(
+        "items",
+        Value::List(vec!["S".to_owned(), "M".to_owned(), "L".to_owned()]),
+    );
+    group.set_prop("left", Value::Int(200));
+    group.set_prop("top", Value::Int(100));
+    group.set_prop("width", Value::Int(100));
+    group.set_prop("anchor", Value::Enum("bottom_right".to_owned()));
+    doc.insert(group);
+    doc
+}
+
+#[test]
+fn relayout_and_edits_move_every_radio_option() {
+    let doc = radio_doc();
+    let catalog = Catalog::xui();
+    let (before, after_resize, after_edit) =
+        with_form(&doc, &catalog, BuildOptions::default(), |form| {
+            let before = form.node_bounds("optSize");
+            form.relayout(Size::new(420, 300));
+            let after_resize = form.node_bounds("optSize");
+            form.set("optSize", "left", &Value::Int(10))
+                .expect("left is settable");
+            (before, after_resize, form.node_bounds("optSize"))
+        });
+    assert_eq!(before.len(), 3, "one node per option");
+    for (old, new) in before.iter().zip(&after_resize) {
+        // The window grew by (100, 100): every option follows the corner.
+        assert_eq!((new.left, new.top), (old.left + 100, old.top + 100));
+    }
+    for (option, moved) in after_resize.iter().zip(&after_edit) {
+        assert_eq!(moved.left, 10, "an edited left moves every option");
+        assert_eq!(moved.height(), option.height());
+    }
+}

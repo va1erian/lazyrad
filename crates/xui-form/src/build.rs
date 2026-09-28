@@ -125,6 +125,19 @@ pub trait LiveWidget<M: 'static> {
     fn container_ui(&self) -> Option<&Ui<M>> {
         None
     }
+
+    /// Where each of the widget's nodes goes when the widget is placed at
+    /// `rect` (device pixels). A widget made of several nodes, such as a
+    /// `RadioGroup` with one node per option, returns them all so a relayout
+    /// moves the whole widget.
+    fn placements(&self, rect: Rect) -> Vec<(WidgetId, Rect)> {
+        vec![(self.id(), rect)]
+    }
+
+    /// Every node the widget owns; the first is [`LiveWidget::id`].
+    fn node_ids(&self) -> Vec<WidgetId> {
+        vec![self.id()]
+    }
 }
 
 /// Creates the live widget for one kind.
@@ -266,7 +279,7 @@ impl<'a, M: 'static> BuildCx<'a, M> {
 
     /// Wraps a widget's own property surface with the common property handling.
     pub(crate) fn live<W: WidgetProps<M>>(&self, inner: W) -> Box<dyn LiveWidget<M>> {
-        let common = Common::new(self.ui.clone(), inner.id(), self.design);
+        let common = Common::new(self.ui.clone(), self.design);
         Box::new(Live {
             common,
             inner,
@@ -296,6 +309,16 @@ pub(crate) trait WidgetProps<M: 'static>: 'static {
     /// widget with its own enabled state can dim itself. The default does
     /// nothing.
     fn set_enabled_hint(&self, _enabled: bool) {}
+
+    /// Every node the widget owns; the first is [`WidgetProps::id`].
+    fn node_ids(&self) -> Vec<WidgetId> {
+        vec![self.id()]
+    }
+
+    /// Where each node goes when the widget is placed at `rect`.
+    fn placements(&self, _ui: &Ui<M>, rect: Rect) -> Vec<(WidgetId, Rect)> {
+        vec![(self.id(), rect)]
+    }
 }
 
 /// One node's static layout metadata, kept for [`LiveForm::relayout`].
@@ -357,6 +380,21 @@ impl<M: 'static> LiveForm<M> {
         self.nodes.iter().map(|node| node.name.as_str())
     }
 
+    /// The current bounds of every node the widget named `name` owns: one for
+    /// most widgets, one per option for a `RadioGroup`. A designer outlines
+    /// the union of these.
+    pub fn node_bounds(&self, name: &str) -> Vec<Rect> {
+        self.widget(name)
+            .map(|widget| {
+                widget
+                    .node_ids()
+                    .into_iter()
+                    .map(|id| self.ui.bounds(id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Re-anchors every node from the design size to `new_client_size`.
     ///
     /// Each node is placed with [`anchored`] against its parent's design and
@@ -387,7 +425,7 @@ impl<M: 'static> LiveForm<M> {
             let (geometry, anchor) = self.current_placement(index, node);
             let design = px_rect(geometry, dpi);
             let placed = anchored(parent_design, parent_new, design, anchor);
-            moves.push((node.id, placed));
+            moves.extend(self.widgets[index].placements(placed));
             if node.is_container {
                 self.anchor_children(Some(&node.name), design.size(), placed.size(), dpi, moves);
             }
@@ -625,7 +663,6 @@ fn px_size(size: (i64, i64), dpi: u32) -> Size {
 /// The common property state every widget shares.
 struct Common<M: 'static> {
     ui: Ui<M>,
-    id: WidgetId,
     design: Cell<(i64, i64, i64, i64)>,
     anchor: Cell<Anchor>,
     visible: Cell<bool>,
@@ -635,10 +672,9 @@ struct Common<M: 'static> {
 
 impl<M: 'static> Common<M> {
     /// Creates the common state for a freshly built widget.
-    fn new(ui: Ui<M>, id: WidgetId, design: (i64, i64, i64, i64)) -> Common<M> {
+    fn new(ui: Ui<M>, design: (i64, i64, i64, i64)) -> Common<M> {
         Common {
             ui,
-            id,
             design: Cell::new(design),
             anchor: Cell::new(Anchor::TopLeft),
             visible: Cell::new(true),
@@ -683,13 +719,11 @@ impl<M: 'static> Common<M> {
             ("anchor", _) => Some(Err(SetError::TypeMismatch)),
             ("visible", Value::Bool(visible)) => {
                 self.visible.set(*visible);
-                self.ui.set_visible(self.id, *visible);
                 Some(Ok(()))
             }
             ("visible", _) => Some(Err(SetError::TypeMismatch)),
             ("enabled", Value::Bool(enabled)) => {
                 self.enabled.set(*enabled);
-                self.ui.set_enabled(self.id, *enabled);
                 Some(Ok(()))
             }
             ("enabled", _) => Some(Err(SetError::TypeMismatch)),
@@ -702,7 +736,7 @@ impl<M: 'static> Common<M> {
         }
     }
 
-    /// Mutates one geometry component and applies the new rectangle.
+    /// Mutates one geometry component. [`Live`] then moves every node.
     fn set_geometry(
         &self,
         mutate: impl FnOnce(&mut (i64, i64, i64, i64)),
@@ -710,8 +744,6 @@ impl<M: 'static> Common<M> {
         let mut design = self.design.get();
         mutate(&mut design);
         self.design.set(design);
-        self.ui
-            .apply_moves(&[(self.id, px_rect(design, self.ui.dpi()))]);
         Some(Ok(()))
     }
 }
@@ -751,11 +783,8 @@ impl<M: 'static, W: WidgetProps<M>> LiveWidget<M> for Live<M, W> {
             return Err(SetError::TypeMismatch);
         }
         if let Some(result) = self.common.set(prop, value) {
-            if result.is_ok()
-                && prop == "enabled"
-                && let Value::Bool(enabled) = value
-            {
-                self.inner.set_enabled_hint(*enabled);
+            if result.is_ok() {
+                self.apply_common(prop, value);
             }
             return result;
         }
@@ -764,5 +793,39 @@ impl<M: 'static, W: WidgetProps<M>> LiveWidget<M> for Live<M, W> {
 
     fn container_ui(&self) -> Option<&Ui<M>> {
         self.inner.container_ui()
+    }
+
+    fn placements(&self, rect: Rect) -> Vec<(WidgetId, Rect)> {
+        self.inner.placements(&self.common.ui, rect)
+    }
+
+    fn node_ids(&self) -> Vec<WidgetId> {
+        self.inner.node_ids()
+    }
+}
+
+impl<M: 'static, W: WidgetProps<M>> Live<M, W> {
+    /// Applies a common property that was just recorded to every node the
+    /// widget owns, so a multi-node widget moves, hides and disables as one.
+    fn apply_common(&self, prop: &str, value: &Value) {
+        let ui = &self.common.ui;
+        match (prop, value) {
+            ("left" | "top" | "width" | "height", _) => {
+                let rect = px_rect(self.common.design.get(), ui.dpi());
+                ui.apply_moves(&self.inner.placements(ui, rect));
+            }
+            ("visible", Value::Bool(visible)) => {
+                for id in self.inner.node_ids() {
+                    ui.set_visible(id, *visible);
+                }
+            }
+            ("enabled", Value::Bool(enabled)) => {
+                for id in self.inner.node_ids() {
+                    ui.set_enabled(id, *enabled);
+                }
+                self.inner.set_enabled_hint(*enabled);
+            }
+            _ => {}
+        }
     }
 }
