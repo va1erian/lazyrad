@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 lazyrad-project.workspace = true
 rhai.workspace = true
+thiserror.workspace = true
 xui-canvas.workspace = true
 xui-core.workspace = true
 xui-form.workspace = true

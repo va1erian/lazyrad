@@ -1178,6 +1178,7 @@ version = "0.1.0"
 dependencies = [
  "lazyrad-project",
  "rhai",
+ "thiserror 2.0.21",
  "xui-canvas",
  "xui-core",
  "xui-form",
