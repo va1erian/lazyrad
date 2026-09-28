@@ -220,6 +220,14 @@ impl ProjectSession {
             refuse_existing(&dir, &files)?;
         }
 
+        // Files a rename left behind belong to the old folder: they must never
+        // be deleted from the new one, where the same names may be unrelated.
+        let moving = dir != self.dir;
+        let stale = if moving {
+            std::mem::take(&mut self.stale_files)
+        } else {
+            Vec::new()
+        };
         let old_name = std::mem::replace(&mut self.project.name, name);
         let old_dir = std::mem::replace(&mut self.dir, dir);
         let was_dirty = std::mem::replace(&mut self.dirty, true);
@@ -229,6 +237,9 @@ impl ProjectSession {
             self.project.name = old_name;
             self.dir = old_dir;
             self.dirty = was_dirty;
+            if moving {
+                self.stale_files = stale;
+            }
         }
         result
     }
@@ -707,6 +718,34 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_as_never_deletes_a_renamed_away_name_in_the_new_folder() {
+        let dir = scratch("save-as-stale");
+        let target = scratch("save-as-stale-target");
+        let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
+        // Renamed but not saved: the old names are pending deletion in `dir`.
+        session
+            .rename(DEFAULT_FORM, "main_form")
+            .expect("rename succeeds");
+
+        // The target holds an unrelated file with the old form's name.
+        fs::create_dir_all(&target).expect("target folder");
+        let unrelated = target.join(format!("{DEFAULT_FORM}.rhai"));
+        fs::write(&unrelated, "// someone else's code").expect("write");
+
+        session
+            .save_as(&target.join("Copy.lrp"))
+            .expect("save as succeeds");
+        assert_eq!(
+            fs::read_to_string(&unrelated).expect("still there"),
+            "// someone else's code"
+        );
+        assert!(target.join("main_form.rhai").is_file());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&target);
     }
 
     #[test]
