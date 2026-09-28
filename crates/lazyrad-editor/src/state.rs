@@ -115,6 +115,11 @@ pub(crate) struct EditorState {
     pub(crate) h_drag: Option<Drag>,
     /// Whether the last drag captured the pointer.
     pub(crate) captured: bool,
+    /// Vertical wheel travel short of a whole line, in wheel units, carried to
+    /// the next wheel event so small touchpad deltas still scroll.
+    pub(crate) wheel_rows_rest: i32,
+    /// Horizontal wheel travel short of a whole column, likewise.
+    pub(crate) wheel_cols_rest: i32,
     /// `Ui` calls to make after the current event, outside the borrow.
     pub(crate) effects: Vec<Effect>,
 }
@@ -138,6 +143,8 @@ impl EditorState {
             v_drag: None,
             h_drag: None,
             captured: false,
+            wheel_rows_rest: 0,
+            wheel_cols_rest: 0,
             effects: Vec::new(),
         }
     }
