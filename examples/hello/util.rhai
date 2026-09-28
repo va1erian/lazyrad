@@ -1,3 +1,3 @@
-fn Greeting(name) {
+fn greeting(name) {
     `Hello, ${name}!`
 }
