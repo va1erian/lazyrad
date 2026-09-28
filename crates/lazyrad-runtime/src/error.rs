@@ -74,7 +74,7 @@ mod tests {
     fn an_error_carries_file_line_and_column() {
         let engine = rhai::Engine::new();
         let error = engine
-            .compile("fn cmd_Click() {\n    let x = ;\n}")
+            .compile("fn button_click() {\n    let x = ;\n}")
             .expect_err("the script does not compile");
         let located = ScriptError::from_parse("frmMain.rhai", &error);
         assert_eq!(located.file, "frmMain.rhai");

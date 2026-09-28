@@ -8,12 +8,11 @@
 //!   properties read and write the live widget through `LiveForm::get` /
 //!   `LiveForm::set`. One type covers every control kind, so nothing here is
 //!   written per widget type.
-//! * [`Form`] is `Me`: the form's `caption`, its `state` object map (data that
-//!   outlives a single event) and the `show`/`hide` methods.
+//! * [`Form`] is `form` in scripts: the form's `title`, its `state` object map
+//!   (data that outlives a single event) and the `show`/`hide` methods.
 //!
-//! The property names are taken from the [`Catalog`], plus a short table of
-//! VB-style aliases such as `caption` for `text` and `list_index` for
-//! `selected`.
+//! The property names are exactly the [`Catalog`]'s (PLAN.md §1.1): there are
+//! no aliases.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,19 +57,8 @@ impl<M: 'static> FormHost for LiveForm<M> {
     }
 }
 
-/// LazyRAD's VB-style property spellings, mapped onto catalog names.
-const PROPERTY_ALIASES: &[(&str, &str)] = &[("caption", "text"), ("list_index", "selected")];
-
-/// The catalog property a script name refers to, following a VB alias.
-fn resolve_property(name: &str) -> &str {
-    PROPERTY_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == name)
-        .map_or(name, |(_, canonical)| canonical)
-}
-
 /// Every property name a control accepts: the common and widget properties from
-/// `catalog`, plus the VB aliases, in sorted order.
+/// `catalog`, in sorted order.
 pub fn control_property_names(catalog: &Catalog) -> Vec<String> {
     let mut names: BTreeSet<String> = BTreeSet::new();
     for property in catalog.common_properties() {
@@ -82,9 +70,6 @@ pub fn control_property_names(catalog: &Catalog) -> Vec<String> {
                 names.insert(property.name.clone());
             }
         }
-    }
-    for (alias, _) in PROPERTY_ALIASES {
-        names.insert((*alias).to_owned());
     }
     names.into_iter().collect()
 }
@@ -110,9 +95,8 @@ impl Control {
         &self.name
     }
 
-    /// Reads a property, following a VB alias.
+    /// Reads a property.
     fn get(&self, property: &str) -> Result<Dynamic, Box<EvalAltResult>> {
-        let property = resolve_property(property);
         match self.host.get(&self.name, property) {
             Some(value) => Ok(crate::value::to_dynamic(&value)),
             None => Err(runtime_error(format!(
@@ -124,7 +108,6 @@ impl Control {
 
     /// Writes a property, decoding the script value against the schema.
     fn set(&self, property: &str, value: Dynamic) -> Result<(), Box<EvalAltResult>> {
-        let property = resolve_property(property);
         let Some(ty) = self.host.property_type(&self.name, property) else {
             return Err(runtime_error(format!(
                 "`{}` has no property `{property}`",
@@ -143,15 +126,15 @@ impl Control {
     }
 }
 
-/// The form object a script calls `Me`.
+/// The form object a script calls `form`.
 ///
 /// `state` is a Rhai object map shared for the life of the form, so a value a
-/// handler writes survives to the next event. `caption` starts empty and is
+/// handler writes survives to the next event. `title` starts empty and is
 /// owned by the script.
 #[derive(Clone)]
 pub struct Form {
     host: Rc<dyn FormHost>,
-    caption: Rc<RefCell<String>>,
+    title: Rc<RefCell<String>>,
     state: Rc<RefCell<Map>>,
 }
 
@@ -160,7 +143,7 @@ impl Form {
     pub fn new(host: Rc<dyn FormHost>) -> Form {
         Form {
             host,
-            caption: Rc::new(RefCell::new(String::new())),
+            title: Rc::new(RefCell::new(String::new())),
             state: Rc::new(RefCell::new(Map::new())),
         }
     }
@@ -194,12 +177,12 @@ pub fn register_control(engine: &mut Engine, catalog: &Catalog) {
     }
 }
 
-/// Registers the [`Form`] (`Me`) type.
+/// Registers the [`Form`] (`form`) type.
 pub fn register_form(engine: &mut Engine) {
     engine.register_type_with_name::<Form>("Form");
-    engine.register_get("caption", |form: &mut Form| form.caption.borrow().clone());
-    engine.register_set("caption", |form: &mut Form, title: ImmutableString| {
-        *form.caption.borrow_mut() = title.to_string();
+    engine.register_get("title", |form: &mut Form| form.title.borrow().clone());
+    engine.register_set("title", |form: &mut Form, title: ImmutableString| {
+        *form.title.borrow_mut() = title.to_string();
     });
     engine.register_get("state", |form: &mut Form| form.state.borrow().clone());
     engine.register_set("state", |form: &mut Form, value: Dynamic| {
@@ -282,17 +265,11 @@ mod tests {
     }
 
     #[test]
-    fn aliases_resolve_to_catalog_names() {
-        assert_eq!(resolve_property("caption"), "text");
-        assert_eq!(resolve_property("list_index"), "selected");
-        assert_eq!(resolve_property("enabled"), "enabled");
-    }
-
-    #[test]
-    fn catalog_property_names_include_aliases_and_common_properties() {
+    fn catalog_property_names_are_the_catalogs_own() {
         let names = control_property_names(&Catalog::xui());
-        assert!(names.contains(&"caption".to_owned()));
-        assert!(names.contains(&"list_index".to_owned()));
+        assert!(!names.contains(&"caption".to_owned()), "no VB aliases");
+        assert!(!names.contains(&"list_index".to_owned()), "no VB aliases");
+        assert!(names.contains(&"selected".to_owned()));
         assert!(names.contains(&"text".to_owned()));
         assert!(names.contains(&"enabled".to_owned()));
     }
@@ -303,8 +280,8 @@ mod tests {
         let control = Control::new(Rc::clone(&host), "lbl");
         assert_eq!(control.get("text").expect("text reads").to_string(), "hi");
         control
-            .set("caption", Dynamic::from("bye".to_owned()))
-            .expect("caption writes through");
+            .set("text", Dynamic::from("bye".to_owned()))
+            .expect("text writes through");
         assert_eq!(host.get("lbl", "text"), Some(Value::Text("bye".to_owned())));
         assert!(control.get("text").is_ok());
     }

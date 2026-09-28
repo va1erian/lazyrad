@@ -36,12 +36,12 @@ impl App for TestApp {
     fn update(&mut self, _msg: (), _ui: &mut xui_core::Ui<()>) {}
 }
 
-/// A form with an `Edit` named `txtName` (holding "Ada") and a `Label` named
-/// `lblOut`.
+/// A form with an `Edit` named `name_edit` (holding "Ada") and a `Label` named
+/// `result_label`.
 fn greeting_doc() -> FormDoc {
     let mut doc = FormDoc::new("frmMain");
 
-    let mut name = Node::new("TextBox", "txtName");
+    let mut name = Node::new("TextBox", "name_edit");
     name.set_prop("left", Value::Int(10));
     name.set_prop("top", Value::Int(10));
     name.set_prop("width", Value::Int(160));
@@ -49,7 +49,7 @@ fn greeting_doc() -> FormDoc {
     name.set_prop("text", Value::Text("Ada".to_owned()));
     doc.insert(name);
 
-    let mut out = Node::new("Label", "lblOut");
+    let mut out = Node::new("Label", "result_label");
     out.set_prop("left", Value::Int(10));
     out.set_prop("top", Value::Int(40));
     out.set_prop("width", Value::Int(160));
@@ -100,12 +100,14 @@ fn a_handler_copies_a_text_field_into_a_label() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {
         let ast = host
-            .compile("fn cmdHello_Click() { lblOut.caption = txtName.text; }")
+            .compile("fn hello_button_click() { result_label.text = name_edit.text; }")
             .expect("the handler compiles");
-        let _ = host.call(&ast, "cmdHello_Click").expect("the handler runs");
+        let _ = host
+            .call(&ast, "hello_button_click")
+            .expect("the handler runs");
 
         assert_eq!(
-            form.get("lblOut", "text"),
+            form.get("result_label", "text"),
             Some(Value::Text("Ada".to_owned()))
         );
     });
@@ -117,9 +119,9 @@ fn me_state_outlives_a_single_event() {
     run_form(&doc, |host, form| {
         let ast = host
             .compile(
-                "fn first() { Me.state.count = 1; }\n\
-                 fn bump() { Me.state.count += 1; }\n\
-                 fn report() { lblOut.caption = `${Me.state.count}`; }",
+                "fn first() { form.state.count = 1; }\n\
+                 fn bump() { form.state.count += 1; }\n\
+                 fn report() { result_label.text = `${form.state.count}`; }",
             )
             .expect("the handlers compile");
         let _ = host.call(&ast, "first").expect("first runs");
@@ -127,27 +129,27 @@ fn me_state_outlives_a_single_event() {
         let _ = host.call(&ast, "report").expect("report runs");
 
         assert_eq!(
-            form.get("lblOut", "text"),
+            form.get("result_label", "text"),
             Some(Value::Text("2".to_owned()))
         );
     });
 }
 
 #[test]
-fn me_caption_persists_across_calls() {
+fn form_title_persists_across_calls() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {
         let ast = host
             .compile(
-                "fn set_cap() { Me.caption = \"Greeted\"; }\n\
-                 fn read_cap() { lblOut.caption = Me.caption; }",
+                "fn set_cap() { form.title = \"Greeted\"; }\n\
+                 fn read_cap() { result_label.text = form.title; }",
             )
             .expect("the handlers compile");
         let _ = host.call(&ast, "set_cap").expect("set_cap runs");
         let _ = host.call(&ast, "read_cap").expect("read_cap runs");
 
         assert_eq!(
-            form.get("lblOut", "text"),
+            form.get("result_label", "text"),
             Some(Value::Text("Greeted".to_owned()))
         );
     });
@@ -158,12 +160,15 @@ fn me_hide_hides_every_control() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {
         let ast = host
-            .compile("fn hide_all() { Me.hide(); }")
+            .compile("fn hide_all() { form.hide(); }")
             .expect("the handler compiles");
         let _ = host.call(&ast, "hide_all").expect("hide_all runs");
 
-        assert_eq!(form.get("lblOut", "visible"), Some(Value::Bool(false)));
-        assert_eq!(form.get("txtName", "visible"), Some(Value::Bool(false)));
+        assert_eq!(
+            form.get("result_label", "visible"),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(form.get("name_edit", "visible"), Some(Value::Bool(false)));
     });
 }
 
@@ -172,7 +177,7 @@ fn a_runtime_error_reports_the_file_and_line() {
     let doc = greeting_doc();
     run_form(&doc, |host, _form| {
         let ast = host
-            .compile("fn bad() {\n    lblOut.nope = 1;\n}")
+            .compile("fn bad() {\n    result_label.nope = 1;\n}")
             .expect("the handler compiles");
         let error = host
             .call(&ast, "bad")
@@ -189,7 +194,7 @@ fn an_unknown_control_name_is_a_variable_error() {
     let doc = greeting_doc();
     run_form(&doc, |host, _form| {
         let ast = host
-            .compile("fn bad() {\n    ghost.caption = \"x\";\n}")
+            .compile("fn bad() {\n    ghost.text = \"x\";\n}")
             .expect("the handler compiles");
         let error = host.call(&ast, "bad").expect_err("`ghost` is unknown");
 
@@ -280,15 +285,15 @@ fn a_registered_global_resolves_in_a_handler() {
             &catalog,
             "frmMain.rhai",
         );
-        host.set_global("App", rhai::Dynamic::from("LazyRAD".to_owned()));
+        host.set_global("app", rhai::Dynamic::from("LazyRAD".to_owned()));
 
         let ast = host
-            .compile("fn copy() { lblOut.caption = App; }")
+            .compile("fn copy() { result_label.text = app; }")
             .expect("the handler compiles");
         let _ = host.call(&ast, "copy").expect("copy runs");
 
         assert_eq!(
-            form.get("lblOut", "text"),
+            form.get("result_label", "text"),
             Some(Value::Text("LazyRAD".to_owned()))
         );
         TestApp
