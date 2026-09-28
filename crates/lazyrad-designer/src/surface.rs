@@ -719,8 +719,8 @@ impl Surface {
     /// Creates a control of `kind` filling `rect` (in form coordinates),
     /// parented to `parent` when that container accepts the child.
     ///
-    /// The node gets the catalog's schema defaults, a VB-style unique name
-    /// (`Command1`, `Text1`, …) and the next free tab index among its siblings.
+    /// The node gets the catalog's schema defaults, a unique snake_case name
+    /// (`button1`, `edit1`, …) and the next free tab index among its siblings.
     /// It is inserted into the model and recorded as one undo step, and it
     /// becomes the selection. Returns the new node's name, or `None` when the
     /// kind is unknown or `parent` was rejected.
@@ -745,7 +745,7 @@ impl Surface {
             None => (rect.left, rect.top),
         };
 
-        let name = self.auto_name(control_base_name(kind));
+        let name = self.auto_name(&control_base_name(kind));
         let mut node = Node::new(kind, name.clone());
         node.parent = parent.clone();
         for (property, value) in self.schema_defaults(kind) {
@@ -851,7 +851,7 @@ impl Surface {
             .map_or(0, |max| max + 1)
     }
 
-    /// A fresh VB-style name derived from `base`, starting at one and skipping
+    /// A fresh unique name derived from `base`, starting at one and skipping
     /// names already in use.
     fn auto_name(&self, base: &str) -> String {
         let mut index = 1;
@@ -1106,20 +1106,22 @@ fn int_prop(node: &Node, name: &str, default: i64) -> i64 {
     node.prop(name).and_then(Value::as_int).unwrap_or(default)
 }
 
-/// The VB-style base name a control kind is auto-named from, so the first one
-/// becomes `Command1`, `Text1`, `Label1` and so on.
-pub fn control_base_name(kind: &str) -> &'static str {
-    match kind {
-        "CommandButton" | "Button" => "Command",
-        "TextBox" | "Edit" | "MultilineEdit" => "Text",
-        "Label" | "Hyperlink" => "Label",
-        "CheckBox" => "Check",
-        "OptionButton" | "RadioGroup" => "Option",
-        "Frame" | "GroupBox" => "Frame",
-        "ListBox" | "ListView" => "List",
-        "ComboBox" => "Combo",
-        _ => "Control",
+/// The base name a control kind is auto-named from: the kind in snake_case
+/// (PLAN.md §1.1), so the first ones become `button1`, `edit1`, `check_box1`
+/// and so on.
+pub fn control_base_name(kind: &str) -> String {
+    let mut out = String::with_capacity(kind.len() + 4);
+    for (index, character) in kind.chars().enumerate() {
+        if character.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
     }
+    out
 }
 
 #[cfg(test)]
@@ -1413,8 +1415,8 @@ mod tests {
     #[test]
     fn an_unknown_tool_is_rejected() {
         let mut surface = empty();
-        surface.set_tool(Some("CommandButton"));
-        assert_eq!(surface.tool(), Some("CommandButton"));
+        surface.set_tool(Some("Button"));
+        assert_eq!(surface.tool(), Some("Button"));
         surface.set_tool(Some("Nope"));
         assert_eq!(surface.tool(), None);
         surface.set_tool(None);
@@ -1424,27 +1426,27 @@ mod tests {
     #[test]
     fn a_tool_drag_creates_a_control_at_the_dragged_size() {
         let mut surface = empty();
-        surface.set_tool(Some("CommandButton"));
+        surface.set_tool(Some("Button"));
         surface.pointer_down(10, 10, false);
         surface.pointer_move(90, 50, false);
         let outcome = surface.pointer_up(90, 50, false);
         assert!(outcome.change.structure);
-        let node = surface.doc.node("Command1").expect("created");
-        assert_eq!(node.kind, "CommandButton");
+        let node = surface.doc.node("button1").expect("created");
+        assert_eq!(node.kind, "Button");
         assert_eq!(node.prop("left"), Some(&Value::Int(8)));
         assert_eq!(node.prop("top"), Some(&Value::Int(8)));
         assert_eq!(node.prop("width"), Some(&Value::Int(80)));
         assert_eq!(node.prop("height"), Some(&Value::Int(40)));
-        assert!(surface.selection().contains("Command1"));
+        assert!(surface.selection().contains("button1"));
     }
 
     #[test]
     fn a_tool_click_uses_the_schema_default_size() {
         let mut surface = empty();
-        surface.set_tool(Some("CommandButton"));
+        surface.set_tool(Some("Button"));
         surface.pointer_down(40, 40, false);
         surface.pointer_up(40, 40, false);
-        let node = surface.doc.node("Command1").expect("created");
+        let node = surface.doc.node("button1").expect("created");
         assert_eq!(node.prop("width"), Some(&Value::Int(100)));
         assert_eq!(node.prop("height"), Some(&Value::Int(28)));
         assert_eq!(node.prop("left"), Some(&Value::Int(40)));
@@ -1455,46 +1457,46 @@ mod tests {
     fn creation_names_follow_vb_and_skip_taken_names() {
         let mut surface = empty();
         assert_eq!(
-            surface.create_control("CommandButton", DesignRect::default(), None),
-            Some("Command1".into())
+            surface.create_control("Button", DesignRect::default(), None),
+            Some("button1".into())
         );
         assert_eq!(
-            surface.create_control("CommandButton", DesignRect::default(), None),
-            Some("Command2".into())
+            surface.create_control("Button", DesignRect::default(), None),
+            Some("button2".into())
         );
-        surface.select_node("Command2");
+        surface.select_node("button2");
         surface.key(KeyPress::new(KeyInput::Escape));
         assert_eq!(
-            surface.create_control("CommandButton", DesignRect::default(), None),
-            Some("Command3".into())
+            surface.create_control("Button", DesignRect::default(), None),
+            Some("button3".into())
         );
         assert_eq!(
             surface.create_control("Label", DesignRect::default(), None),
-            Some("Label1".into())
+            Some("label1".into())
         );
         assert_eq!(
-            surface.create_control("TextBox", DesignRect::default(), None),
-            Some("Text1".into())
+            surface.create_control("Edit", DesignRect::default(), None),
+            Some("edit1".into())
         );
     }
 
     #[test]
     fn a_new_control_gets_schema_defaults_and_the_next_tab_index() {
         let mut surface = empty();
-        surface.create_control("CommandButton", DesignRect::new(0, 0, 100, 28), None);
+        surface.create_control("Button", DesignRect::new(0, 0, 100, 28), None);
         surface.create_control("Label", DesignRect::new(0, 40, 120, 20), None);
-        let button = surface.doc.node("Command1").expect("button");
+        let button = surface.doc.node("button1").expect("button");
         assert_eq!(button.prop("text"), Some(&Value::Text(String::new())));
         assert_eq!(button.prop("enabled"), Some(&Value::Bool(true)));
         assert_eq!(button.prop("tab_index"), Some(&Value::Int(0)));
-        let label = surface.doc.node("Label1").expect("label");
+        let label = surface.doc.node("label1").expect("label");
         assert_eq!(label.prop("tab_index"), Some(&Value::Int(1)));
     }
 
     #[test]
     fn a_control_dropped_on_a_frame_becomes_its_child() {
         let mut doc = FormDoc::new("frmMain");
-        let mut frame = Node::new("Frame", "Frame1");
+        let mut frame = Node::new("GroupBox", "group_box1");
         frame.set_prop("left", Value::Int(40));
         frame.set_prop("top", Value::Int(40));
         frame.set_prop("width", Value::Int(200));
@@ -1511,12 +1513,12 @@ mod tests {
         surface.pointer_move(96, 80, false);
         surface.pointer_up(96, 80, false);
 
-        let node = surface.doc.node("Label1").expect("created");
-        assert_eq!(node.parent.as_deref(), Some("Frame1"));
+        let node = surface.doc.node("label1").expect("created");
+        assert_eq!(node.parent.as_deref(), Some("group_box1"));
         assert_eq!(node.prop("left"), Some(&Value::Int(8)));
         assert_eq!(node.prop("top"), Some(&Value::Int(8)));
         assert_eq!(
-            surface.node_rect("Label1"),
+            surface.node_rect("label1"),
             Some(DesignRect::new(48, 48, 96, 80))
         );
     }
@@ -1527,21 +1529,18 @@ mod tests {
         surface.set_tool(Some("CheckBox"));
         surface.pointer_down(8, 8, false);
         surface.pointer_up(8, 8, false);
-        assert!(surface.doc.node("Check1").is_some());
+        assert!(surface.doc.node("check_box1").is_some());
         assert!(surface.undo());
-        assert!(surface.doc.node("Check1").is_none());
+        assert!(surface.doc.node("check_box1").is_none());
         assert!(surface.redo());
-        assert!(surface.doc.node("Check1").is_some());
+        assert!(surface.doc.node("check_box1").is_some());
     }
 
     #[test]
     fn drop_control_centres_a_default_sized_control() {
         let mut surface = empty();
-        assert_eq!(
-            surface.drop_control("CommandButton"),
-            Some("Command1".into())
-        );
-        let node = surface.doc.node("Command1").expect("created");
+        assert_eq!(surface.drop_control("Button"), Some("button1".into()));
+        let node = surface.doc.node("button1").expect("created");
         assert_eq!(node.parent, None);
         assert_eq!(node.prop("left"), Some(&Value::Int(110)));
         assert_eq!(node.prop("top"), Some(&Value::Int(86)));
