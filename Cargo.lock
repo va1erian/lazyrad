@@ -1169,6 +1169,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "toml",
+ "xui-form",
 ]
 
 [[package]]
@@ -3161,6 +3162,18 @@ source = "git+https://github.com/va1erian/xui?rev=ec94d605258be5bd19abe876fccd28
 dependencies = [
  "png 0.17.16",
  "zune-jpeg 0.5.15",
+]
+
+[[package]]
+name = "xui-form"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml",
+ "xui-canvas",
+ "xui-core",
 ]
 
 [[package]]

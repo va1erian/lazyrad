@@ -1,19 +1,19 @@
 #![forbid(unsafe_code)]
 
-//! Loading and saving `.lrp` and `.lfm` files.
+//! Loading and saving `.lrp` project files and `.lfm` form documents.
 //!
-//! Loading parses with `toml` and, for forms, re-types enum properties from
-//! the [`SchemaRegistry`]. Saving serialises deterministically and calls
-//! [`write_if_changed`], so an unchanged file is left untouched: its bytes on
-//! disk stay exactly as they were, and the returned [`SaveReport`] records only
-//! the files that were actually rewritten.
+//! A form is an [`xui_form::FormDoc`]: this crate loads the TOML through the
+//! crate's schema-guided decoder and saves it through its deterministic writer.
+//! Saving calls [`write_if_changed`], so an unchanged file is left untouched and
+//! the returned [`SaveReport`] records only the files actually rewritten.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use xui_form::{Catalog, FormDoc};
+
 use crate::error::{Diagnostic, DiagnosticKind, Error};
-use crate::model::{Form, FormFile, Project, PropValue};
-use crate::schema::{PropertyType, SchemaRegistry};
+use crate::model::Project;
 
 /// A form's on-disk extension.
 pub const FORM_EXTENSION: &str = "lfm";
@@ -23,9 +23,6 @@ pub const PROJECT_EXTENSION: &str = "lrp";
 pub const CODE_EXTENSION: &str = "rhai";
 
 /// Which files a save actually rewrote.
-///
-/// Saving twice in a row writes nothing the second time; that is what keeps a
-/// save-triggered git diff empty when only one control moved.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SaveReport {
     /// The paths that differed from disk and were written, in write order.
@@ -52,9 +49,6 @@ impl SaveReport {
 }
 
 /// Writes `contents` to `path` only when the bytes differ.
-///
-/// A missing file is written; an existing file with identical bytes is left
-/// alone. Parent directories are created on demand.
 pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<SaveReport, Error> {
     let mut report = SaveReport::default();
     if existing_bytes(path)?.as_deref() != Some(contents) {
@@ -84,37 +78,21 @@ fn read_text(path: &Path) -> Result<String, Error> {
     fs::read_to_string(path).map_err(|source| Error::io(path, source))
 }
 
-/// Turns a `toml` parse failure into a located [`Diagnostic`].
-fn parse_error(path: &Path, text: &str, source: toml::de::Error) -> Error {
-    let line = source.span().map(|span| line_for_offset(text, span.start));
-    let diagnostic = Diagnostic {
-        kind: DiagnosticKind::Syntax,
-        file: path.to_path_buf(),
-        line,
-        message: source.message().to_owned(),
-    };
-    Error::Diagnostic(diagnostic)
-}
-
-/// The one-based line an absolute byte offset falls on.
-fn line_for_offset(text: &str, offset: usize) -> usize {
-    let offset = offset.min(text.len());
-    text.as_bytes()[..offset]
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count()
-        + 1
-}
-
-/// Serialises `form` to TOML, mapping the (rare) writer error to a diagnostic.
-fn form_to_toml(path: &Path, form: &Form) -> Result<String, Error> {
-    toml::to_string(&FormFile::from(form)).map_err(|source| {
-        Error::Diagnostic(Diagnostic::new(
-            DiagnosticKind::Syntax,
-            path.to_path_buf(),
-            source.to_string(),
-        ))
+/// Loads a form document from `path` against `catalog`.
+pub fn load_form(path: &Path, catalog: &Catalog) -> Result<FormDoc, Error> {
+    let text = read_text(path)?;
+    FormDoc::from_toml(&text, catalog).map_err(|error| {
+        let diagnostic = match error.line() {
+            Some(line) => Diagnostic::at(DiagnosticKind::Syntax, path, line, error.message()),
+            None => Diagnostic::new(DiagnosticKind::Syntax, path, error.message()),
+        };
+        Error::Diagnostic(diagnostic)
     })
+}
+
+/// Serialises a form document to `path`, writing it only if it changed.
+pub fn save_form(path: &Path, doc: &FormDoc, catalog: &Catalog) -> Result<SaveReport, Error> {
+    write_if_changed(path, doc.to_toml(catalog).as_bytes())
 }
 
 /// Serialises `project` to TOML, mapping the (rare) writer error to a diagnostic.
@@ -130,11 +108,6 @@ fn project_to_toml(path: &Path, project: &Project) -> Result<String, Error> {
 
 impl Project {
     /// Loads the single `.lrp` file in `dir`.
-    ///
-    /// Returns a [`DiagnosticKind::ProjectFile`] error when the directory has
-    /// no `.lrp`, more than one, or when the file name is not `<name>.lrp` for
-    /// the `name` inside it. [`Project::save`] and [`Project::validate`] use
-    /// `<name>.lrp`, so a mismatch would make a save create a second file.
     pub fn load(dir: &Path) -> Result<Self, Error> {
         let path = find_project_file(dir)?;
         let text = read_text(&path)?;
@@ -169,84 +142,41 @@ impl Project {
     pub fn load_forms(
         &self,
         dir: &Path,
-        registry: &SchemaRegistry,
-    ) -> Result<Vec<(String, Form)>, Error> {
+        catalog: &Catalog,
+    ) -> Result<Vec<(String, FormDoc)>, Error> {
         let mut forms = Vec::new();
         for item in &self.items {
             if let Some(layout) = item.layout() {
-                let form = Form::load(&dir.join(layout), registry)?;
-                forms.push((item.name().to_owned(), form));
+                forms.push((
+                    item.name().to_owned(),
+                    load_form(&dir.join(layout), catalog)?,
+                ));
             }
         }
         Ok(forms)
     }
 }
 
-impl Form {
-    /// Parses a `.lfm` from a string, without re-typing enum properties.
-    pub fn from_toml(text: &str) -> Result<Self, Error> {
-        Self::from_toml_at(text, Path::new("<form>"))
-    }
+/// Turns a `toml` parse failure into a located [`Diagnostic`].
+fn parse_error(path: &Path, text: &str, source: toml::de::Error) -> Error {
+    let line = source.span().map(|span| line_for_offset(text, span.start));
+    let diagnostic = Diagnostic {
+        kind: DiagnosticKind::Syntax,
+        file: path.to_path_buf(),
+        line,
+        message: source.message().to_owned(),
+    };
+    Error::Diagnostic(diagnostic)
+}
 
-    /// Parses a `.lfm` from a string, reporting syntax errors against `path`.
-    pub fn from_toml_at(text: &str, path: &Path) -> Result<Self, Error> {
-        let file: FormFile =
-            toml::from_str(text).map_err(|source| parse_error(path, text, source))?;
-        Ok(file.into())
-    }
-
-    /// Parses a `.lfm` from a string and re-types its enum properties.
-    pub fn from_toml_with_schema(text: &str, registry: &SchemaRegistry) -> Result<Self, Error> {
-        Self::from_toml_with_schema_at(text, Path::new("<form>"), registry)
-    }
-
-    /// Parses a `.lfm` from a string, re-typing enum properties, and reporting
-    /// syntax errors against `path`.
-    pub fn from_toml_with_schema_at(
-        text: &str,
-        path: &Path,
-        registry: &SchemaRegistry,
-    ) -> Result<Self, Error> {
-        let mut form = Self::from_toml_at(text, path)?;
-        form.apply_schema(registry);
-        Ok(form)
-    }
-
-    /// Loads a `.lfm` file and re-types its enum properties.
-    pub fn load(path: &Path, registry: &SchemaRegistry) -> Result<Self, Error> {
-        let text = read_text(path)?;
-        Self::from_toml_with_schema_at(&text, path, registry)
-    }
-
-    /// Re-types string properties whose schema declares them an enum.
-    pub fn apply_schema(&mut self, registry: &SchemaRegistry) {
-        for control in &mut self.controls {
-            let Some(schema) = registry.get(&control.type_name) else {
-                continue;
-            };
-            for (name, value) in &mut control.props {
-                let Some(property) = schema.property(name) else {
-                    continue;
-                };
-                *value = match (property.ty, &*value) {
-                    (PropertyType::Enum, PropValue::Text(text)) => PropValue::Enum(text.clone()),
-                    (PropertyType::Text, PropValue::Enum(text)) => PropValue::Text(text.clone()),
-                    _ => continue,
-                };
-            }
-        }
-    }
-
-    /// Serialises the form to TOML with a stable key order.
-    pub fn to_toml(&self) -> Result<String, Error> {
-        form_to_toml(Path::new("<form>"), self)
-    }
-
-    /// Serialises the form to `path`, writing it only if it changed.
-    pub fn save(&self, path: &Path) -> Result<SaveReport, Error> {
-        let text = form_to_toml(path, self)?;
-        write_if_changed(path, text.as_bytes())
-    }
+/// The one-based line an absolute byte offset falls on.
+fn line_for_offset(text: &str, offset: usize) -> usize {
+    let offset = offset.min(text.len());
+    text.as_bytes()[..offset]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
 }
 
 /// Finds the single `.lrp` file in `dir`.

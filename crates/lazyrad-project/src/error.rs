@@ -2,22 +2,19 @@
 
 //! Errors and validation diagnostics.
 //!
-//! Everything a caller can be told about a project file's problems funnels
-//! through [`Diagnostic`]: it always names the file and, when the offending
-//! text can be located, the line. Syntax errors get their line from the TOML
-//! parser's byte span; semantic errors find the line by scanning the raw file.
-//! [`Error`] wraps a diagnostic together with the plain I/O failures.
+//! A project has two layers of problems: file-level ones (a missing form, a bad
+//! `.lrp`, a TOML syntax error) and form-level ones (a bad control), which come
+//! from [`xui_form`]. Both funnel through [`Diagnostic`], which names the file
+//! and, when the text can be located, the line. [`Error`] wraps a diagnostic
+//! together with plain I/O failures.
 
 use std::fmt;
 use std::path::PathBuf;
 
 /// What kind of problem a [`Diagnostic`] reports.
-///
-/// The kind exists so callers (the IDE's error list, tests) can react to a
-/// class of problem without matching on the human-readable message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DiagnosticKind {
-    /// The file could not be parsed as TOML.
+    /// The project or a form could not be parsed.
     Syntax,
     /// A referenced file does not exist on disk.
     MissingFile,
@@ -25,25 +22,14 @@ pub enum DiagnosticKind {
     ProjectFile,
     /// The project's `startup` names an item that is not in `items`.
     UnknownStartup,
-    /// Two controls in a form share a name.
-    DuplicateControlName,
-    /// A control name is not a valid identifier.
-    InvalidControlName,
-    /// A control's `type` is not in the schema registry.
-    UnknownControlType,
-    /// A property is not declared for the control's type.
-    UnknownProperty,
-    /// A property value does not match the type the schema declares.
-    InvalidPropertyType,
-    /// An enum property carries a value the schema does not list.
-    InvalidEnumValue,
+    /// A form failed validation.
+    InvalidForm,
 }
 
 /// One problem found in a project file.
 ///
-/// `file` is absolute or project-relative depending on how the caller passed
-/// it in; `line` is one-based and present only when the offending text was
-/// located.
+/// `file` is absolute or project-relative depending on how the caller passed it
+/// in; `line` is one-based and present only when the offending text was located.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     /// The kind of problem.
@@ -87,6 +73,23 @@ impl Diagnostic {
     pub fn with_line(mut self, line: usize) -> Self {
         self.line = Some(line);
         self
+    }
+
+    /// Converts a `xui-form` form diagnostic into a project diagnostic against
+    /// `file`.
+    pub fn from_form(file: impl Into<PathBuf>, diagnostic: &xui_form::Diagnostic) -> Self {
+        let prefix = match (&diagnostic.node, &diagnostic.property) {
+            (Some(node), Some(property)) => format!("{node}.{property}: "),
+            (Some(node), None) => format!("{node}: "),
+            (None, Some(property)) => format!("{property}: "),
+            (None, None) => String::new(),
+        };
+        Self {
+            kind: DiagnosticKind::InvalidForm,
+            file: file.into(),
+            line: diagnostic.line,
+            message: format!("{prefix}{}", diagnostic.message),
+        }
     }
 }
 
@@ -142,7 +145,7 @@ mod tests {
     #[test]
     fn a_diagnostic_display_includes_the_line_when_known() {
         let located = Diagnostic::at(
-            DiagnosticKind::UnknownProperty,
+            DiagnosticKind::Syntax,
             "frmMain.lfm",
             7,
             "`foo` is not a property",
