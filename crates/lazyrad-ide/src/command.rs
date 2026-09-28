@@ -27,6 +27,8 @@ pub enum Command {
     OpenRecent(usize),
     /// File → Save.
     Save,
+    /// File → Save As.
+    SaveAs,
     /// File → Save All.
     SaveAll,
     /// File → Close Project.
@@ -154,6 +156,7 @@ impl Command {
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
+        Command::SaveAs,
         Command::SaveAll,
         Command::CloseProject,
         Command::Exit,
@@ -189,6 +192,7 @@ impl Command {
             Command::OpenProject => "Open Project".to_string(),
             Command::OpenRecent(index) => format!("Recent {index}"),
             Command::Save => "Save".to_string(),
+            Command::SaveAs => "Save As".to_string(),
             Command::SaveAll => "Save All".to_string(),
             Command::CloseProject => "Close Project".to_string(),
             Command::Exit => "Exit".to_string(),
@@ -249,6 +253,7 @@ impl Command {
         matches!(
             self,
             Command::Save
+                | Command::SaveAs
                 | Command::SaveAll
                 | Command::CloseProject
                 | Command::Undo

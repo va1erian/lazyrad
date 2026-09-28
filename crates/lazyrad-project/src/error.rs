@@ -146,23 +146,23 @@ mod tests {
     fn a_diagnostic_display_includes_the_line_when_known() {
         let located = Diagnostic::at(
             DiagnosticKind::Syntax,
-            "frmMain.lfm",
+            "main_form.lfm",
             7,
             "`foo` is not a property",
         );
         assert_eq!(
             located.to_string(),
-            "frmMain.lfm:7: `foo` is not a property"
+            "main_form.lfm:7: `foo` is not a property"
         );
 
-        let loose = Diagnostic::new(DiagnosticKind::Syntax, "frmMain.lfm", "unexpected token");
-        assert_eq!(loose.to_string(), "frmMain.lfm: unexpected token");
+        let loose = Diagnostic::new(DiagnosticKind::Syntax, "main_form.lfm", "unexpected token");
+        assert_eq!(loose.to_string(), "main_form.lfm: unexpected token");
     }
 
     #[test]
     fn with_line_attaches_a_line() {
         let diagnostic =
-            Diagnostic::new(DiagnosticKind::MissingFile, "Hello.lrp", "gone").with_line(3);
+            Diagnostic::new(DiagnosticKind::MissingFile, "hello.lrp", "gone").with_line(3);
         assert_eq!(diagnostic.line, Some(3));
     }
 

@@ -7,7 +7,7 @@ const SAMPLE: &str = "\
 format = 1
 
 [window]
-name = \"frmMain\"
+name = \"main_form\"
 height = 240
 resizable = false
 title = \"Hello\"
@@ -47,7 +47,7 @@ selected = 1
 fn a_canonical_form_round_trips_byte_for_byte() {
     let catalog = Catalog::xui();
     let doc = FormDoc::from_toml(SAMPLE, &catalog).expect("the sample loads");
-    assert_eq!(doc.window.name, "frmMain");
+    assert_eq!(doc.window.name, "main_form");
     assert_eq!(
         doc.window.prop("title"),
         Some(&Value::Text("Hello".to_owned()))
@@ -67,7 +67,7 @@ fn a_canonical_form_round_trips_byte_for_byte() {
 #[test]
 fn a_value_equal_to_its_default_is_dropped_on_save() {
     let catalog = Catalog::xui();
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut button = xui_form::Node::new("Button", "cmdGo");
     // `width` defaults to the Button's default size, `visible` to true.
     button.set_prop("width", Value::Int(100));
@@ -91,7 +91,7 @@ fn a_value_equal_to_its_default_is_dropped_on_save() {
 format = 1
 
 [window]
-name = \"frmMain\"
+name = \"main_form\"
 
 [[node]]
 kind = \"Button\"
@@ -118,7 +118,7 @@ fn an_unknown_kind_is_reported_with_its_line() {
 format = 1
 
 [window]
-name = \"frmMain\"
+name = \"main_form\"
 
 [[node]]
 kind = \"Nope\"
@@ -136,7 +136,7 @@ fn an_unknown_property_is_reported() {
 format = 1
 
 [window]
-name = \"frmMain\"
+name = \"main_form\"
 
 [[node]]
 kind = \"Button\"
@@ -155,7 +155,7 @@ fn a_mistyped_value_is_reported() {
 format = 1
 
 [window]
-name = \"frmMain\"
+name = \"main_form\"
 
 [[node]]
 kind = \"Button\"
@@ -183,7 +183,7 @@ fn a_load_error_points_into_the_failing_node() {
 format = 1
 
 [window]
-name = \"frmMain\"
+name = \"main_form\"
 width = 400
 
 [[node]]
