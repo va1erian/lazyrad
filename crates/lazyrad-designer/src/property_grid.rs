@@ -92,6 +92,8 @@ const COMBO_HEIGHT: Dip = Dip(24.0);
 const TAB_HEIGHT: Dip = Dip(22.0);
 /// The height of a property row, in design units.
 const ROW_HEIGHT: Dip = Dip(22.0);
+/// How many rows one mouse-wheel notch scrolls.
+const WHEEL_ROWS: i32 = 3;
 /// The height of a category header, in design units.
 const HEADER_HEIGHT: Dip = Dip(22.0);
 /// The text size for labels and values, in design units.
@@ -152,6 +154,9 @@ pub enum PropertyGridMsg {
     CommitBool(bool),
     /// The user pressed Escape: revert the active editor.
     Cancel,
+    /// The user scrolled the rows by this many pixels (positive moves the
+    /// content up, showing later rows).
+    Scroll(i32),
 }
 
 /// Why a [`PropertyGrid`] could not be built.
@@ -411,6 +416,48 @@ impl Layout {
             };
         }
         tops
+    }
+
+    /// The height of a visual line.
+    fn line_height(&self, line: &Line) -> i32 {
+        match line {
+            Line::Header(_) => self.header_h,
+            Line::Row(_) => self.row_h,
+        }
+    }
+
+    /// The largest useful scroll offset: the content's overflow below the
+    /// body, or zero when everything fits.
+    fn max_scroll(&self, lines: &[Line]) -> i32 {
+        let content: i32 = lines.iter().map(|line| self.line_height(line)).sum();
+        (content - (self.body_bottom - self.body_top)).max(0)
+    }
+
+    /// `scroll` clamped to `0..=max_scroll`.
+    fn clamp_scroll(&self, lines: &[Line], scroll: i32) -> i32 {
+        scroll.clamp(0, self.max_scroll(lines))
+    }
+
+    /// The scroll offset that brings `row_index` fully into view, moving as
+    /// little as possible from `scroll`.
+    fn scroll_to_row(&self, lines: &[Line], scroll: i32, row_index: usize) -> i32 {
+        let mut top = 0;
+        for line in lines {
+            let height = self.line_height(line);
+            if matches!(line, Line::Row(index) if *index == row_index) {
+                let body = self.body_bottom - self.body_top;
+                let scroll = if top < scroll {
+                    top
+                } else if top + height > scroll + body {
+                    top + height - body
+                } else {
+                    scroll
+                };
+                return self.clamp_scroll(lines, scroll);
+            }
+            top += height;
+        }
+        self.clamp_scroll(lines, scroll)
     }
 
     /// The value cell of `row_index`, if it is visible.
@@ -770,7 +817,27 @@ impl<M: 'static> PropertyGrid<M> {
             &self.designer.borrow(),
             &self.catalog,
         );
+        self.clamp_scroll(ui);
         ui.invalidate(self.id());
+    }
+
+    /// The rows' current scroll offset in pixels (0 is the top).
+    pub fn scroll_offset(&self) -> i32 {
+        self.state.borrow().scroll
+    }
+
+    /// The grid's layout at its current bounds.
+    fn layout(&self, ui: &Ui<M>) -> Layout {
+        let bounds = ui.bounds(self.id());
+        Layout::new(bounds.width(), bounds.height(), ui.dpi())
+    }
+
+    /// Keeps the scroll offset inside the content after the rows changed.
+    fn clamp_scroll(&self, ui: &Ui<M>) {
+        let layout = self.layout(ui);
+        let mut state = self.state.borrow_mut();
+        let lines = visual_lines(&state.rows, state.view);
+        state.scroll = layout.clamp_scroll(&lines, state.scroll);
     }
 
     /// Handles one grid message. The host forwards its wrapped message here.
@@ -800,6 +867,17 @@ impl<M: 'static> PropertyGrid<M> {
                 ui.invalidate(self.id());
             }
             PropertyGridMsg::BeginEdit(index) => self.begin_edit(index, ui),
+            PropertyGridMsg::Scroll(delta) => {
+                // An open editor sits at its row's old position; close it
+                // rather than leave it floating over another row.
+                self.close_editor(ui);
+                let layout = self.layout(ui);
+                let mut state = self.state.borrow_mut();
+                let lines = visual_lines(&state.rows, state.view);
+                state.scroll = layout.clamp_scroll(&lines, state.scroll + delta);
+                drop(state);
+                ui.invalidate(self.id());
+            }
             PropertyGridMsg::CommitText(text) => {
                 // A commit can arrive after its editor closed (Enter, then the
                 // focus loss the close causes); only a live text editor with an
@@ -856,6 +934,13 @@ impl<M: 'static> PropertyGrid<M> {
     /// Creates the editor for row `index`, if the row can be edited.
     fn begin_edit(&self, index: usize, ui: &Ui<M>) {
         self.close_editor(ui);
+        {
+            // The editor goes over the row's value cell, which must be visible.
+            let layout = self.layout(ui);
+            let mut state = self.state.borrow_mut();
+            let lines = visual_lines(&state.rows, state.view);
+            state.scroll = layout.scroll_to_row(&lines, state.scroll, index);
+        }
         let (row, scroll) = {
             let state = self.state.borrow();
             let Some(row) = state.rows.get(index).cloned() else {
@@ -988,6 +1073,10 @@ impl<M: 'static> PropertyGrid<M> {
 /// Recomputes the rows, object list and targets from the designer.
 fn refresh_rows<M: 'static>(state: &mut GridState<M>, designer: &Designer<M>, catalog: &Catalog) {
     let target = target_for(&designer.selection());
+    if target != state.target {
+        // Another object's rows start from the top.
+        state.scroll = 0;
+    }
     let doc = designer.doc();
     state.rows = property_rows(catalog, &doc, &target, state.view);
     state.objects = objects_of(&doc);
@@ -1282,6 +1371,20 @@ fn grid_message<M: 'static>(
             }
             let row = layout.row_at(&shared.borrow(), *x, *y)?;
             Some(wrap(PropertyGridMsg::BeginEdit(row)))
+        }
+        Event::MouseWheel {
+            delta,
+            horizontal: false,
+            ..
+        } => {
+            // The object dropdown overlays the rows; leave it be.
+            if shared.borrow().objects_open {
+                return None;
+            }
+            // A notch scrolls three rows; a positive delta is "away from the
+            // user", which shows earlier rows.
+            let step = layout.row_h * WHEEL_ROWS;
+            Some(wrap(PropertyGridMsg::Scroll(-i32::from(*delta) * step)))
         }
         Event::KeyDown {
             key,

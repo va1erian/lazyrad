@@ -333,3 +333,35 @@ fn the_grid_paints_without_panicking() {
     })
     .expect("run_app succeeds");
 }
+
+#[test]
+fn scrolling_is_clamped_to_the_rows() {
+    let ((up, down), _) = with_editor(button_doc(), |editor, ui| {
+        // A short grid cannot show every row.
+        editor.grid.set_bounds(Rect::new(340, 0, 556, 110));
+        editor.grid.sync(ui);
+        editor.grid.update(PropertyGridMsg::Scroll(-500), ui);
+        let up = editor.grid.scroll_offset();
+        editor.grid.update(PropertyGridMsg::Scroll(100_000), ui);
+        (up, editor.grid.scroll_offset())
+    });
+    assert_eq!(up, 0, "cannot scroll above the first row");
+    assert!(
+        down > 0,
+        "a 200px grid cannot show every row, so it scrolls"
+    );
+    assert!(down < 100_000, "the offset stops at the last row");
+}
+
+#[test]
+fn editing_a_row_below_the_view_scrolls_it_into_view() {
+    let (scrolled, _) = with_editor(button_doc(), |editor, ui| {
+        // A short grid cannot show every row, so the last one is below the view.
+        editor.grid.set_bounds(Rect::new(340, 0, 556, 110));
+        editor.grid.sync(ui);
+        let last = editor.grid.rows().len() - 1;
+        editor.grid.update(PropertyGridMsg::BeginEdit(last), ui);
+        editor.grid.scroll_offset()
+    });
+    assert!(scrolled > 0, "the last row was brought into view");
+}
