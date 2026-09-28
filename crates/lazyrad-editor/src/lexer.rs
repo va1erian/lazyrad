@@ -159,6 +159,10 @@ fn is_keyword(text: &str) -> bool {
             | "await"
             | "use"
             | "case"
+            | "this"
+            | "global"
+            | "static"
+            | "var"
     )
 }
 
@@ -744,58 +748,84 @@ impl LineLexer {
     /// The caret may sit either just before or just after a bracket. Brackets
     /// inside strings and comments are not tokenised as punctuation, so they are
     /// naturally skipped.
+    ///
+    /// The search walks outward from the caret's bracket through the cached
+    /// lines and stops at its match, so its cost is the distance between the
+    /// two brackets (capped at [`BRACKET_SCAN_LINES`]), not the file size. It
+    /// runs on every paint, so it must not scan the whole buffer.
     pub fn bracket_pair(&self, buffer: &Buffer, caret: usize) -> Option<(usize, usize)> {
-        let (offset, open) = bracket_at(buffer, caret)?;
-        let brackets = self.bracket_positions(buffer);
-        let index = brackets
-            .iter()
-            .position(|(position, _)| *position == offset)?;
+        let (offset, bracket) = bracket_at(buffer, caret)?;
+        let line = buffer.line_of_char(offset);
+        let col = offset - buffer.line_start(line);
+        // Only a code bracket counts; one inside a string or comment does not.
+        if !self.lines.get(line)?.brackets().any(|(at, _)| at == col) {
+            return None;
+        }
+
+        let forward = matching_close(bracket) != bracket;
+        let (same, other) = if forward {
+            (bracket, matching_close(bracket))
+        } else {
+            (bracket, matching_open(bracket))
+        };
         let mut depth = 0usize;
-        if matching_close(open) != open {
-            let close = matching_close(open);
-            for &(position, c) in &brackets[index..] {
-                if c == open {
-                    depth += 1;
-                } else if c == close {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((offset, position));
-                    }
+        let mut step = |c: char| {
+            if c == same {
+                depth += 1;
+            } else if c == other {
+                depth -= 1;
+                return depth == 0;
+            }
+            false
+        };
+
+        let last = self.lines.len().min(line + BRACKET_SCAN_LINES);
+        let first = line.saturating_sub(BRACKET_SCAN_LINES);
+        if forward {
+            for current in line..last {
+                let found = self.lines[current]
+                    .brackets()
+                    .filter(|&(at, _)| current != line || at >= col)
+                    .find(|&(_, c)| step(c));
+                if let Some((at, _)) = found {
+                    return Some((offset, buffer.line_start(current) + at));
                 }
             }
         } else {
-            let opener = matching_open(open);
-            for &(position, c) in brackets[..=index].iter().rev() {
-                if c == open {
-                    depth += 1;
-                } else if c == opener {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((position, offset));
-                    }
+            for current in (first..=line).rev() {
+                let brackets: Vec<_> = self.lines[current].brackets().collect();
+                let found = brackets
+                    .into_iter()
+                    .rev()
+                    .filter(|&(at, _)| current != line || at <= col)
+                    .find(|&(_, c)| step(c));
+                if let Some((at, _)) = found {
+                    return Some((buffer.line_start(current) + at, offset));
                 }
             }
         }
         None
     }
+}
 
-    /// Every code bracket in the buffer, in order, as `(char offset, bracket)`.
-    fn bracket_positions(&self, buffer: &Buffer) -> Vec<(usize, char)> {
-        let mut brackets = Vec::new();
-        for line in 0..self.lines.len() {
-            let base = buffer.line_start(line);
-            for token in &self.lines[line].tokens {
-                if token.class != TokenClass::Punctuation {
-                    continue;
-                }
-                if let Some(c) = buffer.char_at(base + token.start)
-                    && is_bracket(c)
-                {
-                    brackets.push((base + token.start, c));
-                }
-            }
-        }
-        brackets
+/// How many lines [`LineLexer::bracket_pair`] searches in each direction
+/// before giving up, so an unmatched bracket in a huge file stays cheap.
+pub const BRACKET_SCAN_LINES: usize = 2_000;
+
+impl LexedLine {
+    /// The code brackets on this line, as `(char column, bracket)`, read from
+    /// the cached text at the columns of its punctuation tokens.
+    fn brackets(&self) -> impl Iterator<Item = (usize, char)> + '_ {
+        let mut tokens = self
+            .tokens
+            .iter()
+            .filter(|token| token.class == TokenClass::Punctuation)
+            .peekable();
+        self.text.chars().enumerate().filter_map(move |(col, c)| {
+            while tokens.next_if(|token| token.start < col).is_some() {}
+            let starts_token = tokens.peek().is_some_and(|token| token.start == col);
+            (starts_token && is_bracket(c)).then_some((col, c))
+        })
     }
 }
 
@@ -1067,6 +1097,25 @@ mod tests {
         let open = text.find('(').expect("open paren");
         let close = text.rfind(')').expect("close paren");
         assert_eq!(lexer.bracket_pair(&buffer, open + 1), Some((open, close)));
+    }
+
+    #[test]
+    fn bracket_matching_spans_lines_and_nesting_in_both_directions() {
+        let text = "fn f() {\n    if x { g(\"}\"); }\n    // }\n}\n";
+        let buffer = Buffer::new(text);
+        let lexer = LineLexer::new(&buffer);
+        let open = text.find('{').expect("the function's brace");
+        let close = text.rfind('}').expect("the closing brace");
+        assert_eq!(lexer.bracket_pair(&buffer, open), Some((open, close)));
+        assert_eq!(lexer.bracket_pair(&buffer, close), Some((open, close)));
+    }
+
+    #[test]
+    fn this_and_other_reserved_words_are_keywords() {
+        for word in ["this", "global", "static", "var"] {
+            let (tokens, _) = lex_line(word, LexState::default());
+            assert_eq!(tokens[0].class, TokenClass::Keyword, "{word}");
+        }
     }
 
     // The oracle: Rhai's own tokenizer must start a token wherever this lexer
