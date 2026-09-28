@@ -16,7 +16,7 @@ use std::path::PathBuf;
 pub enum DiagnosticKind {
     /// The project or a form could not be parsed.
     Syntax,
-    /// A referenced file does not exist on disk.
+    /// A referenced file does not exist on disk, or exists but cannot be read.
     MissingFile,
     /// A project directory has no `.lrp`, or more than one.
     ProjectFile,

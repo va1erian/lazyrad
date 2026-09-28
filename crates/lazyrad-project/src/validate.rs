@@ -55,11 +55,11 @@ impl Project {
                             diagnostic.kind = DiagnosticKind::InvalidForm;
                             diagnostics.push(diagnostic);
                         }
-                        Err(error) => diagnostics.push(Diagnostic::new(
-                            DiagnosticKind::Syntax,
-                            &path,
-                            error.to_string(),
-                        )),
+                        // The file exists but could not be read: it is as
+                        // unusable as a missing one, not a syntax problem.
+                        Err(error @ crate::error::Error::Io { .. }) => diagnostics.push(
+                            Diagnostic::new(DiagnosticKind::MissingFile, &path, error.to_string()),
+                        ),
                     }
                 } else {
                     diagnostics.push(referenced_file_missing(
