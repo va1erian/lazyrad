@@ -1134,8 +1134,10 @@ name = "lazyrad-designer"
 version = "0.1.0"
 dependencies = [
  "lazyrad-project",
- "lazyrad-runtime",
+ "thiserror 2.0.21",
+ "xui-canvas",
  "xui-core",
+ "xui-form",
 ]
 
 [[package]]

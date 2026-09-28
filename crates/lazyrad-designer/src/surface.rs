@@ -1,0 +1,1202 @@
+#![forbid(unsafe_code)]
+
+//! The designer's model and gesture engine, with no xui types.
+//!
+//! [`Surface`] owns an [`xui_form::FormDoc`] and turns design-unit input into
+//! model edits. Every gesture is model-first: it edits the document through
+//! [`Surface::pointer_down`], [`Surface::pointer_move`] and friends, and records
+//! one snapshot in the [`History`] when the gesture ends. The xui widget in
+//! [`crate::Designer`] owns a `Surface`, converts its pixel input to design
+//! units, and re-applies the model to the live widgets. Keeping the pure logic
+//! here means selection, snapping, undo/redo and clipboard behaviour are all
+//! unit-tested without a window.
+
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use xui_form::{Catalog, FormDoc, Node, Value};
+
+use crate::geometry::{DesignRect, Handle, handle_at, resize, resize_form, snap};
+use crate::history::History;
+
+/// The default grid spacing in design units.
+pub const DEFAULT_GRID: i64 = 8;
+
+/// How close (in design units) the pointer must be to a handle centre to grab
+/// it.
+pub const HANDLE_TOLERANCE: i64 = 4;
+
+/// The smallest node a resize may leave behind, in design units.
+const MIN_SIZE: i64 = 1;
+
+/// What the designer has selected: the form itself, or one or more controls.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Selection {
+    /// The form/window is selected; its handles resize the client area.
+    #[default]
+    Form,
+    /// Controls are selected, in the order they were added to the selection.
+    Nodes(Vec<String>),
+}
+
+impl Selection {
+    /// The selected node names, or an empty slice when the form is selected.
+    pub fn nodes(&self) -> &[String] {
+        match self {
+            Selection::Form => &[],
+            Selection::Nodes(names) => names,
+        }
+    }
+
+    /// Whether the form itself is selected.
+    pub fn is_form(&self) -> bool {
+        matches!(self, Selection::Form)
+    }
+
+    /// Whether `name` is among the selected controls.
+    pub fn contains(&self, name: &str) -> bool {
+        self.nodes().iter().any(|selected| selected == name)
+    }
+}
+
+/// A logical key the designer understands, mapped from xui's virtual keys by
+/// [`crate::Designer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyInput {
+    /// Nudge left.
+    Left,
+    /// Nudge right.
+    Right,
+    /// Nudge up.
+    Up,
+    /// Nudge down.
+    Down,
+    /// Delete the selection.
+    Delete,
+    /// Delete the selection (the keyboard's backspace).
+    Backspace,
+    /// Select the form.
+    Escape,
+    /// Copy the selection (Ctrl+C).
+    Copy,
+    /// Paste the clipboard (Ctrl+V).
+    Paste,
+    /// Duplicate the selection (Ctrl+D).
+    Duplicate,
+    /// Undo (Ctrl+Z).
+    Undo,
+    /// Redo (Ctrl+Y, or Ctrl+Shift+Z).
+    Redo,
+    /// Select every control (Ctrl+A).
+    SelectAll,
+}
+
+/// A key press and the modifiers held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyPress {
+    /// The logical key.
+    pub key: KeyInput,
+    /// Whether Ctrl was held.
+    pub ctrl: bool,
+    /// Whether Shift was held.
+    pub shift: bool,
+}
+
+impl KeyPress {
+    /// A key press with no modifiers.
+    pub const fn new(key: KeyInput) -> KeyPress {
+        KeyPress {
+            key,
+            ctrl: false,
+            shift: false,
+        }
+    }
+
+    /// The same press with Ctrl held.
+    pub const fn ctrl(key: KeyInput) -> KeyPress {
+        KeyPress {
+            key,
+            ctrl: true,
+            shift: false,
+        }
+    }
+}
+
+/// Which pointer the designer wants over its surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorHint {
+    /// The platform default.
+    #[default]
+    Default,
+    /// An east-west resize arrow.
+    SizeHorizontal,
+    /// A north-south resize arrow.
+    SizeVertical,
+}
+
+/// What a design-unit edit changed, so [`crate::Designer`] knows how to refresh
+/// the live widgets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Change {
+    /// A node's position or size changed; re-apply geometry to the live widgets.
+    pub geometry: bool,
+    /// Nodes were added or removed; rebuild the live form.
+    pub structure: bool,
+    /// The selection changed.
+    pub selection: bool,
+}
+
+impl Change {
+    /// No change at all.
+    pub const NONE: Change = Change {
+        geometry: false,
+        structure: false,
+        selection: false,
+    };
+
+    /// A geometry-only change.
+    pub const GEOMETRY: Change = Change {
+        geometry: true,
+        ..Change::NONE
+    };
+
+    /// A selection-only change.
+    pub const SELECTION: Change = Change {
+        selection: true,
+        ..Change::NONE
+    };
+
+    /// A structural change (which also refreshes the selection).
+    pub const STRUCTURE: Change = Change {
+        structure: true,
+        selection: true,
+        ..Change::NONE
+    };
+
+    /// Whether anything changed.
+    pub const fn any(self) -> bool {
+        self.geometry || self.structure || self.selection
+    }
+}
+
+/// The result of one gesture: what changed and which cursor to show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    /// What the edit changed.
+    pub change: Change,
+    /// The pointer to show over the surface.
+    pub cursor: CursorHint,
+}
+
+impl Outcome {
+    /// An outcome that changed nothing.
+    pub const fn none() -> Outcome {
+        Outcome {
+            change: Change::NONE,
+            cursor: CursorHint::Default,
+        }
+    }
+
+    /// An outcome with `change` and the default cursor.
+    pub const fn changed(change: Change) -> Outcome {
+        Outcome {
+            change,
+            cursor: CursorHint::Default,
+        }
+    }
+
+    /// The same outcome with `cursor`.
+    pub const fn cursor(mut self, cursor: CursorHint) -> Outcome {
+        self.cursor = cursor;
+        self
+    }
+}
+
+/// The gesture currently in progress.
+#[derive(Clone, Debug)]
+enum Drag {
+    /// No gesture.
+    None,
+    /// Moving the selected nodes; `starts` holds each moved node's original
+    /// `left`/`top`.
+    Move {
+        origin: (i64, i64),
+        starts: Vec<(String, i64, i64)>,
+    },
+    /// Resizing a single node through `handle`.
+    ResizeNode {
+        name: String,
+        handle: Handle,
+        start_rect: DesignRect,
+        origin: (i64, i64),
+    },
+    /// Resizing the form's client area.
+    ResizeForm {
+        handle: Handle,
+        start_rect: DesignRect,
+    },
+    /// Rubber-band selection from `origin` to the live pointer position.
+    Marquee { origin: (i64, i64) },
+}
+
+/// The designer's document, selection, clipboard, history and live gesture.
+#[derive(Clone)]
+pub struct Surface {
+    doc: FormDoc,
+    catalog: Rc<Catalog>,
+    selection: Selection,
+    grid: i64,
+    history: History<FormDoc>,
+    clipboard: Vec<Node>,
+    drag: Drag,
+    preview: Option<DesignRect>,
+    marquee: Option<DesignRect>,
+}
+
+impl Surface {
+    /// A surface editing `doc` with catalog `catalog` and a `grid` snap spacing.
+    pub fn new(doc: FormDoc, catalog: Rc<Catalog>, grid: i64) -> Surface {
+        let grid = grid.max(1);
+        Surface {
+            history: History::new(doc.clone()),
+            doc,
+            catalog,
+            selection: Selection::Form,
+            grid,
+            clipboard: Vec::new(),
+            drag: Drag::None,
+            preview: None,
+            marquee: None,
+        }
+    }
+
+    /// The document being edited.
+    pub fn doc(&self) -> &FormDoc {
+        &self.doc
+    }
+
+    /// Replaces the document and resets the history and selection.
+    pub fn set_doc(&mut self, doc: FormDoc) {
+        self.history.reset(doc.clone());
+        self.doc = doc;
+        self.selection = Selection::Form;
+        self.drag = Drag::None;
+        self.preview = None;
+        self.marquee = None;
+    }
+
+    /// The current selection.
+    pub fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    /// The grid spacing in design units.
+    pub fn grid(&self) -> i64 {
+        self.grid
+    }
+
+    /// Sets the grid spacing; a value below one is clamped to one.
+    pub fn set_grid(&mut self, grid: i64) {
+        self.grid = grid.max(1);
+    }
+
+    /// Whether an undo step is available.
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    /// Whether a redo step is available.
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// The number of copied nodes on the in-process clipboard.
+    pub fn clipboard_len(&self) -> usize {
+        self.clipboard.len()
+    }
+
+    /// The form's rectangle in design units, at the origin.
+    pub fn form_rect(&self) -> DesignRect {
+        let width = self
+            .doc
+            .window
+            .prop("width")
+            .and_then(Value::as_int)
+            .unwrap_or(320);
+        let height = self
+            .doc
+            .window
+            .prop("height")
+            .and_then(Value::as_int)
+            .unwrap_or(200);
+        DesignRect::new(0, 0, width, height)
+    }
+
+    /// The drag preview rectangle, while a move or resize is in progress.
+    pub fn preview(&self) -> Option<DesignRect> {
+        self.preview
+    }
+
+    /// The marquee rectangle, while a rubber-band selection is in progress.
+    pub fn marquee(&self) -> Option<DesignRect> {
+        self.marquee
+    }
+
+    /// Whether a gesture is in progress.
+    pub fn is_dragging(&self) -> bool {
+        !matches!(self.drag, Drag::None)
+    }
+
+    /// The local (parent-relative) rectangle a node occupies, using the
+    /// catalog's default size for an omitted `width`/`height`.
+    pub fn node_local_rect(&self, node: &Node) -> DesignRect {
+        let default_width = self
+            .catalog
+            .get(&node.kind)
+            .map(|spec| spec.default_size.0.value().round() as i64)
+            .unwrap_or(0);
+        let default_height = self
+            .catalog
+            .get(&node.kind)
+            .map(|spec| spec.default_size.1.value().round() as i64)
+            .unwrap_or(0);
+        let left = int_prop(node, "left", 0);
+        let top = int_prop(node, "top", 0);
+        let width = int_prop(node, "width", default_width).max(0);
+        let height = int_prop(node, "height", default_height).max(0);
+        DesignRect::from_size(left, top, width, height)
+    }
+
+    /// The node's rectangle in form coordinates, accumulating its ancestors'
+    /// origins.
+    pub fn node_rect(&self, name: &str) -> Option<DesignRect> {
+        let node = self.doc.node(name)?;
+        let mut origin = (0, 0);
+        let mut parent = node.parent.clone();
+        // Bound the walk so a hand-written cycle cannot hang the designer.
+        for _ in 0..=self.doc.nodes.len() {
+            let Some(parent_name) = parent else {
+                break;
+            };
+            let parent_node = self.doc.node(&parent_name)?;
+            let rect = self.node_local_rect(parent_node);
+            origin.0 += rect.left;
+            origin.1 += rect.top;
+            parent = parent_node.parent.clone();
+        }
+        Some(self.node_local_rect(node).offset(origin.0, origin.1))
+    }
+
+    /// The bounding rectangle of the current selection: the form rect for the
+    /// form, or the union of the selected controls.
+    pub fn selection_bounds(&self) -> DesignRect {
+        match &self.selection {
+            Selection::Form => self.form_rect(),
+            Selection::Nodes(names) => {
+                let mut bounds: Option<DesignRect> = None;
+                for name in names {
+                    if let Some(rect) = self.node_rect(name) {
+                        bounds = Some(match bounds {
+                            Some(bounds) => bounds.union(rect),
+                            None => rect,
+                        });
+                    }
+                }
+                bounds.unwrap_or_else(|| self.form_rect())
+            }
+        }
+    }
+
+    /// The topmost node whose rectangle contains `(x, y)`, if any. Nodes later
+    /// in creation order are on top, so they are searched first.
+    pub fn hit_node(&self, x: i64, y: i64) -> Option<String> {
+        self.doc
+            .nodes
+            .iter()
+            .rev()
+            .find(|node| {
+                self.node_rect(&node.name)
+                    .is_some_and(|rect| rect.contains(x, y))
+            })
+            .map(|node| node.name.clone())
+    }
+
+    /// The resize handle under `(x, y)`, if the selection exposes handles.
+    pub fn handle_at(&self, x: i64, y: i64) -> Option<Handle> {
+        match &self.selection {
+            Selection::Form => handle_at(self.form_rect(), x, y, HANDLE_TOLERANCE),
+            Selection::Nodes(names) if names.len() == 1 => self
+                .node_rect(&names[0])
+                .and_then(|rect| handle_at(rect, x, y, HANDLE_TOLERANCE)),
+            _ => None,
+        }
+    }
+
+    /// The cursor to show at `(x, y)`.
+    pub fn cursor_at(&self, x: i64, y: i64) -> CursorHint {
+        match self.handle_at(x, y) {
+            Some(Handle::West | Handle::East) => CursorHint::SizeHorizontal,
+            Some(Handle::North | Handle::South) => CursorHint::SizeVertical,
+            _ => CursorHint::Default,
+        }
+    }
+
+    /// Handles a left-button press at `(x, y)`.
+    pub fn pointer_down(&mut self, x: i64, y: i64, ctrl: bool) -> Outcome {
+        let cursor = self.cursor_at(x, y);
+        if let Some(handle) = self.handle_at(x, y) {
+            self.drag = match &self.selection {
+                Selection::Form => Drag::ResizeForm {
+                    handle,
+                    start_rect: self.form_rect(),
+                },
+                Selection::Nodes(names) if names.len() == 1 => {
+                    let name = names[0].clone();
+                    Drag::ResizeNode {
+                        start_rect: self.node_local_rect(self.doc.node(&name).expect("selected")),
+                        name,
+                        handle,
+                        origin: (x, y),
+                    }
+                }
+                _ => Drag::None,
+            };
+            if !matches!(self.drag, Drag::None) {
+                return Outcome::none().cursor(cursor);
+            }
+        }
+
+        match self.hit_node(x, y) {
+            Some(name) => {
+                if ctrl {
+                    self.toggle_selection(&name);
+                    self.drag = Drag::None;
+                    Outcome::changed(Change::SELECTION).cursor(cursor)
+                } else {
+                    if !self.selection.contains(&name) {
+                        self.selection = Selection::Nodes(vec![name.clone()]);
+                    }
+                    self.begin_move(x, y);
+                    Outcome::changed(Change::SELECTION).cursor(cursor)
+                }
+            }
+            None => {
+                if !ctrl {
+                    self.selection = Selection::Nodes(Vec::new());
+                }
+                self.drag = Drag::Marquee { origin: (x, y) };
+                self.marquee = Some(DesignRect::new(x, y, x, y));
+                Outcome::changed(Change::SELECTION).cursor(cursor)
+            }
+        }
+    }
+
+    /// Handles a pointer move to `(x, y)`.
+    pub fn pointer_move(&mut self, x: i64, y: i64, _ctrl: bool) -> Outcome {
+        let cursor = self.cursor_at(x, y);
+        let drag = std::mem::replace(&mut self.drag, Drag::None);
+        let (drag, change) = match drag {
+            Drag::None => (Drag::None, Change::NONE),
+            Drag::Move { origin, starts } => {
+                let dx = x - origin.0;
+                let dy = y - origin.1;
+                for (name, left, top) in &starts {
+                    if let Some(node) = self.doc.node_mut(name) {
+                        node.set_prop("left", Value::Int(snap(left + dx, self.grid)));
+                        node.set_prop("top", Value::Int(snap(top + dy, self.grid)));
+                    }
+                }
+                self.preview = Some(self.selection_bounds());
+                (Drag::Move { origin, starts }, Change::GEOMETRY)
+            }
+            Drag::ResizeNode {
+                name,
+                handle,
+                start_rect,
+                origin,
+            } => {
+                let new = resize(start_rect, handle, x - origin.0, y - origin.1, self.grid);
+                self.set_node_rect(&name, new);
+                self.preview = self.node_rect(&name);
+                (
+                    Drag::ResizeNode {
+                        name,
+                        handle,
+                        start_rect,
+                        origin,
+                    },
+                    Change::GEOMETRY,
+                )
+            }
+            Drag::ResizeForm { handle, start_rect } => {
+                let new = resize_form(start_rect, handle, x, y, self.grid);
+                self.set_window_size(new.right, new.bottom);
+                self.preview = Some(new);
+                (Drag::ResizeForm { handle, start_rect }, Change::GEOMETRY)
+            }
+            Drag::Marquee { origin } => {
+                self.marquee = Some(DesignRect::from_points(origin, (x, y)));
+                (Drag::Marquee { origin }, Change::NONE)
+            }
+        };
+        self.drag = drag;
+        Outcome::changed(change).cursor(cursor)
+    }
+
+    /// Handles a left-button release at `(x, y)`.
+    pub fn pointer_up(&mut self, x: i64, y: i64, _ctrl: bool) -> Outcome {
+        let cursor = self.cursor_at(x, y);
+        let drag = std::mem::replace(&mut self.drag, Drag::None);
+        match drag {
+            Drag::None => Outcome::none().cursor(cursor),
+            Drag::Move { .. } | Drag::ResizeNode { .. } | Drag::ResizeForm { .. } => {
+                self.preview = None;
+                self.history.record(&self.doc);
+                Outcome::changed(Change::GEOMETRY).cursor(cursor)
+            }
+            Drag::Marquee { origin } => {
+                self.marquee = None;
+                let rect = DesignRect::from_points(origin, (x, y));
+                let hits = self.nodes_in(rect);
+                self.selection = Selection::Nodes(hits);
+                Outcome::changed(Change::SELECTION).cursor(cursor)
+            }
+        }
+    }
+
+    /// Handles a key press.
+    pub fn key(&mut self, press: KeyPress) -> Outcome {
+        if press.ctrl {
+            let shortcut = match press.key {
+                KeyInput::Copy => Some(self.copy()),
+                KeyInput::Paste => Some(self.paste()),
+                KeyInput::Duplicate => Some(self.duplicate()),
+                KeyInput::Undo if press.shift => Some(self.redo()),
+                KeyInput::Undo => Some(self.undo()),
+                KeyInput::Redo => Some(self.redo()),
+                KeyInput::SelectAll => {
+                    self.select_all();
+                    return Outcome::changed(Change::SELECTION);
+                }
+                _ => None,
+            };
+            if let Some(true) = shortcut {
+                let change = if matches!(press.key, KeyInput::Paste | KeyInput::Duplicate) {
+                    Change::STRUCTURE
+                } else if matches!(press.key, KeyInput::Copy) {
+                    Change::NONE
+                } else {
+                    // Undo/redo can change the whole document; rebuild.
+                    Change::STRUCTURE
+                };
+                return Outcome::changed(change);
+            }
+            if let Some(false) = shortcut {
+                return Outcome::none();
+            }
+        }
+
+        match press.key {
+            KeyInput::Left => self.nudge(-1, 0, press.ctrl),
+            KeyInput::Right => self.nudge(1, 0, press.ctrl),
+            KeyInput::Up => self.nudge(0, -1, press.ctrl),
+            KeyInput::Down => self.nudge(0, 1, press.ctrl),
+            KeyInput::Delete | KeyInput::Backspace => self.delete_selection(),
+            KeyInput::Escape => {
+                self.selection = Selection::Form;
+                Outcome::changed(Change::SELECTION)
+            }
+            _ => Outcome::none(),
+        }
+    }
+
+    /// Selects the form.
+    pub fn select_form(&mut self) {
+        self.selection = Selection::Form;
+    }
+
+    /// Selects a single node, if it exists.
+    pub fn select_node(&mut self, name: &str) -> bool {
+        if self.doc.node(name).is_some() {
+            self.selection = Selection::Nodes(vec![name.to_owned()]);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Adds `name` to the selection, or removes it if already selected.
+    pub fn toggle_selection(&mut self, name: &str) {
+        let mut names = self.selection.nodes().to_vec();
+        if let Some(index) = names.iter().position(|selected| selected == name) {
+            names.remove(index);
+        } else if self.doc.node(name).is_some() {
+            names.push(name.to_owned());
+        }
+        self.selection = if names.is_empty() {
+            Selection::Form
+        } else {
+            Selection::Nodes(names)
+        };
+    }
+
+    /// Selects every control.
+    pub fn select_all(&mut self) {
+        let names: Vec<String> = self
+            .doc
+            .nodes
+            .iter()
+            .map(|node| node.name.clone())
+            .collect();
+        self.selection = if names.is_empty() {
+            Selection::Form
+        } else {
+            Selection::Nodes(names)
+        };
+    }
+
+    /// Deletes the selected controls (with their descendants).
+    pub fn delete_selection(&mut self) -> Outcome {
+        let names: Vec<String> = self.selection.nodes().to_vec();
+        if names.is_empty() {
+            return Outcome::none();
+        }
+        for name in &names {
+            self.doc.remove(name);
+        }
+        self.selection = Selection::Form;
+        self.history.record(&self.doc);
+        Outcome::changed(Change::STRUCTURE)
+    }
+
+    /// Copies the selected controls (with their descendants) to the in-process
+    /// clipboard, returning whether anything was copied.
+    pub fn copy(&mut self) -> bool {
+        let roots = self.selected_roots();
+        if roots.is_empty() {
+            return false;
+        }
+        let mut copied = Vec::new();
+        for root in &roots {
+            for name in self.subtree(root) {
+                if let Some(node) = self.doc.node(&name) {
+                    copied.push(node.clone());
+                }
+            }
+        }
+        self.clipboard = copied;
+        true
+    }
+
+    /// Pastes the clipboard with fresh names, offset by one grid step, returning
+    /// whether anything was pasted.
+    pub fn paste(&mut self) -> bool {
+        if self.clipboard.is_empty() {
+            return false;
+        }
+        // Names chosen earlier in this paste count as taken, so two pasted
+        // nodes can never end up with the same name.
+        let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+        let mut taken = std::collections::BTreeSet::new();
+        for node in &self.clipboard {
+            let name = self.unique_name(&node.name, &taken);
+            taken.insert(name.clone());
+            renamed.insert(node.name.clone(), name);
+        }
+
+        let offset = self.grid;
+        let mut new_roots = Vec::new();
+        for node in &self.clipboard {
+            let mut copy = node.clone();
+            copy.name = renamed[&node.name].clone();
+            let parent_copied = node
+                .parent
+                .as_deref()
+                .and_then(|parent| renamed.get(parent).cloned());
+            copy.parent = match &parent_copied {
+                Some(parent) => Some(parent.clone()),
+                None => node
+                    .parent
+                    .clone()
+                    .filter(|parent| self.doc.node(parent).is_some()),
+            };
+            if parent_copied.is_none() {
+                let left = int_prop(node, "left", 0) + offset;
+                let top = int_prop(node, "top", 0) + offset;
+                copy.set_prop("left", Value::Int(left));
+                copy.set_prop("top", Value::Int(top));
+                new_roots.push(copy.name.clone());
+            }
+            self.doc.insert(copy);
+        }
+        self.selection = Selection::Nodes(new_roots);
+        self.history.record(&self.doc);
+        true
+    }
+
+    /// Copies and pastes the selection in one step, returning whether anything
+    /// was duplicated.
+    pub fn duplicate(&mut self) -> bool {
+        if !self.copy() {
+            return false;
+        }
+        self.paste()
+    }
+
+    /// Undoes the last recorded change, returning whether anything changed.
+    pub fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.history.undo().cloned() else {
+            return false;
+        };
+        self.doc = snapshot;
+        self.prune_selection();
+        true
+    }
+
+    /// Redoes the last undone change, returning whether anything changed.
+    pub fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.history.redo().cloned() else {
+            return false;
+        };
+        self.doc = snapshot;
+        self.prune_selection();
+        true
+    }
+
+    /// Moves the selected controls by one step: `1` design unit with
+    /// `fine` (Ctrl), or one grid step otherwise.
+    pub fn nudge(&mut self, dx: i64, dy: i64, fine: bool) -> Outcome {
+        let step = if fine { 1 } else { self.grid };
+        let roots = self.selected_roots();
+        if roots.is_empty() {
+            return Outcome::none();
+        }
+        for name in &roots {
+            let node = self.doc.node_mut(name).expect("selected root");
+            let left = int_prop(node, "left", 0) + dx * step;
+            let top = int_prop(node, "top", 0) + dy * step;
+            node.set_prop("left", Value::Int(left));
+            node.set_prop("top", Value::Int(top));
+        }
+        self.history.record(&self.doc);
+        Outcome::changed(Change::GEOMETRY)
+    }
+
+    /// The selected node names whose own parent is not also selected, so a drag
+    /// moves each subtree exactly once.
+    fn selected_roots(&self) -> Vec<String> {
+        self.selection
+            .nodes()
+            .iter()
+            .filter(|name| {
+                let mut parent = self.doc.node(name).and_then(|node| node.parent.clone());
+                for _ in 0..=self.doc.nodes.len() {
+                    let Some(parent_name) = parent else {
+                        return true;
+                    };
+                    if self.selection.contains(&parent_name) {
+                        return false;
+                    }
+                    parent = self
+                        .doc
+                        .node(&parent_name)
+                        .and_then(|node| node.parent.clone());
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Every node in `root`'s subtree, in document order (parents first).
+    fn subtree(&self, root: &str) -> Vec<String> {
+        let mut names = vec![root.to_owned()];
+        let mut index = 0;
+        while index < names.len() {
+            let parent = names[index].clone();
+            index += 1;
+            for child in self.doc.children_of(&parent) {
+                if !names.contains(&child.name) {
+                    names.push(child.name.clone());
+                }
+            }
+        }
+        self.doc
+            .nodes
+            .iter()
+            .filter(|node| names.contains(&node.name))
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
+    /// The nodes whose rectangles intersect `rect`.
+    fn nodes_in(&self, rect: DesignRect) -> Vec<String> {
+        self.doc
+            .nodes
+            .iter()
+            .filter(|node| {
+                self.node_rect(&node.name)
+                    .is_some_and(|node_rect| node_rect.intersects(rect))
+            })
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
+    /// Records the selected nodes' original positions and starts a move.
+    fn begin_move(&mut self, x: i64, y: i64) {
+        let starts = self
+            .selected_roots()
+            .into_iter()
+            .map(|name| {
+                let node = self.doc.node(&name).expect("selected root");
+                (name, int_prop(node, "left", 0), int_prop(node, "top", 0))
+            })
+            .collect();
+        self.drag = Drag::Move {
+            origin: (x, y),
+            starts,
+        };
+    }
+
+    /// Writes a node's local rectangle back to its `left`/`top`/`width`/`height`
+    /// properties.
+    fn set_node_rect(&mut self, name: &str, rect: DesignRect) {
+        if let Some(node) = self.doc.node_mut(name) {
+            node.set_prop("left", Value::Int(rect.left));
+            node.set_prop("top", Value::Int(rect.top));
+            node.set_prop("width", Value::Int(rect.width().max(MIN_SIZE)));
+            node.set_prop("height", Value::Int(rect.height().max(MIN_SIZE)));
+        }
+    }
+
+    /// Writes the window's client size.
+    fn set_window_size(&mut self, width: i64, height: i64) {
+        self.doc
+            .window
+            .set_prop("width", Value::Int(width.max(MIN_SIZE)));
+        self.doc
+            .window
+            .set_prop("height", Value::Int(height.max(MIN_SIZE)));
+    }
+
+    /// A name not already used by a node, derived from `base`.
+    fn unique_name(&self, base: &str, taken: &std::collections::BTreeSet<String>) -> String {
+        let free = |name: &str| self.doc.node(name).is_none() && !taken.contains(name);
+        if free(base) {
+            return base.to_owned();
+        }
+        let mut index = 1;
+        loop {
+            let candidate = format!("{base}{index}");
+            if free(&candidate) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    /// Drops selected names that no longer exist after an undo or redo.
+    fn prune_selection(&mut self) {
+        if let Selection::Nodes(names) = &mut self.selection {
+            names.retain(|name| self.doc.node(name).is_some());
+            if names.is_empty() {
+                self.selection = Selection::Form;
+            }
+        }
+    }
+}
+
+/// Reads an int property, or `default` when absent or the wrong type.
+fn int_prop(node: &Node, name: &str, default: i64) -> i64 {
+    node.prop(name).and_then(Value::as_int).unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A form with two buttons and a panel holding a label.
+    fn sample() -> Surface {
+        let mut doc = FormDoc::new("frmMain");
+        let mut button = Node::new("Button", "cmdOk");
+        button.set_prop("left", Value::Int(16));
+        button.set_prop("top", Value::Int(16));
+        button.set_prop("width", Value::Int(80));
+        button.set_prop("height", Value::Int(24));
+        doc.insert(button);
+
+        let mut other = Node::new("Button", "cmdCancel");
+        other.set_prop("left", Value::Int(120));
+        other.set_prop("top", Value::Int(16));
+        other.set_prop("width", Value::Int(80));
+        other.set_prop("height", Value::Int(24));
+        doc.insert(other);
+
+        let mut panel = Node::new("Panel", "panMain");
+        panel.set_prop("left", Value::Int(50));
+        panel.set_prop("top", Value::Int(80));
+        panel.set_prop("width", Value::Int(160));
+        panel.set_prop("height", Value::Int(100));
+        doc.insert(panel);
+
+        let mut label = Node::new("Label", "lblInner");
+        label.parent = Some("panMain".to_owned());
+        label.set_prop("left", Value::Int(10));
+        label.set_prop("top", Value::Int(10));
+        label.set_prop("width", Value::Int(60));
+        label.set_prop("height", Value::Int(20));
+        doc.insert(label);
+
+        Surface::new(
+            doc,
+            Rc::new(lazyrad_project::lazyrad_catalog()),
+            DEFAULT_GRID,
+        )
+    }
+
+    #[test]
+    fn a_paste_never_gives_two_nodes_the_same_name() {
+        let mut doc = FormDoc::new("frmMain");
+        doc.insert(Node::new("Button", "btn"));
+        doc.insert(Node::new("Button", "btn1"));
+        let mut surface = Surface::new(
+            doc,
+            Rc::new(lazyrad_project::lazyrad_catalog()),
+            DEFAULT_GRID,
+        );
+        surface.select_all();
+        assert!(surface.copy());
+        // With `btn1` gone, `btn` would naively become `btn1` and `btn1` stay
+        // `btn1`.
+        assert!(surface.select_node("btn1"));
+        surface.delete_selection();
+        assert!(surface.paste());
+
+        let names: Vec<&str> = surface
+            .doc()
+            .nodes
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "duplicate names in {names:?}");
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn a_child_rectangle_is_relative_to_its_parent() {
+        let surface = sample();
+        assert_eq!(
+            surface.node_rect("lblInner"),
+            Some(DesignRect::new(60, 90, 120, 110))
+        );
+    }
+
+    #[test]
+    fn clicking_selects_the_topmost_node() {
+        let mut surface = sample();
+        let outcome = surface.pointer_down(20, 20, false);
+        assert!(outcome.change.selection);
+        assert_eq!(surface.selection(), &Selection::Nodes(vec!["cmdOk".into()]));
+        surface.pointer_up(20, 20, false);
+    }
+
+    #[test]
+    fn ctrl_click_adds_then_removes() {
+        let mut surface = sample();
+        surface.pointer_down(20, 20, false);
+        surface.pointer_up(20, 20, false);
+        surface.pointer_down(130, 20, true);
+        assert_eq!(
+            surface.selection(),
+            &Selection::Nodes(vec!["cmdOk".into(), "cmdCancel".into()])
+        );
+        surface.pointer_up(130, 20, true);
+        surface.pointer_down(130, 20, true);
+        assert_eq!(surface.selection(), &Selection::Nodes(vec!["cmdOk".into()]));
+    }
+
+    #[test]
+    fn escape_selects_the_form() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        let outcome = surface.key(KeyPress::new(KeyInput::Escape));
+        assert!(outcome.change.selection);
+        assert!(surface.selection().is_form());
+    }
+
+    #[test]
+    fn dragging_moves_and_snaps_to_the_grid() {
+        let mut surface = sample();
+        surface.pointer_down(20, 20, false);
+        surface.pointer_move(30, 30, false);
+        surface.pointer_up(30, 30, false);
+        let node = surface.doc.node("cmdOk").expect("node");
+        assert_eq!(node.prop("left"), Some(&Value::Int(24)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(24)));
+    }
+
+    #[test]
+    fn a_handle_resizes_a_single_node() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        // Grab the south-east handle at (96, 40) and drag to (120, 64).
+        surface.pointer_down(96, 40, false);
+        surface.pointer_move(120, 64, false);
+        surface.pointer_up(120, 64, false);
+        let node = surface.doc.node("cmdOk").expect("node");
+        assert_eq!(node.prop("width"), Some(&Value::Int(104)));
+        assert_eq!(node.prop("height"), Some(&Value::Int(48)));
+    }
+
+    #[test]
+    fn the_form_handle_resizes_the_client_area() {
+        let mut surface = sample();
+        assert!(surface.selection().is_form());
+        let form = surface.form_rect();
+        surface.pointer_down(form.right, form.bottom, false);
+        surface.pointer_move(form.right + 40, form.bottom + 40, false);
+        surface.pointer_up(form.right + 40, form.bottom + 40, false);
+        assert_eq!(surface.form_rect(), DesignRect::new(0, 0, 360, 240));
+    }
+
+    #[test]
+    fn marquee_selects_the_intersecting_nodes() {
+        let mut surface = sample();
+        // Start below the form's handles and drag up across both buttons.
+        surface.pointer_down(0, 50, false);
+        surface.pointer_move(130, 20, false);
+        surface.pointer_up(130, 20, false);
+        assert_eq!(
+            surface.selection(),
+            &Selection::Nodes(vec!["cmdOk".into(), "cmdCancel".into()])
+        );
+    }
+
+    #[test]
+    fn arrow_keys_nudge_by_the_grid_and_one_unit_with_ctrl() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        surface.key(KeyPress::new(KeyInput::Right));
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            Some(&Value::Int(24))
+        );
+        surface.key(KeyPress::ctrl(KeyInput::Right));
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            Some(&Value::Int(25))
+        );
+    }
+
+    #[test]
+    fn the_grid_is_configurable() {
+        let mut surface = sample();
+        surface.set_grid(4);
+        surface.key(KeyPress::new(KeyInput::Down));
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("top")),
+            Some(&Value::Int(16))
+        );
+        assert_eq!(surface.grid(), 4);
+    }
+
+    #[test]
+    fn delete_removes_the_selection_and_cascades() {
+        let mut surface = sample();
+        surface.select_node("panMain");
+        let outcome = surface.delete_selection();
+        assert!(outcome.change.structure);
+        assert!(surface.doc.node("panMain").is_none());
+        assert!(surface.doc.node("lblInner").is_none());
+        assert!(surface.selection().is_form());
+    }
+
+    #[test]
+    fn copy_paste_gives_a_unique_offset_copy() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        assert!(surface.copy());
+        assert!(surface.paste());
+        assert_eq!(
+            surface.selection(),
+            &Selection::Nodes(vec!["cmdOk1".into()])
+        );
+        let node = surface.doc.node("cmdOk1").expect("pasted");
+        assert_eq!(node.prop("left"), Some(&Value::Int(24)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(24)));
+    }
+
+    #[test]
+    fn pasting_a_container_remaps_its_children() {
+        let mut surface = sample();
+        surface.select_node("panMain");
+        assert!(surface.duplicate());
+        let copy = surface.doc.node("panMain1").expect("copied panel");
+        assert_eq!(copy.parent, None);
+        let child = surface.doc.node("lblInner1").expect("copied child");
+        assert_eq!(child.parent.as_deref(), Some("panMain1"));
+        assert_eq!(
+            surface.node_rect("lblInner1"),
+            Some(DesignRect::new(68, 98, 128, 118))
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_restore_every_edit() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        surface.key(KeyPress::new(KeyInput::Right));
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            Some(&Value::Int(24))
+        );
+        assert!(surface.can_undo());
+        assert!(surface.undo());
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            Some(&Value::Int(16))
+        );
+        assert!(surface.redo());
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            Some(&Value::Int(24))
+        );
+    }
+
+    #[test]
+    fn undoing_a_delete_restores_the_node() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        surface.delete_selection();
+        assert!(surface.undo());
+        assert!(surface.doc.node("cmdOk").is_some());
+    }
+
+    #[test]
+    fn edits_round_trip_through_toml() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        surface.key(KeyPress::new(KeyInput::Right));
+        surface.duplicate();
+        surface.select_node("panMain");
+        surface.key(KeyPress::new(KeyInput::Escape));
+
+        let catalog = lazyrad_project::lazyrad_catalog();
+        let text = surface.doc().to_toml(&catalog);
+        let round_tripped = FormDoc::from_toml(&text, &catalog).expect("the form reloads");
+        // Only non-default values are written, so the canonical text is what
+        // must round-trip byte-for-byte, not the in-memory defaults.
+        assert_eq!(round_tripped.to_toml(&catalog), text);
+    }
+
+    #[test]
+    fn a_click_on_empty_space_clears_the_selection() {
+        let mut surface = sample();
+        surface.select_node("cmdOk");
+        surface.pointer_down(300, 190, false);
+        assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
+        surface.pointer_up(300, 190, false);
+        assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
+    }
+}
