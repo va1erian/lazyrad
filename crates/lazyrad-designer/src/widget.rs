@@ -49,6 +49,7 @@ use crate::geometry::{DesignRect, Handle};
 use crate::surface::{
     Change, CursorHint, DEFAULT_GRID, KeyInput, KeyPress, Outcome, Selection, Surface,
 };
+use crate::toolbox::ToolboxMsg;
 
 /// An input event the overlay translated into design terms.
 ///
@@ -325,6 +326,42 @@ impl<M: 'static> Designer<M> {
                 Outcome::none()
             }
         })
+    }
+
+    /// Arms the creation tool used by click-then-drag; `None` restores the
+    /// pointer. An unknown kind is rejected.
+    pub fn set_tool(&self, tool: Option<&str>, ui: &Ui<M>) {
+        self.surface.borrow_mut().set_tool(tool);
+        ui.invalidate(self.id());
+    }
+
+    /// The armed creation tool, or `None` for the pointer.
+    pub fn tool(&self) -> Option<String> {
+        self.surface.borrow().tool().map(str::to_owned)
+    }
+
+    /// Drops a control of `kind` at its catalog default size in the centre of
+    /// the form, as an undoable command. Returns the new node's name.
+    pub fn drop_control(&self, kind: &str, ui: &Ui<M>) -> Option<String> {
+        let name = self.surface.borrow_mut().drop_control(kind);
+        if name.is_some() {
+            self.refresh(ui, Change::STRUCTURE);
+        }
+        name
+    }
+
+    /// Applies a [`ToolboxMsg`]: a click arms the tool, a double-click drops a
+    /// control. The host forwards the toolbox's wrapped message here from its
+    /// `update`.
+    pub fn handle_toolbox(&self, msg: ToolboxMsg, ui: &Ui<M>) {
+        match msg {
+            ToolboxMsg::Select(tool) => self.set_tool(tool.kind(), ui),
+            ToolboxMsg::Activate(tool) => {
+                if let Some(kind) = tool.kind() {
+                    self.drop_control(kind, ui);
+                }
+            }
+        }
     }
 
     /// Duplicates the selection, returning whether anything was duplicated.

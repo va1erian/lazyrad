@@ -17,10 +17,13 @@ use xui_core::message::{Modifiers, MouseButton};
 use xui_core::units::Dip;
 use xui_form::{FormDoc, Node, Value};
 
-use lazyrad_designer::{Designer, DesignerMsg, Selection};
+use lazyrad_designer::{CONTROL_KINDS, Designer, DesignerMsg, Selection, Toolbox, ToolboxMsg};
 
 /// A handle the test keeps to the designer after `run_app` returns.
 type DesignerSlot = Rc<RefCell<Option<Rc<RefCell<Designer<Msg>>>>>>;
+
+/// A handle the [`Shell`] tests keep to their designer after `run_app` returns.
+type ShellSlot = Rc<RefCell<Option<Rc<RefCell<Designer<Shell>>>>>>;
 
 /// The host's message type: the designer routes its input through this.
 #[derive(Clone, Debug)]
@@ -40,6 +43,34 @@ impl App for Editor {
     fn update(&mut self, msg: Msg, ui: &mut Ui<Msg>) {
         match msg {
             Msg::Designer(msg) => self.designer.borrow().update(msg, ui),
+        }
+    }
+}
+
+/// A message type carrying both the designer's and the toolbox's input, for the
+/// tests that host both widgets in one window.
+#[derive(Clone, Debug)]
+enum Shell {
+    /// A designer input message.
+    Designer(DesignerMsg),
+    /// A toolbox message.
+    Toolbox(ToolboxMsg),
+}
+
+/// An app owning both a designer and a toolbox, forwarding each message.
+struct ShellApp {
+    designer: Rc<RefCell<Designer<Shell>>>,
+    /// Kept alive so the toolbox's node survives event dispatch.
+    _toolbox: Toolbox<Shell>,
+}
+
+impl App for ShellApp {
+    type Msg = Shell;
+
+    fn update(&mut self, msg: Shell, ui: &mut Ui<Shell>) {
+        match msg {
+            Shell::Designer(msg) => self.designer.borrow().update(msg, ui),
+            Shell::Toolbox(msg) => self.designer.borrow().handle_toolbox(msg, ui),
         }
     }
 }
@@ -299,4 +330,247 @@ fn undo_and_redo_round_trip_a_move() {
     .expect("run_app succeeds");
 
     assert_eq!(*observed.borrow(), vec![24, 16, 24]);
+}
+
+/// Builds a designer *and* a toolbox in one window, injects `input`, then runs
+/// `check` against the designer. The toolbox sits to the right of the form, at
+/// local `x = 340`, so it is never covered by the designer's overlay.
+fn with_toolbox<R>(
+    input: impl FnOnce(&OffscreenBackend, WindowId),
+    check: impl FnOnce(&Designer<Shell>) -> R,
+) -> R {
+    let backend = Rc::new(OffscreenBackend::new());
+    let trait_backend: Rc<dyn Backend> = Rc::clone(&backend) as Rc<dyn Backend>;
+    let designer_slot: ShellSlot = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&designer_slot);
+    let backend_for_inject = Rc::clone(&backend);
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let spec = PlatformSpec::new("designer").size(Dip(460.0), Dip(200.0));
+
+    run_app(trait_backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            FormDoc::new("frmMain"),
+            catalog,
+            Shell::Designer,
+        )
+        .expect("the designer builds");
+        let designer = Rc::new(RefCell::new(designer));
+        let toolbox = Toolbox::new(ui, Rect::new(340, 0, 436, 200), Shell::Toolbox)
+            .expect("the toolbox builds");
+        input(&backend_for_inject, ui.window());
+        *slot.borrow_mut() = Some(Rc::clone(&designer));
+        ShellApp {
+            designer,
+            _toolbox: toolbox,
+        }
+    })
+    .expect("run_app succeeds");
+
+    let slot = designer_slot.borrow();
+    check(&slot.as_ref().expect("the designer was built").borrow())
+}
+
+/// Injects a left-button press (and release) at client `(x, y)`.
+fn click(backend: &OffscreenBackend, window: WindowId, x: i32, y: i32) {
+    let modifiers = Modifiers::NONE;
+    backend.inject(
+        window,
+        Event::MouseDown {
+            x,
+            y,
+            button: MouseButton::Left,
+            modifiers,
+        },
+    );
+    backend.inject(
+        window,
+        Event::MouseUp {
+            x,
+            y,
+            button: MouseButton::Left,
+            modifiers,
+        },
+    );
+}
+
+/// Injects a left double-click at client `(x, y)`.
+fn double_click(backend: &OffscreenBackend, window: WindowId, x: i32, y: i32) {
+    backend.inject(
+        window,
+        Event::MouseDoubleClick {
+            x,
+            y,
+            button: MouseButton::Left,
+            modifiers: Modifiers::NONE,
+        },
+    );
+}
+
+#[test]
+fn a_tool_drag_on_the_designer_creates_a_control() {
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let created: Rc<RefCell<Option<FormDoc>>> = Rc::new(RefCell::new(None));
+    let created_for_check = Rc::clone(&created);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            FormDoc::new("frmMain"),
+            catalog,
+            Msg::Designer,
+        )
+        .expect("the designer builds");
+        designer.set_tool(Some("CommandButton"), ui);
+        assert_eq!(designer.tool().as_deref(), Some("CommandButton"));
+        designer.update(
+            DesignerMsg::PointerDown {
+                x: 10,
+                y: 10,
+                ctrl: false,
+            },
+            ui,
+        );
+        designer.update(
+            DesignerMsg::PointerMove {
+                x: 90,
+                y: 50,
+                ctrl: false,
+            },
+            ui,
+        );
+        designer.update(
+            DesignerMsg::PointerUp {
+                x: 90,
+                y: 50,
+                ctrl: false,
+            },
+            ui,
+        );
+        *created_for_check.borrow_mut() = Some(designer.doc());
+        Editor {
+            designer: Rc::new(RefCell::new(designer)),
+        }
+    })
+    .expect("run_app succeeds");
+
+    let created = created.borrow();
+    let node = created
+        .as_ref()
+        .and_then(|doc| doc.node("Command1"))
+        .expect("the control was created");
+    assert_eq!(node.kind, "CommandButton");
+    assert_eq!(node.prop("width"), Some(&Value::Int(80)));
+    assert_eq!(node.prop("height"), Some(&Value::Int(40)));
+}
+
+#[test]
+fn dropping_every_toolbox_kind_creates_it_and_undo_removes_it() {
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let created: Rc<RefCell<Option<FormDoc>>> = Rc::new(RefCell::new(None));
+    let after_undo: Rc<RefCell<Option<FormDoc>>> = Rc::new(RefCell::new(None));
+    let created_for_check = Rc::clone(&created);
+    let after_undo_for_check = Rc::clone(&after_undo);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            FormDoc::new("frmMain"),
+            catalog,
+            Msg::Designer,
+        )
+        .expect("the designer builds");
+        for kind in CONTROL_KINDS {
+            assert!(designer.drop_control(kind, ui).is_some(), "{kind} drops");
+        }
+        assert_eq!(designer.doc().nodes.len(), CONTROL_KINDS.len());
+        *created_for_check.borrow_mut() = Some(designer.doc());
+        assert!(designer.undo(ui));
+        *after_undo_for_check.borrow_mut() = Some(designer.doc());
+        Editor {
+            designer: Rc::new(RefCell::new(designer)),
+        }
+    })
+    .expect("run_app succeeds");
+
+    let created = created.borrow();
+    let names: Vec<&str> = created
+        .as_ref()
+        .expect("a doc")
+        .nodes
+        .iter()
+        .map(|node| node.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Command1", "Text1", "Label1", "Check1", "Option1", "Frame1", "List1", "Combo1"
+        ]
+    );
+    let after_undo = after_undo.borrow();
+    assert_eq!(
+        after_undo.as_ref().expect("a doc").nodes.len(),
+        CONTROL_KINDS.len() - 1,
+        "undo removed the last control"
+    );
+}
+
+#[test]
+fn clicking_a_toolbox_tile_arms_the_tool() {
+    let armed = with_toolbox(
+        |backend, window| click(backend, window, 350, 40),
+        |designer| designer.tool(),
+    );
+    assert_eq!(armed.as_deref(), Some("CommandButton"));
+}
+
+#[test]
+fn double_clicking_a_toolbox_tile_drops_a_control() {
+    let doc = with_toolbox(
+        |backend, window| double_click(backend, window, 350, 40),
+        |designer| designer.doc(),
+    );
+    let node = doc.node("Command1").expect("the control was dropped");
+    // The CommandButton's 100x28 default centred in a 320x200 form.
+    assert_eq!(node.prop("left"), Some(&Value::Int(110)));
+    assert_eq!(node.prop("top"), Some(&Value::Int(86)));
+}
+
+#[test]
+fn the_toolbox_paints_without_panicking() {
+    let backend = Rc::new(OffscreenBackend::new());
+    let trait_backend: Rc<dyn Backend> = Rc::clone(&backend) as Rc<dyn Backend>;
+    let rendered = Rc::new(Cell::new(false));
+    let rendered_for_check = Rc::clone(&rendered);
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let spec = PlatformSpec::new("designer").size(Dip(460.0), Dip(200.0));
+
+    run_app(trait_backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            FormDoc::new("frmMain"),
+            catalog,
+            Shell::Designer,
+        )
+        .expect("the designer builds");
+        let toolbox = Toolbox::new(ui, Rect::new(340, 0, 436, 200), Shell::Toolbox)
+            .expect("the toolbox builds");
+        let image = backend.render(ui.window()).expect("the window renders");
+        rendered_for_check.set(image.width == 460 && image.height == 200);
+        ShellApp {
+            designer: Rc::new(RefCell::new(designer)),
+            _toolbox: toolbox,
+        }
+    })
+    .expect("run_app succeeds");
+
+    assert!(rendered.get(), "the toolbox painted into the window");
 }
