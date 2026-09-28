@@ -95,6 +95,16 @@ struct Group {
     coalesce: bool,
 }
 
+/// The earliest char index any edit in `group` touches.
+fn earliest_anchor(group: &Group) -> usize {
+    group
+        .edits
+        .iter()
+        .map(|edit| edit.anchor)
+        .min()
+        .unwrap_or(0)
+}
+
 /// The char index where each line starts, plus the longest line's length.
 ///
 /// Rebuilt lazily: [`Buffer`] marks it stale after an edit and the next read
@@ -167,6 +177,9 @@ pub struct Buffer {
     redo: Vec<Group>,
     /// The group an explicit [`Buffer::begin_edit`] is accumulating into.
     pending: Option<Group>,
+    /// The earliest char index an edit has touched since the last
+    /// [`Buffer::take_dirty`], used to re-lex only the affected lines.
+    dirty: Option<usize>,
 }
 
 impl Buffer {
@@ -181,7 +194,21 @@ impl Buffer {
             undo: Vec::new(),
             redo: Vec::new(),
             pending: None,
+            dirty: None,
         }
+    }
+
+    /// Records `at` as the earliest char an edit has touched.
+    fn mark_dirty(&mut self, at: usize) {
+        self.dirty = Some(self.dirty.map_or(at, |dirty| dirty.min(at)));
+    }
+
+    /// Takes the earliest dirty char index since the last call, clearing it.
+    ///
+    /// The editor turns it into a line and re-lexes from there, so a change at
+    /// the end of a file only touches the last line.
+    pub fn take_dirty(&mut self) -> Option<usize> {
+        self.dirty.take()
     }
 
     /// The whole text.
@@ -292,6 +319,9 @@ impl Buffer {
     /// an adjacent typing run, the two share one undo group.
     pub fn insert(&mut self, at: usize, text: &str, coalesce: bool) {
         let at = at.min(self.rope.len_chars());
+        if !text.is_empty() {
+            self.mark_dirty(at);
+        }
         let edit = Edit {
             anchor: at,
             before: String::new(),
@@ -308,6 +338,7 @@ impl Buffer {
         if start == end {
             return;
         }
+        self.mark_dirty(start);
         let before = self.rope.slice(start..end).to_string();
         let edit = Edit {
             anchor: start,
@@ -322,6 +353,9 @@ impl Buffer {
     pub fn replace(&mut self, range: Range<usize>, text: &str, coalesce: bool) {
         let start = range.start.min(self.rope.len_chars());
         let end = range.end.min(self.rope.len_chars()).max(start);
+        if start != end || !text.is_empty() {
+            self.mark_dirty(start);
+        }
         let before = self.rope.slice(start..end).to_string();
         let edit = Edit {
             anchor: start,
@@ -374,6 +408,7 @@ impl Buffer {
         for edit in group.edits.iter().rev() {
             self.apply_backward(edit);
         }
+        self.mark_dirty(earliest_anchor(&group));
         let caret = group.edits.first().map(|edit| edit.anchor);
         self.invalidate_index();
         self.redo.push(group);
@@ -386,6 +421,7 @@ impl Buffer {
         for edit in group.edits.iter() {
             self.apply_forward(edit);
         }
+        self.mark_dirty(earliest_anchor(&group));
         let caret = group
             .edits
             .last()
@@ -570,6 +606,28 @@ mod tests {
         buffer.insert(5, " world", true);
         assert_eq!(buffer.undo(), Some(5));
         assert_eq!(buffer.redo(), Some(11));
+    }
+
+    #[test]
+    fn edits_report_the_earliest_dirty_char_and_clear_it() {
+        let mut buffer = Buffer::new("one\ntwo\nthree");
+        assert_eq!(buffer.take_dirty(), None);
+
+        let late = buffer.line_start(2);
+        let early = buffer.line_start(1);
+        buffer.insert(late, "!", true);
+        buffer.insert(early, "!", true);
+        assert_eq!(buffer.take_dirty(), Some(early));
+        assert_eq!(buffer.take_dirty(), None);
+
+        buffer.remove(0..1, true);
+        assert_eq!(buffer.take_dirty(), Some(0));
+
+        let end = buffer.len_chars();
+        buffer.insert(end, "x", true);
+        assert_eq!(buffer.take_dirty(), Some(end));
+        buffer.undo();
+        assert_eq!(buffer.take_dirty(), Some(end));
     }
 
     #[test]

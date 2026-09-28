@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
+use crate::lexer::LineLexer;
 use crate::markers::Marker;
 use crate::options::Options;
 use crate::platform::Clipboard;
@@ -89,6 +90,8 @@ pub(crate) enum Effect {
 pub(crate) struct EditorState {
     /// The text buffer.
     pub(crate) buffer: Buffer,
+    /// The incremental line-highlight cache.
+    pub(crate) highlight: LineLexer,
     /// The caret, selection and scroll position.
     pub(crate) view: View,
     /// The display options.
@@ -119,8 +122,11 @@ pub(crate) struct EditorState {
 impl EditorState {
     /// A state over `text` with `options` and a `clipboard`.
     pub(crate) fn new(text: &str, options: Options, clipboard: Box<dyn Clipboard>) -> EditorState {
+        let buffer = Buffer::new(text);
+        let highlight = LineLexer::new(&buffer);
         EditorState {
-            buffer: Buffer::new(text),
+            buffer,
+            highlight,
             view: View::new(),
             options,
             markers: Vec::new(),
@@ -144,6 +150,22 @@ impl EditorState {
     /// Toggles the caret blink.
     pub(crate) fn toggle_blink(&mut self) {
         self.blink_on = !self.blink_on;
+    }
+
+    /// Re-lexes from the earliest line an edit touched.
+    ///
+    /// The [`Buffer`] records the dirty char index, so typing in a large file
+    /// only re-lexes the lines the change affects (usually one).
+    pub(crate) fn sync_highlight(&mut self) {
+        if let Some(anchor) = self.buffer.take_dirty() {
+            let line = self.buffer.line_of_char(anchor);
+            self.highlight.relex(&self.buffer, line);
+        }
+    }
+
+    /// Rebuilds the highlight cache from scratch, after replacing the text.
+    pub(crate) fn reset_highlight(&mut self) {
+        self.highlight.reset(&self.buffer);
     }
 }
 

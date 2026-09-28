@@ -8,6 +8,8 @@
 use xui_core::Color;
 use xui_core::theme::Theme;
 
+use crate::lexer::TokenClass;
+
 /// The colours the editor paints with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EditorTheme {
@@ -41,6 +43,28 @@ pub struct EditorTheme {
     pub scrollbar: Color,
     /// The scrollbar track.
     pub scrollbar_track: Color,
+    /// Keywords.
+    pub keyword: Color,
+    /// Identifiers and other plain names.
+    pub identifier: Color,
+    /// Numeric literals.
+    pub number: Color,
+    /// String literals.
+    pub string: Color,
+    /// Interpolated segments inside back-tick strings.
+    pub interpolation: Color,
+    /// Comments.
+    pub comment: Color,
+    /// Doc comments.
+    pub doc_comment: Color,
+    /// Operators.
+    pub operator: Color,
+    /// Brackets and separators.
+    pub punctuation: Color,
+    /// Function names.
+    pub function: Color,
+    /// The fill behind a matched bracket pair.
+    pub bracket_match: Color,
 }
 
 impl EditorTheme {
@@ -62,6 +86,37 @@ impl EditorTheme {
             breakpoint: theme.danger,
             scrollbar: theme.scrollbar,
             scrollbar_track: theme.scrollbar_track,
+            // xui has no syntax-specific tokens, so the classes are derived
+            // from its semantic ones. Blending keeps related classes (keyword
+            // and function, string and interpolation) visually distinct while
+            // still following the theme in both light and dark modes.
+            keyword: theme.accent,
+            identifier: theme.text,
+            number: theme.warning,
+            string: theme.danger,
+            interpolation: theme.warning.lerp(theme.accent, 0.5),
+            comment: theme.text_disabled,
+            doc_comment: theme.accent.lerp(theme.text_secondary, 0.4),
+            operator: theme.text_secondary,
+            punctuation: theme.text,
+            function: theme.accent.lerp(theme.background, 0.2),
+            bracket_match: theme.selection,
+        }
+    }
+
+    /// The colour for a lexical class.
+    pub fn token_color(&self, class: TokenClass) -> Color {
+        match class {
+            TokenClass::Keyword => self.keyword,
+            TokenClass::Identifier => self.identifier,
+            TokenClass::Number => self.number,
+            TokenClass::String => self.string,
+            TokenClass::Interpolation => self.interpolation,
+            TokenClass::Comment => self.comment,
+            TokenClass::DocComment => self.doc_comment,
+            TokenClass::Operator => self.operator,
+            TokenClass::Punctuation => self.punctuation,
+            TokenClass::Function => self.function,
         }
     }
 }
@@ -88,5 +143,50 @@ mod tests {
     fn the_selection_uses_the_theme_selection_token() {
         let theme = Theme::light();
         assert_eq!(EditorTheme::from_theme(theme).selection, theme.selection);
+    }
+
+    #[test]
+    fn every_token_class_has_a_colour() {
+        let theme = EditorTheme::default();
+        let classes = [
+            TokenClass::Keyword,
+            TokenClass::Identifier,
+            TokenClass::Number,
+            TokenClass::String,
+            TokenClass::Interpolation,
+            TokenClass::Comment,
+            TokenClass::DocComment,
+            TokenClass::Operator,
+            TokenClass::Punctuation,
+            TokenClass::Function,
+        ];
+        for class in classes {
+            let _ = theme.token_color(class);
+        }
+    }
+
+    #[test]
+    fn the_syntax_palette_follows_the_light_and_dark_theme() {
+        let light = EditorTheme::from_theme(Theme::light());
+        let dark = EditorTheme::from_theme(Theme::dark());
+        for class in [
+            TokenClass::Keyword,
+            TokenClass::Identifier,
+            TokenClass::Number,
+            TokenClass::String,
+            TokenClass::Interpolation,
+            TokenClass::Comment,
+            TokenClass::DocComment,
+            TokenClass::Operator,
+            TokenClass::Punctuation,
+            TokenClass::Function,
+        ] {
+            assert_ne!(
+                light.token_color(class),
+                dark.token_color(class),
+                "{class:?} should differ between light and dark"
+            );
+        }
+        assert_ne!(light.bracket_match, dark.bracket_match);
     }
 }
