@@ -673,14 +673,18 @@ impl LineLexer {
         let count = buffer.line_count();
         let from = from_line.min(self.lines.len()).min(count);
         // Keep the cache aligned with the buffer's lines: an edit at `from`
-        // that added or removed lines shifted everything after it, so insert
-        // or drop that many entries just after `from`. Without this every
-        // line below an Enter would miss the cache and be re-lexed.
+        // that added or removed lines shifted everything after it. Without
+        // this every line below an Enter would miss the cache and be re-lexed.
+        //
+        // Added lines get placeholders *at* `from`, so the edited line itself
+        // is always re-lexed: were they placed after it, an inserted line
+        // whose text equals the old line at `from` would match that entry and
+        // stop the pass before ever reaching the placeholders.
         if from < self.lines.len() {
             let cached = self.lines.len();
             if count > cached {
                 let added = count - cached;
-                let at = from + 1;
+                let at = from;
                 self.lines
                     .splice(at..at, std::iter::repeat_with(LexedLine::stale).take(added));
             } else if count < cached {
@@ -1047,6 +1051,13 @@ mod tests {
         let at = buffer.line_start(200);
         buffer.insert(at, "let a = 1;\nlet b = 2;\nlet c = 3;\n", false);
         assert!(relex_and_check(&mut lexer, &mut buffer) <= 4);
+
+        // Duplicating line 300: the inserted text equals the line it goes
+        // before, which must not stop the pass before the shifted line.
+        let at = buffer.line_start(300);
+        let line = format!("{}\n", buffer.line_string(300));
+        buffer.insert(at, &line, false);
+        assert!(relex_and_check(&mut lexer, &mut buffer) <= 3);
 
         // Deleting two whole lines at line 100.
         let start = buffer.line_start(100);
