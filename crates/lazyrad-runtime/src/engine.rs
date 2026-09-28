@@ -75,6 +75,9 @@ pub struct EngineHost {
     file: String,
     progress: Rc<Progress>,
     globals: Rc<RefCell<BTreeMap<String, Dynamic>>>,
+    /// Every module registered through [`EngineHost::register_module`], so
+    /// `import "name" as …` can resolve them again after a later registration.
+    modules: rhai::module_resolvers::StaticModuleResolver,
 }
 
 impl EngineHost {
@@ -129,6 +132,7 @@ impl EngineHost {
             file: file.into(),
             progress,
             globals,
+            modules: rhai::module_resolvers::StaticModuleResolver::new(),
         }
     }
 
@@ -181,15 +185,78 @@ impl EngineHost {
             .map_err(|error| ScriptError::from_parse(&self.file, &error))
     }
 
-    /// Calls a script function defined in `ast`, locating any runtime error.
+    /// Runs `ast`'s top-level statements once and returns the AST its handlers
+    /// are called on.
+    ///
+    /// Rhai's `call_fn` evaluates an AST's statements before every call, so
+    /// calling handlers on the full script would re-run its top-level code on
+    /// every event. The returned AST keeps the functions and only the `import`
+    /// statements, so `import "util" as util` aliases still resolve in handlers.
+    pub fn prepare(&self, ast: &AST) -> Result<AST, ScriptError> {
+        self.engine
+            .run_ast_with_scope(&mut Scope::new(), ast)
+            .map_err(|error| ScriptError::from_eval(&self.file, &error))?;
+        let imports = ast
+            .statements()
+            .iter()
+            .filter(|statement| matches!(statement, rhai::Stmt::Import(..)))
+            .cloned();
+        Ok(AST::new(imports, ast.shared_lib().clone()))
+    }
+
+    /// Calls a script function defined in `ast` with no arguments, locating any
+    /// runtime error.
     ///
     /// A fresh scope is used for each call; the resolver re-populates it with
     /// the control and form handles the function reaches for.
     pub fn call(&self, ast: &AST, function: &str) -> Result<Dynamic, ScriptError> {
+        self.call_with(ast, function, Vec::new())
+    }
+
+    /// Calls a script function defined in `ast`, passing `args`.
+    ///
+    /// [`Vec<Dynamic>`](Dynamic) implements Rhai's `FuncArgs`, so a handler with
+    /// any number of parameters can be called from one place. The caller is
+    /// responsible for matching the argument count to the function's signature;
+    /// a mismatch is an ordinary Rhai runtime error.
+    pub fn call_with(
+        &self,
+        ast: &AST,
+        function: &str,
+        args: Vec<Dynamic>,
+    ) -> Result<Dynamic, ScriptError> {
         let mut scope = Scope::new();
         self.engine
-            .call_fn::<Dynamic>(&mut scope, ast, function, ())
+            .call_fn::<Dynamic>(&mut scope, ast, function, args)
             .map_err(|error| ScriptError::from_eval(&self.file, &error))
+    }
+
+    /// Compiles `source` into a Rhai module named `name` and registers it.
+    ///
+    /// The module's functions are exposed both as a namespace (`import "name"`)
+    /// and in the global namespace, so a standard module's helpers can be called
+    /// directly (`Greeting("Ada")`) or qualified (`util::Greeting("Ada")`).
+    /// `file` is the label a compile or evaluation error is reported against.
+    pub fn register_module(
+        &mut self,
+        name: &str,
+        file: &str,
+        source: &str,
+    ) -> Result<(), ScriptError> {
+        let ast = self
+            .engine
+            .compile(source)
+            .map_err(|error| ScriptError::from_parse(file, &error))?;
+        let module = rhai::Module::eval_ast_as_new(Scope::new(), &ast, &self.engine)
+            .map_err(|error| ScriptError::from_eval(file, &error))?;
+        // A resolver entry backs `import "name" as x`; the global and static
+        // registrations back `Name::fn()` and a bare `fn()` call respectively.
+        self.modules.insert(name, module.clone());
+        self.engine.set_module_resolver(self.modules.clone());
+        let shared: rhai::Shared<rhai::Module> = module.into();
+        self.engine.register_global_module(shared.clone());
+        self.engine.register_static_module(name, shared);
+        Ok(())
     }
 }
 

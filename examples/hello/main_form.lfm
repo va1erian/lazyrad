@@ -35,3 +35,10 @@ top = 108
 width = 120
 height = 32
 text = "Say hello"
+
+[[node]]
+kind = "Label"
+name = "result_label"
+left = 16
+top = 148
+width = 200

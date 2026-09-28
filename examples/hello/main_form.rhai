@@ -1,3 +1,3 @@
 fn hello_button_click() {
-    msg_box(greeting(name_edit.text));
+    result_label.text = greeting(name_edit.text);
 }
