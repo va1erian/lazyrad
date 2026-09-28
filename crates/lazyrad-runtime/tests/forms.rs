@@ -224,6 +224,57 @@ fn a_standard_module_can_be_imported_by_name() {
 }
 
 #[test]
+fn a_message_box_does_not_block_the_handler() {
+    let mut doc = FormDoc::new("frmMain");
+    let mut label = Node::new("Label", "lblOut");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "frmMain",
+            doc,
+            "fn Form_Load() { MsgBox(\"Hello\"); lblOut.caption = \"after\"; }",
+        )],
+        Vec::new(),
+    );
+
+    let form = capture_form(runtime, "frmMain");
+    assert_eq!(
+        form.get("lblOut", "text"),
+        Some(Value::Text("after".to_owned())),
+        "the handler continues past a non-blocking MsgBox"
+    );
+}
+
+#[test]
+fn a_form_script_can_use_the_standard_library() {
+    let mut doc = FormDoc::new("frmMain");
+    let mut label = Node::new("Label", "lblOut");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "frmMain",
+            doc,
+            "fn Form_Load() { lblOut.caption = Format(Sqr(Val(\"144\")), \"0.00\"); }",
+        )],
+        Vec::new(),
+    );
+
+    let form = capture_form(runtime, "frmMain");
+    assert_eq!(
+        form.get("lblOut", "text"),
+        Some(Value::Text("12.00".to_owned()))
+    );
+}
+
+#[test]
 fn a_standard_module_function_is_callable_from_a_form() {
     let mut doc = FormDoc::new("frmMain");
     let mut label = Node::new("Label", "lblOut");

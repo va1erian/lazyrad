@@ -39,6 +39,11 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 thiserror = "2"
 
+# `Now()`/`Date()`/`Time()` report the local clock. Only the offset lookup and
+# the core date/time types are needed; formatting is done by the runtime, so
+# the macros and parsing features are left off (PLAN.md §4.4).
+time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
+
 # The IDE shell persists its settings (theme, editor font, recent projects and
 # pane sizes) as TOML in the OS config directory resolved by `directories`
 # (PLAN.md §9). `dark-light` resolves the "system" theme choice.

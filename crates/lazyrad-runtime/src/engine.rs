@@ -35,6 +35,7 @@ use xui_form::Catalog;
 
 use crate::control::{Form, FormHost, controls_by_name, register_control, register_form};
 use crate::error::ScriptError;
+use crate::stdlib::{self, StdlibContext};
 
 /// The shipped operation limit; a script may not execute more operations than
 /// this. It is a backstop above [`DEFAULT_OPERATION_BUDGET`].
@@ -85,9 +86,17 @@ impl EngineHost {
     /// `Me`, then the globals (which start empty).
     ///
     /// `catalog` supplies the property names each control accepts and the
-    /// schema used to decode script values.
+    /// schema used to decode script values. `stdlib` connects the Iteration 1
+    /// standard library to its host: the form name and pending-message queue
+    /// `MsgBox`/`App.quit` write to, and the values `App.title`/`App.path`
+    /// report.
     #[allow(deprecated)] // `Engine::on_var` is flagged volatile but is the API this uses.
-    pub fn new(host: Rc<dyn FormHost>, catalog: &Catalog, file: impl Into<String>) -> Self {
+    pub fn new(
+        host: Rc<dyn FormHost>,
+        catalog: &Catalog,
+        file: impl Into<String>,
+        stdlib: StdlibContext,
+    ) -> Self {
         let mut engine = new_engine();
         register_control(&mut engine, catalog);
         register_form(&mut engine);
@@ -127,16 +136,18 @@ impl EngineHost {
             Ok(None)
         });
 
-        EngineHost {
+        let mut host = EngineHost {
             engine,
             file: file.into(),
             progress,
             globals,
             modules: rhai::module_resolvers::StaticModuleResolver::new(),
-        }
+        };
+        stdlib::register(&mut host, &stdlib);
+        host
     }
 
-    /// The underlying engine, for stdlib registration and metadata.
+    /// The underlying engine, for metadata and stdlib calls.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }

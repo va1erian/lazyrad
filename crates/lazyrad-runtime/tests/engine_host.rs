@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use lazyrad_project::lazyrad_catalog;
-use lazyrad_runtime::{EngineHost, FormHost};
+use lazyrad_runtime::{EngineHost, FormHost, StdlibContext};
 use xui_canvas::OffscreenBackend;
 use xui_core::app::{App, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
@@ -86,6 +86,7 @@ fn run_form<R>(doc: &FormDoc, check: impl FnOnce(&EngineHost, &Rc<LiveForm<()>>)
             Rc::clone(&form) as Rc<dyn FormHost>,
             &catalog,
             "frmMain.rhai",
+            StdlibContext::headless("frmMain"),
         );
         *slot_inner.borrow_mut() = Some(check(&host, &form));
         TestApp
@@ -279,6 +280,7 @@ fn a_registered_global_resolves_in_a_handler() {
             Rc::clone(&form) as Rc<dyn FormHost>,
             &catalog,
             "frmMain.rhai",
+            StdlibContext::headless("frmMain"),
         );
         host.set_global("App", rhai::Dynamic::from("LazyRAD".to_owned()));
 

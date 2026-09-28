@@ -46,11 +46,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use rhai::{AST, Dynamic};
+use rhai::{AST, Dynamic, FnPtr};
 use xui_canvas::WinitBackend;
 use xui_core::app::{App, Ui, WindowHandle, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
 use xui_core::units::Dip;
+use xui_core::{Dialog, DialogAction};
 use xui_form::{
     Binder, BuildOptions, Catalog, EventHandler, EventRef, Factories, FormDoc, LiveForm, Value,
     build_with,
@@ -61,30 +62,10 @@ use lazyrad_project::{Project, lazyrad_catalog, load_form};
 use crate::control::FormHost;
 use crate::engine::EngineHost;
 use crate::error::ScriptError;
+use crate::message::Pending;
+use crate::stdlib::StdlibContext;
 
-/// The queue of messages a script's form methods (`show`, `unload`) leave for
-/// the running [`FormApp`] to act on.
-type Pending = Rc<RefCell<Vec<Msg>>>;
-
-/// A message the runtime application handles.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Msg {
-    /// A widget event that a `<control>_<event>` handler is wired to.
-    Event {
-        /// The form the event belongs to.
-        form: String,
-        /// The control that raised it.
-        control: String,
-        /// The VB-style event name (`Click`, `Change`, `DblClick`, …).
-        event: String,
-        /// The event's arguments, converted from the widget's typed values.
-        args: Vec<Value>,
-    },
-    /// `frmOther.show()`: open a secondary window for the named form.
-    ShowForm(String),
-    /// `frmOther.unload()`: close the named form's secondary window.
-    CloseForm(String),
-}
+pub use crate::message::{Msg, MsgBoxButtons};
 
 /// One form's source: its document, its code-behind and where the code lives.
 #[derive(Clone, Debug)]
@@ -183,6 +164,8 @@ pub struct FormRuntime {
     modules: Vec<ModuleSource>,
     catalog: Catalog,
     pending: Pending,
+    /// The project directory, shown to scripts as `App.path`.
+    path: PathBuf,
     opened: RefCell<BTreeSet<String>>,
     windows: RefCell<BTreeMap<String, WindowHandle<Msg>>>,
 }
@@ -230,6 +213,7 @@ impl FormRuntime {
             modules,
             catalog,
             pending: Rc::new(RefCell::new(Vec::new())),
+            path: dir.to_path_buf(),
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
         }))
@@ -250,6 +234,7 @@ impl FormRuntime {
             modules,
             catalog: lazyrad_catalog(),
             pending: Rc::new(RefCell::new(Vec::new())),
+            path: PathBuf::from("."),
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
         })
@@ -263,6 +248,11 @@ impl FormRuntime {
     /// The catalog the forms are built against.
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
+    }
+
+    /// The project directory, exposed to scripts as `App.path`.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// The form names, in sorted order.
@@ -325,6 +315,7 @@ impl FormRuntime {
         let app = FormApp {
             root: Some(Rc::clone(&root)),
             runtime: Rc::clone(self),
+            dialogs: Vec::new(),
         };
         app.flush(ui);
         Ok(app)
@@ -378,10 +369,17 @@ impl FormInstance {
             BuildOptions::default(),
         )?);
 
+        let stdlib = StdlibContext {
+            form: source.name.clone(),
+            pending: Rc::clone(&runtime.pending),
+            app_title: runtime.project().name.clone(),
+            app_path: runtime.path().display().to_string(),
+        };
         let mut host = EngineHost::new(
             Rc::clone(&live) as Rc<dyn FormHost>,
             &runtime.catalog,
             &source.code_file,
+            stdlib,
         );
         for module in &runtime.modules {
             host.register_module(&module.name, &module.file, &module.source)?;
@@ -435,12 +433,28 @@ impl FormInstance {
         let _ = self.host.call_with(&self.ast, &function, arguments)?;
         Ok(())
     }
+
+    /// Calls a Rhai function pointer the form's script handed to the runtime.
+    ///
+    /// This is how a non-blocking [`Msg::MsgBox`] still reports its result: the
+    /// application stores the callback, then calls it here once the dialog
+    /// closes. The callback is looked up in the form's compiled [`AST`], so a
+    /// script-defined function or a closure both work.
+    pub fn call_callback(&self, callback: &FnPtr, result: i64) -> Result<(), ScriptError> {
+        callback
+            .call::<Dynamic>(self.host.engine(), &self.ast, (result,))
+            .map(|_| ())
+            .map_err(|error| ScriptError::from_eval(self.host.file(), &error))
+    }
 }
 
 /// The application that owns one window's form and routes its messages.
 pub struct FormApp {
     root: Option<Rc<FormInstance>>,
     runtime: Rc<FormRuntime>,
+    /// Every open message box. A [`Dialog`] destroys its nodes when dropped, so
+    /// the application keeps each one alive until it closes.
+    dialogs: Vec<Dialog<Msg>>,
 }
 
 impl FormApp {
@@ -477,6 +491,7 @@ impl FormApp {
                     FormApp {
                         root: None,
                         runtime: Rc::clone(&runtime),
+                        dialogs: Vec::new(),
                     }
                 }
             });
@@ -498,6 +513,54 @@ impl FormApp {
             handle.close();
         }
         self.runtime.mark_closed(name);
+    }
+
+    /// Shows a non-blocking message box in the window.
+    ///
+    /// The dialog's shape follows `buttons`. Its action is turned into a
+    /// [`Msg::MsgBoxResult`] carrying the VB result code and, when the script
+    /// supplied one, the callback to run; the application routes that message
+    /// back through [`FormApp::update`] rather than calling the script here.
+    ///
+    /// The dialog is kept in [`FormApp::dialogs`] so it lives until it closes.
+    ///
+    /// A blocking `MsgBox` would need `Ui::open_modal`, which the canvas backend
+    /// does not implement (PLAN.md §10, G14; va1erian/xui#146), so Iteration 1
+    /// is deliberately asynchronous.
+    fn open_msg_box(
+        &mut self,
+        ui: &mut Ui<Msg>,
+        form: &str,
+        text: &str,
+        title: &str,
+        buttons: MsgBoxButtons,
+        callback: Option<FnPtr>,
+    ) {
+        let dialog = match buttons {
+            MsgBoxButtons::OkOnly => Dialog::message(ui, title, text),
+            MsgBoxButtons::OkCancel => Dialog::confirm(ui, title, text),
+            MsgBoxButtons::YesNo => Dialog::confirm(ui, title, text)
+                .map(|dialog| dialog.accept_label("Yes").cancel_label("No")),
+        };
+        let dialog = match dialog {
+            Ok(dialog) => dialog,
+            Err(error) => {
+                eprintln!("lazyrad: cannot show MsgBox: {error}");
+                return;
+            }
+        };
+        let form = form.to_owned();
+        let dialog = dialog.on_action(move |action| {
+            let accepted = matches!(action, DialogAction::Accept(_));
+            let result = buttons.result(accepted);
+            callback.clone().map(|callback| Msg::MsgBoxResult {
+                form: form.clone(),
+                callback,
+                result,
+            })
+        });
+        dialog.open();
+        self.dialogs.push(dialog);
     }
 }
 
@@ -531,7 +594,32 @@ impl App for FormApp {
                 self.close_form(&name);
                 self.flush(ui);
             }
+            Msg::MsgBox {
+                form,
+                text,
+                title,
+                buttons,
+                callback,
+            } => {
+                self.open_msg_box(ui, &form, &text, &title, buttons, callback);
+                self.flush(ui);
+            }
+            Msg::MsgBoxResult {
+                form,
+                callback,
+                result,
+            } => {
+                if form.as_str() == root.name()
+                    && let Err(error) = root.call_callback(&callback, result)
+                {
+                    eprintln!("lazyrad: {error}");
+                }
+                self.flush(ui);
+            }
+            Msg::Quit => ui.quit(),
         }
+        // A closed dialog no longer needs its nodes kept alive.
+        self.dialogs.retain(Dialog::is_open);
     }
 }
 
@@ -695,6 +783,7 @@ pub fn run_project_with(
                 FormApp {
                     root: None,
                     runtime: Rc::clone(&runtime_for_app),
+                    dialogs: Vec::new(),
                 }
             }
         }
@@ -705,6 +794,13 @@ pub fn run_project_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazyrad_project::Node;
+    use xui_canvas::OffscreenBackend;
+
+    /// The offscreen window spec the tests use.
+    fn spec() -> PlatformSpec {
+        PlatformSpec::new("lazyrad-runtime form tests").size(Dip(320.0), Dip(200.0))
+    }
 
     #[test]
     fn vb_event_names_map_to_vb_spellings() {
@@ -753,5 +849,64 @@ mod tests {
         assert_eq!(names.len(), 3);
         assert!(names.contains("Form_Load"));
         assert!(names.contains("cmdGo_Click"));
+    }
+
+    #[test]
+    fn a_message_box_callback_runs_against_the_form() {
+        let mut doc = FormDoc::new("frmMain");
+        let mut label = Node::new("Label", "lblOut");
+        label.set_prop("left", Value::Int(10));
+        label.set_prop("top", Value::Int(10));
+        label.set_prop("width", Value::Int(160));
+        doc.insert(label);
+
+        let runtime = FormRuntime::from_sources(
+            vec![FormSource::new(
+                "frmMain",
+                doc,
+                "fn report(result) { lblOut.caption = `${result}`; }",
+            )],
+            Vec::new(),
+        );
+
+        let backend = Rc::new(OffscreenBackend::new());
+        let capture: Rc<RefCell<Option<Rc<LiveForm<Msg>>>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&capture);
+        let callback = FnPtr::new("report").expect("a valid function name");
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let app = runtime.build_app(ui, "frmMain").expect("frmMain builds");
+            let root = app.root.clone().expect("the form is live");
+            root.call_callback(&callback, 1).expect("the callback runs");
+            *slot.borrow_mut() = Some(root.live_form().clone());
+            app
+        })
+        .expect("the event loop runs");
+
+        let form = capture.borrow_mut().take().expect("the form was captured");
+        assert_eq!(
+            form.get("lblOut", "text"),
+            Some(Value::Text("1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn opening_a_message_box_keeps_a_dialog_alive() {
+        let runtime = FormRuntime::from_sources(
+            vec![FormSource::new("frmMain", FormDoc::new("frmMain"), "")],
+            Vec::new(),
+        );
+        let backend = Rc::new(OffscreenBackend::new());
+        let capture: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&capture);
+
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let mut app = runtime.build_app(ui, "frmMain").expect("frmMain builds");
+            app.open_msg_box(ui, "frmMain", "Hello", "Title", MsgBoxButtons::OkOnly, None);
+            *slot.borrow_mut() = Some(app.dialogs.last().is_some_and(Dialog::is_open));
+            app
+        })
+        .expect("the event loop runs");
+
+        assert_eq!(capture.borrow().as_ref(), Some(&true));
     }
 }
