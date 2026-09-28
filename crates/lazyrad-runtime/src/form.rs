@@ -168,6 +168,9 @@ pub struct FormRuntime {
     path: PathBuf,
     opened: RefCell<BTreeSet<String>>,
     windows: RefCell<BTreeMap<String, WindowHandle<Msg>>>,
+    /// Each built form's window, so a message addressed to a form (a message
+    /// box and its result) reaches that window whichever window flushes it.
+    inboxes: RefCell<BTreeMap<String, Ui<Msg>>>,
 }
 
 impl FormRuntime {
@@ -216,6 +219,7 @@ impl FormRuntime {
             path: dir.to_path_buf(),
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
+            inboxes: RefCell::new(BTreeMap::new()),
         }))
     }
 
@@ -237,6 +241,7 @@ impl FormRuntime {
             path: PathBuf::from("."),
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
+            inboxes: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -312,6 +317,9 @@ impl FormRuntime {
             None
         });
 
+        self.inboxes
+            .borrow_mut()
+            .insert(form.to_owned(), ui.clone());
         let app = FormApp {
             root: Some(Rc::clone(&root)),
             runtime: Rc::clone(self),
@@ -329,6 +337,7 @@ impl FormRuntime {
     /// Forgets a secondary window for `name`.
     fn mark_closed(&self, name: &str) {
         self.opened.borrow_mut().remove(name);
+        self.inboxes.borrow_mut().remove(name);
     }
 }
 
@@ -464,11 +473,24 @@ impl FormApp {
         self.root.as_ref().map(|instance| instance.live_form())
     }
 
-    /// Moves every message a script left pending into the window's queue.
+    /// Moves every message a script left pending into the right window's queue.
+    ///
+    /// The queue is shared by every window, so a message addressed to a form
+    /// (a message box, its result) goes to that form's window; the rest are
+    /// handled here.
     fn flush(&self, ui: &mut Ui<Msg>) {
         let pending: Vec<Msg> = self.runtime.pending.borrow_mut().drain(..).collect();
+        let own = self.root.as_ref().map(|root| root.name().to_owned());
         for msg in pending {
-            ui.emit(msg);
+            match addressee(&msg) {
+                Some(form) if Some(form) != own.as_deref() => {
+                    match self.runtime.inboxes.borrow().get(form) {
+                        Some(target) => target.emit(msg),
+                        None => eprintln!("lazyrad: form `{form}` is not open; message dropped"),
+                    }
+                }
+                _ => ui.emit(msg),
+            }
         }
     }
 
@@ -621,6 +643,14 @@ impl App for FormApp {
         }
         // A closed dialog no longer needs its nodes kept alive.
         self.dialogs.retain(Dialog::is_open);
+    }
+}
+
+/// The form a message must be handled by, when it belongs to one window.
+fn addressee(msg: &Msg) -> Option<&str> {
+    match msg {
+        Msg::MsgBox { form, .. } | Msg::MsgBoxResult { form, .. } => Some(form),
+        _ => None,
     }
 }
 
@@ -930,5 +960,55 @@ mod tests {
         .expect("the event loop runs");
 
         assert_eq!(capture.borrow().as_ref(), Some(&true));
+    }
+
+    #[test]
+    fn only_form_messages_have_an_addressee() {
+        let msg_box = Msg::MsgBox {
+            form: "other_form".to_owned(),
+            text: String::new(),
+            title: String::new(),
+            buttons: MsgBoxButtons::Ok,
+            callback: None,
+        };
+        assert_eq!(addressee(&msg_box), Some("other_form"));
+        assert_eq!(addressee(&Msg::ShowForm("other_form".to_owned())), None);
+        assert_eq!(addressee(&Msg::Quit), None);
+    }
+
+    #[test]
+    fn every_built_form_registers_its_window_until_closed() {
+        let runtime = FormRuntime::from_sources(
+            vec![
+                FormSource::new("main_form", FormDoc::new("main_form"), ""),
+                FormSource::new("other_form", FormDoc::new("other_form"), ""),
+            ],
+            Vec::new(),
+        );
+        let backend = Rc::new(OffscreenBackend::new());
+        let capture: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let slot = Rc::clone(&capture);
+        let runtime_in_loop = Rc::clone(&runtime);
+
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let app = runtime_in_loop
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
+            let names = |runtime: &FormRuntime| runtime.inboxes.borrow().keys().cloned().collect();
+            app.show_form("other_form", ui);
+            slot.borrow_mut().push(names(&runtime_in_loop));
+            app.close_form("other_form");
+            slot.borrow_mut().push(names(&runtime_in_loop));
+            app
+        })
+        .expect("the event loop runs");
+
+        assert_eq!(
+            *capture.borrow(),
+            vec![
+                vec!["main_form".to_owned(), "other_form".to_owned()],
+                vec!["main_form".to_owned()],
+            ]
+        );
     }
 }
