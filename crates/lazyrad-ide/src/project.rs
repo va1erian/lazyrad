@@ -18,8 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lazyrad_project::{
-    Diagnostic, Error as ProjectError, Form, Project, ProjectItem, SaveReport, SchemaRegistry,
-    write_if_changed,
+    Catalog, Diagnostic, Error as ProjectError, FormDoc, Project, ProjectItem, SaveReport,
+    lazyrad_catalog, load_form, save_form, write_if_changed,
 };
 
 /// The form a "Standard EXE" project starts with.
@@ -60,9 +60,15 @@ pub enum SessionError {
 pub struct ProjectSession {
     dir: PathBuf,
     project: Project,
-    forms: BTreeMap<String, Form>,
+    /// The catalog form layouts are read, written and validated against.
+    catalog: Catalog,
+    forms: BTreeMap<String, FormDoc>,
     code: BTreeMap<String, String>,
     dirty: bool,
+    /// Files a rename made obsolete, relative to `dir`. They are deleted by
+    /// the next [`ProjectSession::save`], after the new files are written, so a
+    /// rename never touches the disk until the user saves.
+    stale_files: Vec<PathBuf>,
 }
 
 impl ProjectSession {
@@ -86,16 +92,18 @@ impl ProjectSession {
         });
 
         let mut forms = BTreeMap::new();
-        forms.insert(DEFAULT_FORM.to_owned(), Form::new(DEFAULT_FORM));
+        forms.insert(DEFAULT_FORM.to_owned(), FormDoc::new(DEFAULT_FORM));
         let mut code = BTreeMap::new();
         code.insert(DEFAULT_FORM.to_owned(), form_code(DEFAULT_FORM));
 
         let mut session = ProjectSession {
             dir: dir.to_path_buf(),
             project,
+            catalog: lazyrad_catalog(),
             forms,
             code,
             dirty: true,
+            stale_files: Vec::new(),
         };
         fs::create_dir_all(dir).map_err(|source| io_error(dir, source))?;
         session.save()?;
@@ -105,14 +113,14 @@ impl ProjectSession {
     /// Opens the `.lrp` project in `dir` and loads every form and code file.
     pub fn open(dir: &Path) -> Result<ProjectSession, SessionError> {
         let project = Project::load(dir)?;
-        let registry = SchemaRegistry::builtin();
+        let catalog = lazyrad_catalog();
         let mut forms = BTreeMap::new();
         let mut code = BTreeMap::new();
 
         for item in &project.items {
             let name = item.name().to_owned();
             if let Some(layout) = item.layout() {
-                forms.insert(name.clone(), Form::load(&dir.join(layout), registry)?);
+                forms.insert(name.clone(), load_form(&dir.join(layout), &catalog)?);
             }
             let path = dir.join(item.code());
             let source = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
@@ -122,9 +130,11 @@ impl ProjectSession {
         Ok(ProjectSession {
             dir: dir.to_path_buf(),
             project,
+            catalog,
             forms,
             code,
             dirty: false,
+            stale_files: Vec::new(),
         })
     }
 
@@ -136,7 +146,7 @@ impl ProjectSession {
 
         for (name, form) in &self.forms {
             if let Some(path) = self.layout_path(name) {
-                merge(&mut report, form.save(&path)?);
+                merge(&mut report, save_form(&path, form, &self.catalog)?);
             }
         }
         for (name, source) in &self.code {
@@ -145,6 +155,20 @@ impl ProjectSession {
             }
         }
         merge(&mut report, self.project.save(&self.dir)?);
+
+        // Only now, with every current file written and the `.lrp` pointing at
+        // them, remove the files renamed items left behind.
+        for stale in std::mem::take(&mut self.stale_files) {
+            if self.references(&stale) {
+                continue;
+            }
+            let path = self.dir.join(&stale);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(&path, error)),
+            }
+        }
 
         self.dirty = false;
         Ok(report)
@@ -181,7 +205,7 @@ impl ProjectSession {
             layout: PathBuf::from(format!("{name}.lfm")),
             code: PathBuf::from(format!("{name}.rhai")),
         });
-        self.forms.insert(name.clone(), Form::new(name.clone()));
+        self.forms.insert(name.clone(), FormDoc::new(name.clone()));
         self.code.insert(name.clone(), form_code(&name));
         self.dirty = true;
         name
@@ -238,10 +262,20 @@ impl ProjectSession {
         let new_code = PathBuf::from(format!("{new}.rhai"));
         let new_layout = is_form.then(|| PathBuf::from(format!("{new}.lfm")));
 
-        rename_on_disk(&self.dir.join(&old_code), &self.dir.join(&new_code))?;
-        if let (Some(old_layout), Some(new_layout)) = (&old_layout, &new_layout) {
-            rename_on_disk(&self.dir.join(old_layout), &self.dir.join(new_layout))?;
+        // Never let a rename overwrite a file that is already on disk, such as
+        // one left behind by a removed item (Remove keeps its files).
+        for path in std::iter::once(&new_code).chain(new_layout.as_ref()) {
+            if self.dir.join(path).exists() && !self.stale_files.contains(path) {
+                return Err(SessionError::InvalidName(format!(
+                    "`{}` already exists in the project folder",
+                    path.display()
+                )));
+            }
         }
+        // The old files are removed by the next save, not now: until then the
+        // `.lrp` on disk still names them.
+        self.stale_files.push(old_code);
+        self.stale_files.extend(old_layout);
 
         self.project.items[index] = match new_layout {
             Some(layout) => ProjectItem::Form {
@@ -259,7 +293,7 @@ impl ProjectSession {
         }
 
         if let Some(mut form) = self.forms.remove(old) {
-            form.name = new.to_owned();
+            form.window.name = new.to_owned();
             self.forms.insert(new.to_owned(), form);
         }
         if let Some(source) = self.code.remove(old) {
@@ -310,7 +344,7 @@ impl ProjectSession {
     /// Meaningful once the project has been saved; a freshly added item is not
     /// on disk yet and reads as a missing-file diagnostic.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        self.project.validate(&self.dir, SchemaRegistry::builtin())
+        self.project.validate(&self.dir)
     }
 
     /// The project's name.
@@ -350,6 +384,14 @@ impl ProjectSession {
         self.dirty = false;
     }
 
+    /// Whether any current item uses `path` (relative to the project folder).
+    fn references(&self, path: &Path) -> bool {
+        self.project
+            .items
+            .iter()
+            .any(|item| item.code() == path || item.layout() == Some(path))
+    }
+
     /// The names of the form items, in project order.
     pub fn form_names(&self) -> Vec<&str> {
         self.project
@@ -376,7 +418,7 @@ impl ProjectSession {
     }
 
     /// The loaded form `name`, if it is a form in the project.
-    pub fn form(&self, name: &str) -> Option<&Form> {
+    pub fn form(&self, name: &str) -> Option<&FormDoc> {
         self.forms.get(name)
     }
 
@@ -433,22 +475,6 @@ fn io_error(path: &Path, source: std::io::Error) -> SessionError {
     }
 }
 
-/// Renames a file when it exists, creating the destination's folder.
-///
-/// A missing source is not an error: an item that was added but never saved
-/// has no files yet.
-fn rename_on_disk(from: &Path, to: &Path) -> Result<(), SessionError> {
-    if from == to || !from.exists() {
-        return Ok(());
-    }
-    if let Some(parent) = to.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
-    }
-    fs::rename(from, to).map_err(|source| io_error(from, source))
-}
-
 /// Whether `name` is a valid Rhai-style identifier.
 fn is_identifier(name: &str) -> bool {
     let mut characters = name.chars();
@@ -498,7 +524,7 @@ mod tests {
         assert_eq!(reopened.name(), "MyApp");
         assert_eq!(reopened.startup(), DEFAULT_FORM);
         assert_eq!(
-            reopened.form(DEFAULT_FORM).map(|f| f.name.as_str()),
+            reopened.form(DEFAULT_FORM).map(|f| f.window.name.as_str()),
             Some("Form1")
         );
         assert!(reopened.code(DEFAULT_FORM).is_some());
@@ -558,18 +584,23 @@ mod tests {
             .rename(DEFAULT_FORM, "frmMain")
             .expect("rename succeeds");
 
-        assert!(!dir.join("Form1.lfm").exists());
-        assert!(!dir.join("Form1.rhai").exists());
-        assert!(dir.join("frmMain.lfm").is_file());
-        assert!(dir.join("frmMain.rhai").is_file());
+        // Nothing moves on disk until the project is saved.
+        assert!(dir.join("Form1.lfm").is_file());
+        assert!(!dir.join("frmMain.lfm").exists());
         assert_eq!(session.startup(), "frmMain", "startup follows the rename");
         assert_eq!(
-            session.form("frmMain").map(|form| form.name.as_str()),
+            session
+                .form("frmMain")
+                .map(|form| form.window.name.as_str()),
             Some("frmMain"),
             "the form's own name follows"
         );
 
         session.save().expect("save after rename");
+        assert!(!dir.join("Form1.lfm").exists());
+        assert!(!dir.join("Form1.rhai").exists());
+        assert!(dir.join("frmMain.lfm").is_file());
+        assert!(dir.join("frmMain.rhai").is_file());
         assert!(
             session.diagnostics().is_empty(),
             "the renamed project validates: {:?}",
@@ -579,6 +610,43 @@ mod tests {
         let reopened = ProjectSession::open(&dir).expect("reopen");
         assert_eq!(reopened.startup(), "frmMain");
         assert!(reopened.form("frmMain").is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_that_is_never_saved_leaves_the_project_loadable() {
+        let dir = scratch("rename-discard");
+        let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
+        session
+            .rename(DEFAULT_FORM, "frmMain")
+            .expect("rename succeeds");
+        drop(session); // Discard: the IDE closes without saving.
+
+        let reopened = ProjectSession::open(&dir).expect("the saved project still opens");
+        assert!(reopened.form(DEFAULT_FORM).is_some());
+        assert!(reopened.diagnostics().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rename_never_overwrites_a_removed_items_files() {
+        let dir = scratch("rename-overwrite");
+        let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
+        let second = session.add_form();
+        session.save().expect("save both forms");
+        fs::write(dir.join(format!("{second}.rhai")), "// keep me").expect("write code");
+        assert!(session.remove(&second), "Remove keeps the files on disk");
+
+        assert!(matches!(
+            session.rename(DEFAULT_FORM, &second),
+            Err(SessionError::InvalidName(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("{second}.rhai"))).expect("still there"),
+            "// keep me"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

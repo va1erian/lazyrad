@@ -1142,9 +1142,9 @@ impl IdeApp {
                     labels.push(Label::new(
                         panel.ui(),
                         Rect::new(4, 4, 200, 24),
-                        &format!("{} — {}", form.name, form.caption),
+                        &format!("{} — {}", form.window.name, window_title(form)),
                     )?);
-                    for control in &form.controls {
+                    for control in &form.nodes {
                         let text = control_label(control);
                         labels.push(Label::new(panel.ui(), control_rect(control), &text)?);
                     }
@@ -1273,26 +1273,36 @@ impl App for IdeApp {
 
 /// The label a designer preview draws for `control`: its caption when it has
 /// one, otherwise its type and name.
-fn control_label(control: &lazyrad_project::Control) -> String {
+fn control_label(control: &lazyrad_project::Node) -> String {
     let caption = control
-        .props
-        .get("caption")
-        .and_then(lazyrad_project::PropValue::as_str)
+        .prop("text")
+        .and_then(lazyrad_project::Value::as_str)
         .filter(|caption| !caption.is_empty());
     match caption {
-        Some(caption) => format!("{caption} [{}]", control.type_name),
-        None => format!("{} {}", control.type_name, control.name),
+        Some(caption) => format!("{caption} [{}]", control.kind),
+        None => format!("{} {}", control.kind, control.name),
     }
 }
 
-/// A control's rectangle in the form's own coordinates.
-fn control_rect(control: &lazyrad_project::Control) -> Rect {
-    Rect::new(
-        control.left as i32,
-        control.top as i32,
-        (control.left + control.width) as i32,
-        (control.top + control.height) as i32,
-    )
+/// The window title a form declares, or an empty string.
+fn window_title(form: &lazyrad_project::FormDoc) -> &str {
+    form.window
+        .prop("title")
+        .and_then(lazyrad_project::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// A control's rectangle in the form's own coordinates. Geometry the node
+/// leaves out uses the placeholder size the preview draws.
+fn control_rect(control: &lazyrad_project::Node) -> Rect {
+    let int = |name: &str, default: i64| {
+        control
+            .prop(name)
+            .and_then(lazyrad_project::Value::as_int)
+            .unwrap_or(default) as i32
+    };
+    let (left, top) = (int("left", 0), int("top", 0));
+    Rect::new(left, top, left + int("width", 120), top + int("height", 24))
 }
 
 /// A split's extent along its split axis: height for a column, width for a row.
@@ -1546,22 +1556,19 @@ mod tests {
 
     #[test]
     fn a_designer_label_prefers_the_caption() {
-        let mut control = lazyrad_project::Control::new("Label", "lblOne");
+        let mut control = lazyrad_project::Node::new("Label", "lblOne");
         assert_eq!(control_label(&control), "Label lblOne");
-        control.props.insert(
-            "caption".to_owned(),
-            lazyrad_project::PropValue::Text("Hello".to_owned()),
-        );
+        control.set_prop("text", lazyrad_project::Value::Text("Hello".to_owned()));
         assert_eq!(control_label(&control), "Hello [Label]");
     }
 
     #[test]
     fn a_control_rect_maps_the_geometry() {
-        let mut control = lazyrad_project::Control::new("CommandButton", "cmdGo");
-        control.left = 16;
-        control.top = 32;
-        control.width = 120;
-        control.height = 24;
+        let mut control = lazyrad_project::Node::new("CommandButton", "cmdGo");
+        control.set_prop("left", lazyrad_project::Value::Int(16));
+        control.set_prop("top", lazyrad_project::Value::Int(32));
+        control.set_prop("width", lazyrad_project::Value::Int(120));
+        control.set_prop("height", lazyrad_project::Value::Int(24));
         assert_eq!(control_rect(&control), Rect::new(16, 32, 136, 56));
     }
 
