@@ -9,8 +9,8 @@
 //!
 //! # How a script sees controls
 //!
-//! Rhai functions cannot see the enclosing scope, so `txtName.text` inside
-//! `fn cmdHello_Click()` would not resolve by itself. [`EngineHost`] installs an
+//! Rhai functions cannot see the enclosing scope, so `name_edit.text` inside
+//! `fn hello_button_click()` would not resolve by itself. [`EngineHost`] installs an
 //! [`Engine::on_var`] resolver that, for an unknown name, looks up the active
 //! form's controls, then `form`, then the registered globals.
 //!
@@ -88,7 +88,7 @@ impl EngineHost {
     /// `catalog` supplies the property names each control accepts and the
     /// schema used to decode script values. `stdlib` connects the Iteration 1
     /// standard library to its host: the form name and pending-message queue
-    /// `MsgBox`/`App.quit` write to, and the values `App.title`/`App.path`
+    /// `msg_box`/`app.quit()` write to, and the values `app.title`/`app.path`
     /// report.
     #[allow(deprecated)] // `Engine::on_var` is flagged volatile but is the API this uses.
     pub fn new(
@@ -164,7 +164,7 @@ impl EngineHost {
 
     /// Adds or replaces a global, resolved after controls and `form`.
     ///
-    /// The stdlib's `App` and `Debug` objects are registered this way.
+    /// The stdlib's `app` object is registered this way.
     pub fn set_global(&mut self, name: impl Into<String>, value: Dynamic) {
         self.globals.borrow_mut().insert(name.into(), value);
     }

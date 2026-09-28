@@ -29,16 +29,17 @@ pub enum Msg {
         form: String,
         /// The control that raised it.
         control: String,
-        /// The VB-style event name (`Click`, `Change`, `DblClick`, …).
+        /// `xui`'s event name (`Click`, `Change`, `Toggle`, …); the handler is
+        /// its snake_case form.
         event: String,
         /// The event's arguments, converted from the widget's typed values.
         args: Vec<Value>,
     },
-    /// `frmOther.show()`: open a secondary window for the named form.
+    /// `other_form.show()`: open a secondary window for the named form.
     ShowForm(String),
-    /// `frmOther.unload()`: close the named form's secondary window.
+    /// `other_form.unload()`: close the named form's secondary window.
     CloseForm(String),
-    /// `MsgBox(...)`: show an in-window dialog for the named form.
+    /// `msg_box(...)`: show an in-window dialog for the named form.
     MsgBox {
         /// The form whose script asked for the dialog.
         form: String,
@@ -58,10 +59,10 @@ pub enum Msg {
         form: String,
         /// The Rhai function pointer to call.
         callback: FnPtr,
-        /// The VB-style result code (`vbOK`, `vbCancel`, `vbYes`, `vbNo`).
-        result: i64,
+        /// The button pressed: `"ok"`, `"cancel"`, `"yes"` or `"no"`.
+        result: &'static str,
     },
-    /// `App.quit()`: end the application.
+    /// `app.quit()`: end the application.
     Quit,
 }
 
@@ -69,7 +70,7 @@ pub enum Msg {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MsgBoxButtons {
     /// One **OK** button.
-    OkOnly,
+    Ok,
     /// **OK** and **Cancel**.
     OkCancel,
     /// **Yes** and **No**.
@@ -77,65 +78,56 @@ pub enum MsgBoxButtons {
 }
 
 impl MsgBoxButtons {
-    /// Maps a VB `MsgBox` button constant onto the dialog shapes Iteration 1
-    /// supports.
-    ///
-    /// The full VB set is not implemented: `vbYesNoCancel` and the icon flags
-    /// collapse to one of these three shapes, since the in-window dialog has at
-    /// most two buttons. An unknown value is treated as [`MsgBoxButtons::OkOnly`].
-    pub fn from_vb(value: i64) -> MsgBoxButtons {
-        match value {
-            1 => MsgBoxButtons::OkCancel,
-            4 => MsgBoxButtons::YesNo,
-            _ => MsgBoxButtons::OkOnly,
+    /// The button set a script names: `"ok"`, `"ok_cancel"` or `"yes_no"`.
+    pub fn from_name(name: &str) -> Option<MsgBoxButtons> {
+        match name {
+            "ok" => Some(MsgBoxButtons::Ok),
+            "ok_cancel" => Some(MsgBoxButtons::OkCancel),
+            "yes_no" => Some(MsgBoxButtons::YesNo),
+            _ => None,
         }
     }
 
-    /// The VB result code for a dismissal.
+    /// The name of the button that dismissed the box, as the script's callback
+    /// receives it.
     ///
     /// `accepted` is true for the affirmative button (or Enter) and false for
-    /// cancel (or Escape). An **OK**-only dialog always reports `vbOK`, matching
-    /// VB, which has no cancel result when there is only an **OK** button.
-    pub fn result(self, accepted: bool) -> i64 {
+    /// cancel (or Escape). An **OK**-only box always reports `"ok"`.
+    pub fn result(self, accepted: bool) -> &'static str {
         match (self, accepted) {
-            (MsgBoxButtons::OkOnly, _) => VB_OK,
-            (MsgBoxButtons::OkCancel, true) => VB_OK,
-            (MsgBoxButtons::OkCancel, false) => VB_CANCEL,
-            (MsgBoxButtons::YesNo, true) => VB_YES,
-            (MsgBoxButtons::YesNo, false) => VB_NO,
+            (MsgBoxButtons::Ok, _) | (MsgBoxButtons::OkCancel, true) => "ok",
+            (MsgBoxButtons::OkCancel, false) => "cancel",
+            (MsgBoxButtons::YesNo, true) => "yes",
+            (MsgBoxButtons::YesNo, false) => "no",
         }
     }
 }
-
-/// VB `vbOK` result code.
-pub const VB_OK: i64 = 1;
-/// VB `vbCancel` result code.
-pub const VB_CANCEL: i64 = 2;
-/// VB `vbYes` result code.
-pub const VB_YES: i64 = 6;
-/// VB `vbNo` result code.
-pub const VB_NO: i64 = 7;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn vb_button_constants_map_to_the_supported_shapes() {
-        assert_eq!(MsgBoxButtons::from_vb(0), MsgBoxButtons::OkOnly);
-        assert_eq!(MsgBoxButtons::from_vb(1), MsgBoxButtons::OkCancel);
-        assert_eq!(MsgBoxButtons::from_vb(4), MsgBoxButtons::YesNo);
-        assert_eq!(MsgBoxButtons::from_vb(3), MsgBoxButtons::OkOnly);
-        assert_eq!(MsgBoxButtons::from_vb(99), MsgBoxButtons::OkOnly);
+    fn button_sets_are_named() {
+        assert_eq!(MsgBoxButtons::from_name("ok"), Some(MsgBoxButtons::Ok));
+        assert_eq!(
+            MsgBoxButtons::from_name("ok_cancel"),
+            Some(MsgBoxButtons::OkCancel)
+        );
+        assert_eq!(
+            MsgBoxButtons::from_name("yes_no"),
+            Some(MsgBoxButtons::YesNo)
+        );
+        assert_eq!(MsgBoxButtons::from_name("vbYesNo"), None);
     }
 
     #[test]
-    fn result_codes_follow_vb() {
-        assert_eq!(MsgBoxButtons::OkOnly.result(true), VB_OK);
-        assert_eq!(MsgBoxButtons::OkOnly.result(false), VB_OK);
-        assert_eq!(MsgBoxButtons::OkCancel.result(true), VB_OK);
-        assert_eq!(MsgBoxButtons::OkCancel.result(false), VB_CANCEL);
-        assert_eq!(MsgBoxButtons::YesNo.result(true), VB_YES);
-        assert_eq!(MsgBoxButtons::YesNo.result(false), VB_NO);
+    fn results_name_the_button_pressed() {
+        assert_eq!(MsgBoxButtons::Ok.result(true), "ok");
+        assert_eq!(MsgBoxButtons::Ok.result(false), "ok");
+        assert_eq!(MsgBoxButtons::OkCancel.result(true), "ok");
+        assert_eq!(MsgBoxButtons::OkCancel.result(false), "cancel");
+        assert_eq!(MsgBoxButtons::YesNo.result(true), "yes");
+        assert_eq!(MsgBoxButtons::YesNo.result(false), "no");
     }
 }

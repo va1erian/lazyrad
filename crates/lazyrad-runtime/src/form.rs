@@ -436,9 +436,9 @@ impl FormInstance {
     /// application stores the callback, then calls it here once the dialog
     /// closes. The callback is looked up in the form's compiled [`AST`], so a
     /// script-defined function or a closure both work.
-    pub fn call_callback(&self, callback: &FnPtr, result: i64) -> Result<(), ScriptError> {
+    pub fn call_callback(&self, callback: &FnPtr, result: &str) -> Result<(), ScriptError> {
         callback
-            .call::<Dynamic>(self.host.engine(), &self.ast, (result,))
+            .call::<Dynamic>(self.host.engine(), &self.ast, (result.to_owned(),))
             .map(|_| ())
             .map_err(|error| ScriptError::from_eval(self.host.file(), &error))
     }
@@ -514,13 +514,13 @@ impl FormApp {
     /// Shows a non-blocking message box in the window.
     ///
     /// The dialog's shape follows `buttons`. Its action is turned into a
-    /// [`Msg::MsgBoxResult`] carrying the VB result code and, when the script
+    /// [`Msg::MsgBoxResult`] naming the button pressed and, when the script
     /// supplied one, the callback to run; the application routes that message
     /// back through [`FormApp::update`] rather than calling the script here.
     ///
     /// The dialog is kept in [`FormApp::dialogs`] so it lives until it closes.
     ///
-    /// A blocking `MsgBox` would need `Ui::open_modal`, which the canvas backend
+    /// A blocking `msg_box` would need `Ui::open_modal`, which the canvas backend
     /// does not implement (PLAN.md §10, G14; va1erian/xui#146), so Iteration 1
     /// is deliberately asynchronous.
     fn open_msg_box(
@@ -533,7 +533,7 @@ impl FormApp {
         callback: Option<FnPtr>,
     ) {
         let dialog = match buttons {
-            MsgBoxButtons::OkOnly => Dialog::message(ui, title, text),
+            MsgBoxButtons::Ok => Dialog::message(ui, title, text),
             MsgBoxButtons::OkCancel => Dialog::confirm(ui, title, text),
             MsgBoxButtons::YesNo => Dialog::confirm(ui, title, text)
                 .map(|dialog| dialog.accept_label("Yes").cancel_label("No")),
@@ -541,7 +541,7 @@ impl FormApp {
         let dialog = match dialog {
             Ok(dialog) => dialog,
             Err(error) => {
-                eprintln!("lazyrad: cannot show MsgBox: {error}");
+                eprintln!("lazyrad: cannot show msg_box: {error}");
                 return;
             }
         };
@@ -865,8 +865,8 @@ mod tests {
 
     #[test]
     fn a_message_box_callback_runs_against_the_form() {
-        let mut doc = FormDoc::new("frmMain");
-        let mut label = Node::new("Label", "lblOut");
+        let mut doc = FormDoc::new("main_form");
+        let mut label = Node::new("Label", "result_label");
         label.set_prop("left", Value::Int(10));
         label.set_prop("top", Value::Int(10));
         label.set_prop("width", Value::Int(160));
@@ -874,9 +874,9 @@ mod tests {
 
         let runtime = FormRuntime::from_sources(
             vec![FormSource::new(
-                "frmMain",
+                "main_form",
                 doc,
-                "fn report(result) { lblOut.caption = `${result}`; }",
+                "fn report(result) { result_label.text = `${result}`; }",
             )],
             Vec::new(),
         );
@@ -886,9 +886,12 @@ mod tests {
         let slot = Rc::clone(&capture);
         let callback = FnPtr::new("report").expect("a valid function name");
         run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
-            let app = runtime.build_app(ui, "frmMain").expect("frmMain builds");
+            let app = runtime
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
             let root = app.root.clone().expect("the form is live");
-            root.call_callback(&callback, 1).expect("the callback runs");
+            root.call_callback(&callback, "ok")
+                .expect("the callback runs");
             *slot.borrow_mut() = Some(root.live_form().clone());
             app
         })
@@ -896,15 +899,15 @@ mod tests {
 
         let form = capture.borrow_mut().take().expect("the form was captured");
         assert_eq!(
-            form.get("lblOut", "text"),
-            Some(Value::Text("1".to_owned()))
+            form.get("result_label", "text"),
+            Some(Value::Text("ok".to_owned()))
         );
     }
 
     #[test]
     fn opening_a_message_box_keeps_a_dialog_alive() {
         let runtime = FormRuntime::from_sources(
-            vec![FormSource::new("frmMain", FormDoc::new("frmMain"), "")],
+            vec![FormSource::new("main_form", FormDoc::new("main_form"), "")],
             Vec::new(),
         );
         let backend = Rc::new(OffscreenBackend::new());
@@ -912,8 +915,10 @@ mod tests {
         let slot = Rc::clone(&capture);
 
         run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
-            let mut app = runtime.build_app(ui, "frmMain").expect("frmMain builds");
-            app.open_msg_box(ui, "frmMain", "Hello", "Title", MsgBoxButtons::OkOnly, None);
+            let mut app = runtime
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
+            app.open_msg_box(ui, "main_form", "Hello", "Title", MsgBoxButtons::Ok, None);
             *slot.borrow_mut() = Some(app.dialogs.last().is_some_and(Dialog::is_open));
             app
         })

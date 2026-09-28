@@ -233,8 +233,8 @@ fn a_standard_module_can_be_imported_by_name() {
 
 #[test]
 fn a_message_box_does_not_block_the_handler() {
-    let mut doc = FormDoc::new("frmMain");
-    let mut label = Node::new("Label", "lblOut");
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
     label.set_prop("left", Value::Int(10));
     label.set_prop("top", Value::Int(10));
     label.set_prop("width", Value::Int(160));
@@ -242,25 +242,25 @@ fn a_message_box_does_not_block_the_handler() {
 
     let runtime = FormRuntime::from_sources(
         vec![FormSource::new(
-            "frmMain",
+            "main_form",
             doc,
-            "fn Form_Load() { MsgBox(\"Hello\"); lblOut.caption = \"after\"; }",
+            "fn form_load() { msg_box(\"Hello\"); result_label.text = \"after\"; }",
         )],
         Vec::new(),
     );
 
-    let form = capture_form(runtime, "frmMain");
+    let form = capture_form(runtime, "main_form");
     assert_eq!(
-        form.get("lblOut", "text"),
+        form.get("result_label", "text"),
         Some(Value::Text("after".to_owned())),
-        "the handler continues past a non-blocking MsgBox"
+        "the handler continues past a non-blocking msg_box"
     );
 }
 
 #[test]
 fn a_form_script_can_use_the_standard_library() {
-    let mut doc = FormDoc::new("frmMain");
-    let mut label = Node::new("Label", "lblOut");
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
     label.set_prop("left", Value::Int(10));
     label.set_prop("top", Value::Int(10));
     label.set_prop("width", Value::Int(160));
@@ -268,17 +268,17 @@ fn a_form_script_can_use_the_standard_library() {
 
     let runtime = FormRuntime::from_sources(
         vec![FormSource::new(
-            "frmMain",
+            "main_form",
             doc,
-            "fn Form_Load() { lblOut.caption = Format(Sqr(Val(\"144\")), \"0.00\"); }",
+            "fn form_load() { result_label.text = [(144.0).sqrt().to_int(), today().len()].join(\"/\"); }",
         )],
         Vec::new(),
     );
 
-    let form = capture_form(runtime, "frmMain");
+    let form = capture_form(runtime, "main_form");
     assert_eq!(
-        form.get("lblOut", "text"),
-        Some(Value::Text("12.00".to_owned()))
+        form.get("result_label", "text"),
+        Some(Value::Text("12/10".to_owned()))
     );
 }
 
