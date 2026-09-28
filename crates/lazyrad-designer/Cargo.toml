@@ -11,6 +11,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The designer edits an `xui_form::FormDoc` and renders it with real widgets, so
+# it depends on the form crate directly rather than on the runtime's loader
+# (PLAN.md §6; issue #12 replaces #4 for the preview).
 lazyrad-project.workspace = true
-lazyrad-runtime.workspace = true
+thiserror.workspace = true
 xui-core.workspace = true
+xui-form.workspace = true
+
+[dev-dependencies]
+xui-canvas.workspace = true
