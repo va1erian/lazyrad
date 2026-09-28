@@ -621,7 +621,7 @@ fn set_doc_keeps_the_current_form_when_the_new_one_is_invalid_and_resizes_the_pa
 
     let (rejected, kept, panel_width) = results.borrow_mut().take().expect("the check ran");
     assert!(rejected, "an invalid document is refused");
-    assert_eq!(kept, "frmMain", "the current document is kept");
+    assert_eq!(kept, button_doc().window.name, "the current document is kept");
     assert_eq!(panel_width, 400, "the panel follows the new form size");
 }
 
