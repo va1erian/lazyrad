@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use xui_core::app::Ui;
-use xui_core::backend::{Cursor, NodeKind, NodeSpec, Result, TimerId, WidgetId};
+use xui_core::backend::{Cursor, NodeKind, NodeSpec, Result, WidgetId};
 use xui_core::geometry::Rect;
 
 use crate::buffer::Buffer;
@@ -35,7 +35,6 @@ pub struct Editor<M: 'static> {
     control: xui_core::widget::Control<M>,
     state: Rc<RefCell<EditorState>>,
     on_change: Rc<RefCell<Option<ChangeMapper<M>>>>,
-    timer: TimerId,
 }
 
 impl<M: 'static> Editor<M> {
@@ -106,12 +105,27 @@ impl<M: 'static> Editor<M> {
             });
         }
 
-        let timer = ui.set_timer(BLINK_MS);
+        // The caret blinks on the control's own timer (xui's per-widget timers),
+        // so the host has nothing to forward; the control stops it on drop.
+        {
+            let state = Rc::clone(&state);
+            let ui = ui.clone();
+            let id = control.id();
+            let _ = control.set_timer(BLINK_MS, move || {
+                let mut state = state.borrow_mut();
+                if state.focused {
+                    state.toggle_blink();
+                    drop(state);
+                    ui.invalidate(id);
+                }
+                None
+            });
+        }
+
         Ok(Editor {
             control,
             state,
             on_change,
-            timer,
         })
     }
 
@@ -183,43 +197,9 @@ impl<M: 'static> Editor<M> {
         self.control.invalidate();
     }
 
-    /// The id of the caret-blink timer started at construction.
-    ///
-    /// xui exposes only one window timer mapping
-    /// (`Ui::on_timer`) and keeps per-widget timer listeners `pub(crate)`, so
-    /// the app forwards ticks to [`Editor::handle_timer`] from its own mapper.
-    pub fn timer_id(&self) -> TimerId {
-        self.timer
-    }
-
-    /// Toggles the caret blink when `id` is this editor's timer, returning
-    /// whether the editor repainted.
-    pub fn handle_timer(&self, id: TimerId) -> bool {
-        if id != self.timer || id == TimerId(0) {
-            return false;
-        }
-        let mut state = self.state.borrow_mut();
-        if !state.focused {
-            return false;
-        }
-        state.toggle_blink();
-        drop(state);
-        self.control.invalidate();
-        true
-    }
-
     /// The selected char range, ordered, or `None` when nothing is selected.
     pub fn selection(&self) -> Option<(usize, usize)> {
         self.state.borrow().view.selection()
-    }
-}
-
-impl<M: 'static> Drop for Editor<M> {
-    fn drop(&mut self) {
-        // The blink timer belongs to the window; stop it with the widget.
-        if self.timer != TimerId(0) {
-            self.control.ui().kill_timer(self.timer);
-        }
     }
 }
 
