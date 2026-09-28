@@ -408,7 +408,12 @@ impl<M: 'static> Designer<M> {
     /// otherwise re-apply geometry; then notify the selection sink and repaint.
     fn refresh(&self, ui: &Ui<M>, change: Change) {
         if change.structure {
+            // A failed preview build keeps the overlay (so the user can undo
+            // the edit that caused it); there is no caller to report to here.
             let _ = self.rebuild(ui);
+            // The rebuild replaced the overlay node: give the new one focus, so
+            // a keyboard command (Delete, then Ctrl+Z) keeps reaching it.
+            ui.focus(self.id());
         } else if change.geometry {
             self.sync_geometry(ui);
         }
@@ -420,23 +425,31 @@ impl<M: 'static> Designer<M> {
 
     /// Destroys the live widgets and the overlay, rebuilds the widgets from the
     /// document, and recreates the overlay above them.
-    fn rebuild(&self, ui: &Ui<M>) -> Result<(), BuildError> {
+    ///
+    /// The overlay is reinstalled even when the preview fails to build, so the
+    /// designer keeps receiving input and the user can undo the edit that broke
+    /// it; the build error is still returned.
+    fn rebuild(&self, ui: &Ui<M>) -> Result<(), DesignerError> {
         *self.live.borrow_mut() = None;
         *self.overlay.borrow_mut() = None;
         let doc = self.surface.borrow().doc().clone();
-        let form = build_with(
+        let built = build_with(
             self.panel.ui(),
             &doc,
             &self.catalog,
             &self.factories,
             &self.binder,
             BuildOptions { design_mode: true },
-        )?;
-        *self.live.borrow_mut() = Some(form);
-        // A backend failure here leaves the form without an overlay; the caller
-        // that needs one (setup) propagates it, the command path ignores it.
-        let _ = self.install_overlay(ui);
-        Ok(())
+        );
+        let result = match built {
+            Ok(form) => {
+                *self.live.borrow_mut() = Some(form);
+                Ok(())
+            }
+            Err(error) => Err(DesignerError::from(error)),
+        };
+        self.install_overlay(ui)?;
+        result
     }
 
     /// Creates the transparent overlay above the live widgets and wires its
@@ -620,7 +633,13 @@ fn paint(canvas: &mut dyn Canvas, surface: &Surface, theme: &Theme) {
     canvas.stroke_rect(px_rect(bounds, dpi), theme.accent, 2.0);
 
     let handle_size = Dip(7.0).to_px(dpi).value().max(3);
-    for handle in Handle::ALL {
+    // Handles only where a drag on them resizes: the form or one node. With
+    // several nodes (or none) selected, a drag there would move or marquee.
+    let resizable = match surface.selection() {
+        Selection::Form => true,
+        Selection::Nodes(names) => names.len() == 1,
+    };
+    for handle in Handle::ALL.into_iter().filter(|_| resizable) {
         let (cx, cy) = handle.center(bounds);
         let center = Point::new(
             Dip(cx as f32).to_px(dpi).value(),
