@@ -693,9 +693,13 @@ impl Surface {
         if self.clipboard.is_empty() {
             return false;
         }
+        // Names chosen earlier in this paste count as taken, so two pasted
+        // nodes can never end up with the same name.
         let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+        let mut taken = std::collections::BTreeSet::new();
         for node in &self.clipboard {
-            let name = self.unique_name(&node.name);
+            let name = self.unique_name(&node.name, &taken);
+            taken.insert(name.clone());
             renamed.insert(node.name.clone(), name);
         }
 
@@ -875,14 +879,15 @@ impl Surface {
     }
 
     /// A name not already used by a node, derived from `base`.
-    fn unique_name(&self, base: &str) -> String {
-        if self.doc.node(base).is_none() {
+    fn unique_name(&self, base: &str, taken: &std::collections::BTreeSet<String>) -> String {
+        let free = |name: &str| self.doc.node(name).is_none() && !taken.contains(name);
+        if free(base) {
             return base.to_owned();
         }
         let mut index = 1;
         loop {
             let candidate = format!("{base}{index}");
-            if self.doc.node(&candidate).is_none() {
+            if free(&candidate) {
                 return candidate;
             }
             index += 1;
@@ -946,6 +951,35 @@ mod tests {
             Rc::new(lazyrad_project::lazyrad_catalog()),
             DEFAULT_GRID,
         )
+    }
+
+    #[test]
+    fn a_paste_never_gives_two_nodes_the_same_name() {
+        let mut doc = FormDoc::new("frmMain");
+        doc.insert(Node::new("Button", "btn"));
+        doc.insert(Node::new("Button", "btn1"));
+        let mut surface = Surface::new(
+            doc,
+            Rc::new(lazyrad_project::lazyrad_catalog()),
+            DEFAULT_GRID,
+        );
+        surface.select_all();
+        assert!(surface.copy());
+        // With `btn1` gone, `btn` would naively become `btn1` and `btn1` stay
+        // `btn1`.
+        assert!(surface.select_node("btn1"));
+        surface.delete_selection();
+        assert!(surface.paste());
+
+        let names: Vec<&str> = surface
+            .doc()
+            .nodes
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "duplicate names in {names:?}");
+        assert_eq!(names.len(), 3);
     }
 
     #[test]

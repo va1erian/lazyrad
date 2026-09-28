@@ -81,7 +81,7 @@ impl<T: Clone + PartialEq> History<T> {
 
     /// Whether the history holds only the present snapshot.
     pub fn is_empty(&self) -> bool {
-        self.snapshots.is_empty()
+        self.snapshots.len() <= 1
     }
 }
 
@@ -103,6 +103,14 @@ mod tests {
         assert_eq!(history.redo(), Some(&1));
         assert_eq!(history.redo(), Some(&2));
         assert_eq!(history.redo(), None);
+    }
+
+    #[test]
+    fn a_history_with_only_the_present_is_empty() {
+        let mut history = History::new(0);
+        assert!(history.is_empty());
+        history.record(&1);
+        assert!(!history.is_empty());
     }
 
     #[test]
