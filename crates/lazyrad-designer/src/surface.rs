@@ -807,11 +807,11 @@ impl Surface {
     /// back to the default size for a click, finds the target container and
     /// creates the control.
     fn finish_create(&mut self, kind: &str, origin: (i64, i64), end: (i64, i64)) -> Option<String> {
-        let dragged = DesignRect::new(
-            snap(origin.0, self.grid),
-            snap(origin.1, self.grid),
-            snap(end.0, self.grid),
-            snap(end.1, self.grid),
+        // Normalised, so a drag up or to the left creates what the preview
+        // showed instead of falling back to the default size.
+        let dragged = DesignRect::from_points(
+            (snap(origin.0, self.grid), snap(origin.1, self.grid)),
+            (snap(end.0, self.grid), snap(end.1, self.grid)),
         );
         let rect = if dragged.width() < MIN_DRAW || dragged.height() < MIN_DRAW {
             let (width, height) = self.default_size(kind);
@@ -1438,6 +1438,20 @@ mod tests {
         assert_eq!(node.prop("width"), Some(&Value::Int(80)));
         assert_eq!(node.prop("height"), Some(&Value::Int(40)));
         assert!(surface.selection().contains("button1"));
+    }
+
+    #[test]
+    fn a_reverse_tool_drag_creates_the_same_control() {
+        let mut surface = empty();
+        surface.set_tool(Some("Button"));
+        surface.pointer_down(90, 50, false);
+        surface.pointer_move(10, 10, false);
+        surface.pointer_up(10, 10, false);
+        let node = surface.doc.node("button1").expect("created");
+        assert_eq!(node.prop("left"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("width"), Some(&Value::Int(80)));
+        assert_eq!(node.prop("height"), Some(&Value::Int(40)));
     }
 
     #[test]
