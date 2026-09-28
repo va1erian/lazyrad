@@ -23,6 +23,13 @@
 //!   [`Designer::handle_toolbox`], which arms the click-then-drag tool or drops
 //!   a control in the centre of the form. Every creation is one undoable
 //!   [`Surface`] command.
+//! * [`PropertyGrid`] is a [`Custom`](xui_core::backend::NodeKind) two-column
+//!   name/value list driven by the [`Catalog`](xui_form::Catalog) schema. It
+//!   follows the designer's selection, overlays a typed editor on the cell
+//!   being edited, and commits each edit as an undoable
+//!   [`Surface::set_property`] command. A rename raises the host's rename sink
+//!   with the old and new names, and [`rename_handlers`] rewrites the form's
+//!   `.rhai` handlers.
 //!
 //! # Wiring a designer into a host
 //!
@@ -76,15 +83,19 @@
 
 pub mod geometry;
 pub mod history;
+pub mod property_grid;
 pub mod surface;
 pub mod toolbox;
 pub mod widget;
 
 pub use geometry::{DesignRect, Handle, handle_at, resize, resize_form, snap};
 pub use history::History;
+pub use property_grid::{
+    PropertyGrid, PropertyGridError, PropertyGridMsg, PropertyRow, View, property_rows,
+};
 pub use surface::{
-    Change, CursorHint, DEFAULT_GRID, HANDLE_TOLERANCE, KeyInput, KeyPress, Outcome, Selection,
-    Surface, control_base_name,
+    Change, CursorHint, DEFAULT_GRID, HANDLE_TOLERANCE, KeyInput, KeyPress, Outcome, PropertyError,
+    Selection, Surface, Target, control_base_name, is_valid_name, rename_handlers,
 };
 pub use toolbox::{CONTROL_KINDS, Tool, Toolbox, ToolboxMsg, tools};
 pub use widget::{Designer, DesignerError, DesignerMsg};

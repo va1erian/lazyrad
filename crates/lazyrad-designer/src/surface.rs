@@ -148,6 +148,8 @@ pub struct Change {
     pub structure: bool,
     /// The selection changed.
     pub selection: bool,
+    /// A non-geometry property changed; push the values into the live widgets.
+    pub property: bool,
 }
 
 impl Change {
@@ -156,11 +158,18 @@ impl Change {
         geometry: false,
         structure: false,
         selection: false,
+        property: false,
     };
 
     /// A geometry-only change.
     pub const GEOMETRY: Change = Change {
         geometry: true,
+        ..Change::NONE
+    };
+
+    /// A non-geometry property change.
+    pub const PROPERTY: Change = Change {
+        property: true,
         ..Change::NONE
     };
 
@@ -179,8 +188,107 @@ impl Change {
 
     /// Whether anything changed.
     pub const fn any(self) -> bool {
-        self.geometry || self.structure || self.selection
+        self.geometry || self.structure || self.selection || self.property
     }
+}
+
+/// Which object a property command targets: the form itself, or a named node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The form/window.
+    Form,
+    /// The control named by the string.
+    Node(String),
+}
+
+impl Target {
+    /// The node name, or `None` for the form.
+    pub fn node(&self) -> Option<&str> {
+        match self {
+            Target::Form => None,
+            Target::Node(name) => Some(name),
+        }
+    }
+}
+
+/// Why a [`Surface::set_property`] command was rejected.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PropertyError {
+    /// The target node does not exist.
+    #[error("no such object")]
+    UnknownObject,
+    /// The object has no such property (or it is hidden in the designer).
+    #[error("`{0}` is not an editable property")]
+    UnknownProperty(String),
+    /// The property is not writable in design mode.
+    #[error("`{0}` is read-only in the designer")]
+    ReadOnly(String),
+    /// The value does not fit the property's schema.
+    #[error("the value is not valid for `{0}`")]
+    InvalidValue(String),
+    /// A control name is not a valid identifier.
+    #[error("`{0}` is not a valid control name")]
+    InvalidName(String),
+    /// A control name is already taken.
+    #[error("`{0}` is already used by another control")]
+    DuplicateName(String),
+}
+
+/// Whether `name` is a valid control identifier: a letter or `_` followed by
+/// letters, digits or `_`.
+pub fn is_valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `c` may appear inside a Rhai identifier.
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Rewrites event-handler definitions in a form's `.rhai` source so a control
+/// rename keeps them bound: every `fn old_Event(` becomes `fn new_Event(`.
+///
+/// Only function declarations are touched, and only when `old` is the whole
+/// prefix before the `_`; a control whose name merely starts with `old` (for
+/// example `cmdOk` versus `cmdOkExtra`) is left alone. This is the textual
+/// rename the property grid's `(Name)` edit requests from the host.
+pub fn rename_handlers(source: &str, old: &str, new: &str) -> String {
+    if old.is_empty() || old == new {
+        return source.to_owned();
+    }
+    let prefix = format!("{old}_");
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < source.len() {
+        let bytes = source.as_bytes();
+        // Look for the `fn` keyword at a word boundary.
+        let is_fn = bytes[i] == b'f'
+            && bytes.get(i + 1) == Some(&b'n')
+            && (i == 0 || !is_ident_char(bytes[i - 1] as char))
+            && bytes.get(i + 2).is_none_or(|b| !is_ident_char(*b as char));
+        if is_fn {
+            let mut j = i + 2;
+            while j < source.len() && (bytes[j] as char).is_whitespace() {
+                j += 1;
+            }
+            if source[j..].starts_with(&prefix) {
+                out.push_str(&source[i..j]);
+                out.push_str(new);
+                out.push('_');
+                i = j + prefix.len();
+                continue;
+            }
+        }
+        let ch = source[i..].chars().next().expect("in bounds");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// The result of one gesture: what changed and which cursor to show.
@@ -700,6 +808,116 @@ impl Surface {
         } else {
             Selection::Nodes(names)
         };
+    }
+
+    /// Applies one undoable property edit to the form or a node.
+    ///
+    /// This is the property grid's command. The value is validated against the
+    /// catalog schema and the schema's design-mode access rule; renaming a node
+    /// (the synthetic `name` property) additionally validates the identifier
+    /// and its uniqueness. A no-op edit returns [`Change::NONE`] and records no
+    /// undo step. The returned [`Change`] tells [`crate::Designer`] how to
+    /// refresh the live preview.
+    pub fn set_property(
+        &mut self,
+        target: &Target,
+        name: &str,
+        value: Value,
+    ) -> Result<Change, PropertyError> {
+        match target {
+            Target::Form => self.set_form_property(name, value),
+            Target::Node(node) => self.set_node_property(node, name, value),
+        }
+    }
+
+    /// Applies a property edit to the window.
+    fn set_form_property(&mut self, name: &str, value: Value) -> Result<Change, PropertyError> {
+        let Some(spec) = self.catalog.window_spec().property(name) else {
+            return Err(PropertyError::UnknownProperty(name.to_owned()));
+        };
+        if !spec.access.writable_in_design() {
+            return Err(PropertyError::ReadOnly(name.to_owned()));
+        }
+        if !spec.accepts(&value) {
+            return Err(PropertyError::InvalidValue(name.to_owned()));
+        }
+        let current = self
+            .doc
+            .window
+            .prop(name)
+            .cloned()
+            .unwrap_or_else(|| spec.default.clone());
+        if current == value {
+            return Ok(Change::NONE);
+        }
+        self.doc.window.set_prop(name, value);
+        self.history.record(&self.doc);
+        Ok(if matches!(name, "width" | "height") {
+            Change::GEOMETRY
+        } else {
+            Change::PROPERTY
+        })
+    }
+
+    /// Applies a property edit to a node, including the `name` rename.
+    fn set_node_property(
+        &mut self,
+        node: &str,
+        name: &str,
+        value: Value,
+    ) -> Result<Change, PropertyError> {
+        let kind = self
+            .doc
+            .node(node)
+            .map(|node| node.kind.clone())
+            .ok_or(PropertyError::UnknownObject)?;
+
+        if name == "name" {
+            let Value::Text(new_name) = value else {
+                return Err(PropertyError::InvalidValue(name.to_owned()));
+            };
+            if new_name == node {
+                return Ok(Change::NONE);
+            }
+            if !is_valid_name(&new_name) {
+                return Err(PropertyError::InvalidName(new_name));
+            }
+            if self.doc.node(&new_name).is_some() {
+                return Err(PropertyError::DuplicateName(new_name));
+            }
+            self.doc.rename(node, &new_name);
+            self.history.record(&self.doc);
+            return Ok(Change::STRUCTURE);
+        }
+
+        let Some(spec) = self.catalog.property(&kind, name) else {
+            return Err(PropertyError::UnknownProperty(name.to_owned()));
+        };
+        if !spec.access.writable_in_design() {
+            return Err(PropertyError::ReadOnly(name.to_owned()));
+        }
+        if !spec.accepts(&value) {
+            return Err(PropertyError::InvalidValue(name.to_owned()));
+        }
+        let current = self
+            .doc
+            .node(node)
+            .and_then(|node| node.prop(name))
+            .cloned()
+            .unwrap_or_else(|| spec.default.clone());
+        if current == value {
+            return Ok(Change::NONE);
+        }
+        self.doc
+            .node_mut(node)
+            .expect("node checked above")
+            .set_prop(name, value);
+        self.history.record(&self.doc);
+        Ok(if matches!(name, "left" | "top" | "width" | "height") {
+            Change::GEOMETRY
+        } else {
+            Change::PROPERTY
+        })
     }
 
     /// Deletes the selected controls (with their descendants).
@@ -1557,5 +1775,134 @@ mod tests {
         assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
         surface.pointer_up(300, 190, false);
         assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
+    }
+
+    #[test]
+    fn setting_a_property_is_undoable_and_typed() {
+        let mut surface = sample();
+        let change = surface
+            .set_property(
+                &Target::Node("cmdOk".into()),
+                "text",
+                Value::Text("Go".into()),
+            )
+            .expect("text is editable");
+        assert_eq!(change, Change::PROPERTY);
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("text")),
+            Some(&Value::Text("Go".into()))
+        );
+        assert!(surface.undo());
+        assert_eq!(surface.doc.node("cmdOk").and_then(|n| n.prop("text")), None);
+        assert!(surface.redo());
+    }
+
+    #[test]
+    fn geometry_edits_report_geometry() {
+        let mut surface = sample();
+        let change = surface
+            .set_property(&Target::Node("cmdOk".into()), "left", Value::Int(32))
+            .expect("left is editable");
+        assert_eq!(change, Change::GEOMETRY);
+        assert_eq!(
+            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            Some(&Value::Int(32))
+        );
+    }
+
+    #[test]
+    fn form_properties_are_editable_but_unknown_ones_are_not() {
+        let mut surface = sample();
+        assert_eq!(
+            surface
+                .set_property(&Target::Form, "title", Value::Text("Hello".into()))
+                .expect("title is editable"),
+            Change::PROPERTY
+        );
+        assert_eq!(
+            surface.set_property(&Target::Form, "nope", Value::Int(1)),
+            Err(PropertyError::UnknownProperty("nope".into()))
+        );
+    }
+
+    #[test]
+    fn a_typed_mismatch_is_rejected() {
+        let mut surface = sample();
+        assert_eq!(
+            surface.set_property(&Target::Node("cmdOk".into()), "text", Value::Int(3)),
+            Err(PropertyError::InvalidValue("text".into()))
+        );
+        assert_eq!(
+            surface.set_property(
+                &Target::Node("cmdGo".into()),
+                "text",
+                Value::Text("x".into())
+            ),
+            Err(PropertyError::UnknownObject)
+        );
+    }
+
+    #[test]
+    fn renaming_validates_the_identifier_and_uniqueness() {
+        let mut surface = sample();
+        assert_eq!(
+            surface.set_property(
+                &Target::Node("cmdOk".into()),
+                "name",
+                Value::Text("1bad".into())
+            ),
+            Err(PropertyError::InvalidName("1bad".into()))
+        );
+        assert_eq!(
+            surface.set_property(
+                &Target::Node("cmdOk".into()),
+                "name",
+                Value::Text("cmdCancel".into())
+            ),
+            Err(PropertyError::DuplicateName("cmdCancel".into()))
+        );
+        let change = surface
+            .set_property(
+                &Target::Node("cmdOk".into()),
+                "name",
+                Value::Text("cmdGo".into()),
+            )
+            .expect("a fresh identifier is accepted");
+        assert_eq!(change, Change::STRUCTURE);
+        assert!(surface.doc.node("cmdGo").is_some());
+        assert!(surface.undo());
+        assert!(surface.doc.node("cmdOk").is_some());
+    }
+
+    #[test]
+    fn a_no_op_edit_records_nothing() {
+        let mut surface = sample();
+        let change = surface
+            .set_property(
+                &Target::Node("cmdOk".into()),
+                "text",
+                Value::Text(String::new()),
+            )
+            .expect("the default text");
+        assert_eq!(change, Change::NONE);
+        assert!(!surface.can_undo());
+    }
+
+    #[test]
+    fn rename_handlers_rewrites_only_the_matching_prefix() {
+        let source = "\
+fn cmdOk_Click() {
+    cmdOk_Click();
+}
+fn cmdOkExtra_Click() {}
+fn other_Load() {}
+";
+        let renamed = rename_handlers(source, "cmdOk", "cmdGo");
+        assert!(renamed.contains("fn cmdGo_Click() {"));
+        // A call is not a declaration, so it is left for the developer.
+        assert!(renamed.contains("    cmdOk_Click();"));
+        assert!(renamed.contains("fn cmdOkExtra_Click() {}"));
+        assert!(renamed.contains("fn other_Load() {}"));
+        assert_eq!(rename_handlers(source, "cmdOk", "cmdOk"), source);
     }
 }
