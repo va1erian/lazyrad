@@ -944,12 +944,12 @@ fn builtin_specs() -> Vec<WidgetSpec> {
         },
         WidgetSpec {
             properties: vec![
-                design_property(
+                property(
                     "items",
                     ValueType::List,
                     Value::List(Vec::new()),
                     CATEGORY_DATA,
-                    "The rows, one per line.",
+                    "The rows, one per line. A script may replace them at runtime.",
                 ),
                 property(
                     "selected",

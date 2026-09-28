@@ -17,9 +17,11 @@
 
 pub mod app;
 pub mod command;
+pub mod compile;
 pub mod dialog;
 pub mod explorer;
 pub mod platform;
+pub mod procedures;
 pub mod project;
 pub mod settings;
 pub mod shortcut_backend;
