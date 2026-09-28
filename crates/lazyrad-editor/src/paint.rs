@@ -8,7 +8,7 @@
 //! gap G7: xui has no caret-from-offset query, so the grid does its own).
 
 use xui_core::Color;
-use xui_core::backend::{Canvas, TextAlign, TextStyle, TextVAlign};
+use xui_core::backend::{Canvas, TextAlign, TextVAlign};
 use xui_core::geometry::{Point, Rect};
 use xui_core::theme::Theme;
 
@@ -63,7 +63,8 @@ pub(crate) fn paint(
         );
     }
 
-    paint_lines(canvas, state, &viewport, &style, first_line, last_line);
+    paint_brackets(canvas, state, theme, &viewport, first_line, last_line);
+    paint_lines(canvas, state, theme, &viewport, first_line, last_line);
     paint_squiggles(canvas, state, theme, &viewport, first_line, last_line);
     paint_gutter(canvas, state, theme, &viewport, first_line, last_line);
     paint_caret(canvas, state, theme, &viewport, first_line, last_line);
@@ -193,12 +194,17 @@ fn paint_selection(
     canvas.pop_clip();
 }
 
-/// The visible lines' text.
+/// The visible lines' text, coloured by lexical class.
+///
+/// Each token is drawn as its own run, mapped from char offsets to display
+/// columns through the raw line (tabs expand to several cells). Runs entirely
+/// off-screen are skipped; a run that starts before the first visible column is
+/// drawn from its true x and clipped.
 fn paint_lines(
     canvas: &mut dyn Canvas,
     state: &EditorState,
+    theme: &EditorTheme,
     viewport: &Viewport,
-    style: &TextStyle,
     first_line: usize,
     last_line: usize,
 ) {
@@ -206,26 +212,71 @@ fn paint_lines(
     let metrics = viewport.metrics;
     let tab = state.options.tab_width;
     let first_col = state.view.first_col;
+    let last_col = first_col + viewport.visible_cols;
     canvas.push_clip(text);
     for line in first_line..last_line {
-        let expanded = expand_tabs(&state.buffer.line_string(line), tab);
-        let visible = skip_columns(&expanded, first_col);
-        if visible.is_empty() {
-            continue;
-        }
+        let raw = state.buffer.line_string(line);
+        let expanded = expand_tabs(&raw, tab);
         let y = metrics.y_of_line(text, line, first_line);
-        let row = Rect::new(text.left, y, text.right, y + metrics.line_height);
-        canvas.draw_text(visible, row, style);
+        for token in state.highlight.tokens(line) {
+            let start = display_col(&raw, token.start, tab);
+            let end = display_col(&raw, token.end, tab);
+            if end <= first_col || start >= last_col {
+                continue;
+            }
+            let run: String = expanded.chars().skip(start).take(end - start).collect();
+            if run.is_empty() {
+                continue;
+            }
+            let x = metrics.x_of_col(text, start, first_col);
+            let width = (end - start) as i32 * metrics.advance;
+            let row = Rect::new(x, y, x + width, y + metrics.line_height);
+            let style = state.options.font.style(theme.token_color(token.class));
+            canvas.draw_text(&run, row, &style);
+        }
     }
     canvas.pop_clip();
 }
 
-/// The part of `line` from display column `first_col` on.
-fn skip_columns(line: &str, first_col: usize) -> &str {
-    match line.char_indices().nth(first_col) {
-        Some((index, _)) => &line[index..],
-        None if first_col == 0 => line,
-        None => "",
+/// A fill behind the bracket pair at the caret, if any.
+fn paint_brackets(
+    canvas: &mut dyn Canvas,
+    state: &EditorState,
+    theme: &EditorTheme,
+    viewport: &Viewport,
+    first_line: usize,
+    last_line: usize,
+) {
+    if !state.focused {
+        return;
+    }
+    let Some((open, close)) = state
+        .highlight
+        .bracket_pair(&state.buffer, state.view.caret)
+    else {
+        return;
+    };
+    for position in [open, close] {
+        let line = state.buffer.line_of_char(position);
+        if line < first_line || line >= last_line {
+            continue;
+        }
+        let start = state.buffer.line_start(line);
+        let text = state.buffer.line_string(line);
+        let col = display_col(&text, position - start, state.options.tab_width);
+        let x = viewport
+            .metrics
+            .x_of_col(viewport.text, col, state.view.first_col);
+        let y = viewport.metrics.y_of_line(viewport.text, line, first_line);
+        let cell = Rect::new(
+            x,
+            y,
+            x + viewport.metrics.advance,
+            y + viewport.metrics.line_height,
+        );
+        if let Some(cell) = intersect(cell, viewport.text) {
+            canvas.fill_rect(cell, theme.bracket_match);
+        }
     }
 }
 
@@ -421,6 +472,23 @@ mod tests {
         count
     }
 
+    /// How close the nearest painted pixel gets to `color`, in RGB distance.
+    fn nearest_distance(image: &RgbaImage, color: Color) -> f32 {
+        let mut best = f32::MAX;
+        for y in 0..image.height {
+            for x in 0..image.width {
+                let Some([r, g, b, _]) = image.pixel(x, y) else {
+                    continue;
+                };
+                let distance = (f32::from(r) - f32::from(color.r)).powi(2)
+                    + (f32::from(g) - f32::from(color.g)).powi(2)
+                    + (f32::from(b) - f32::from(color.b)).powi(2);
+                best = best.min(distance.sqrt());
+            }
+        }
+        best
+    }
+
     #[test]
     fn text_and_selection_are_painted() {
         let mut state = editor_state("hello\nworld");
@@ -450,6 +518,23 @@ mod tests {
         state.blink_on = false;
         let hidden = render(&state);
         assert_ne!(shown.pixels, hidden.pixels, "the blink hides the caret");
+    }
+
+    #[test]
+    fn syntax_classes_are_painted_in_their_theme_colours() {
+        let state = editor_state("let total = 42;");
+        let theme = EditorTheme::from_theme(Theme::light());
+        let image = render(&state);
+        let keyword = nearest_distance(&image, theme.keyword);
+        let number = nearest_distance(&image, theme.number);
+        assert!(
+            keyword < 60.0,
+            "the keyword is painted in the keyword colour (distance {keyword})"
+        );
+        assert!(
+            number < 60.0,
+            "the number is painted in the number colour (distance {number})"
+        );
     }
 
     #[test]

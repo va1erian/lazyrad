@@ -23,8 +23,8 @@ repository = "https://github.com/va1erian/lazyrad"
 [workspace.dependencies]
 # The UI toolkit, pinned to the revision LazyOS builds against (PLAN.md §1).
 # A `[patch]` for local xui fixes is kept at the bottom of this file.
-xui-core = { git = "https://github.com/va1erian/xui", rev = "ec94d605258be5bd19abe876fccd285091c05fdb" }
-xui-canvas = { git = "https://github.com/va1erian/xui", rev = "ec94d605258be5bd19abe876fccd285091c05fdb" }
+xui-core = { git = "https://github.com/va1erian/xui", rev = "d89f39257b2f058aaeb5c7ef0c3be031bf357122" }
+xui-canvas = { git = "https://github.com/va1erian/xui", rev = "d89f39257b2f058aaeb5c7ef0c3be031bf357122" }
 
 # The scripting language. `debugging` gives breakpoints and call stacks,
 # `metadata` feeds completion and signature help, and `internals` exposes the
@@ -44,6 +44,11 @@ thiserror = "2"
 # (PLAN.md §9). `dark-light` resolves the "system" theme choice.
 directories = "6"
 dark-light = "3"
+
+# File and folder dialogs. xui has no portal dialogs (PLAN.md §10, gap G4), so
+# the desktop IDE uses `rfd`; LazyOS will supply a painted dialog behind the
+# same `platform::dialogs` module.
+rfd = "0.17"
 
 xui-form = { path = "crates/xui-form" }
 lazyrad-project = { path = "crates/lazyrad-project" }

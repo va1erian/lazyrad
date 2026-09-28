@@ -6,7 +6,7 @@
 //! are [`xui_form::FormDoc`]s (see [`crate::io`] and [`crate::lazyrad_catalog`]);
 //! this crate no longer has a form model of its own.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,30 @@ impl Project {
     pub fn file_name(&self) -> String {
         format!("{}.lrp", self.name)
     }
+
+    /// The first item path that is not a plain file name in the project
+    /// folder, if any (see [`is_plain_file_name`]).
+    pub fn unsafe_item_path(&self) -> Option<&Path> {
+        self.items.iter().find_map(|item| {
+            std::iter::once(item.code())
+                .chain(item.layout())
+                .find(|path| !is_plain_file_name(path))
+        })
+    }
+}
+
+/// Whether `path` is a single plain file name, such as `frmMain.lfm`.
+///
+/// Project item paths are relative to the project folder and must stay inside
+/// it: an absolute path, a `..`, a drive prefix or a subfolder is rejected, so
+/// opening a crafted `.lrp` can never make the IDE read, write or delete a file
+/// elsewhere.
+pub fn is_plain_file_name(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 /// One form or standard module in a project.
@@ -109,17 +133,17 @@ mod tests {
     #[test]
     fn project_item_accessors_cover_both_variants() {
         let form = ProjectItem::Form {
-            name: "frmMain".to_owned(),
-            layout: PathBuf::from("frmMain.lfm"),
-            code: PathBuf::from("frmMain.rhai"),
+            name: "main_form".to_owned(),
+            layout: PathBuf::from("main_form.lfm"),
+            code: PathBuf::from("main_form.rhai"),
         };
         let module = ProjectItem::Module {
-            name: "modUtil".to_owned(),
-            code: PathBuf::from("modUtil.rhai"),
+            name: "util".to_owned(),
+            code: PathBuf::from("util.rhai"),
         };
-        assert_eq!(form.name(), "frmMain");
-        assert_eq!(form.code(), Path::new("frmMain.rhai"));
-        assert_eq!(form.layout(), Some(Path::new("frmMain.lfm")));
+        assert_eq!(form.name(), "main_form");
+        assert_eq!(form.code(), Path::new("main_form.rhai"));
+        assert_eq!(form.layout(), Some(Path::new("main_form.lfm")));
         assert!(form.is_form());
         assert_eq!(module.layout(), None);
         assert!(!module.is_form());
@@ -129,15 +153,12 @@ mod tests {
     fn startup_item_resolves() {
         let mut project = Project::new("MyApp");
         project.items.push(ProjectItem::Module {
-            name: "modUtil".to_owned(),
-            code: PathBuf::from("modUtil.rhai"),
+            name: "util".to_owned(),
+            code: PathBuf::from("util.rhai"),
         });
         assert!(project.startup_item().is_none());
-        project.startup = "modUtil".to_owned();
-        assert_eq!(
-            project.startup_item().map(ProjectItem::name),
-            Some("modUtil")
-        );
+        project.startup = "util".to_owned();
+        assert_eq!(project.startup_item().map(ProjectItem::name), Some("util"));
         assert_eq!(project.file_name(), "MyApp.lrp");
     }
 }
