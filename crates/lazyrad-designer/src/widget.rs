@@ -160,7 +160,14 @@ impl<M: 'static> Designer<M> {
         catalog: Rc<Catalog>,
         wrap: impl Fn(DesignerMsg) -> M + 'static,
     ) -> Result<Designer<M>, DesignerError> {
+        // Design mode is switched on for the build; a failed construction must
+        // put the window back as it was, or the host's controls stop working.
+        let previous_design_mode = ui.is_design_mode();
         ui.set_design_mode(true);
+        let restore = |error: DesignerError| {
+            ui.set_design_mode(previous_design_mode);
+            error
+        };
 
         let surface = Rc::new(RefCell::new(Surface::new(
             doc,
@@ -181,7 +188,7 @@ impl<M: 'static> Designer<M> {
             bounds.left + size.width(),
             bounds.top + size.height(),
         );
-        let panel = Panel::new(ui, panel_bounds)?;
+        let panel = Panel::new(ui, panel_bounds).map_err(|error| restore(error.into()))?;
 
         let designer = Designer {
             panel,
@@ -197,7 +204,7 @@ impl<M: 'static> Designer<M> {
             on_selection: RefCell::new(None),
             design_mode: Cell::new(true),
         };
-        designer.rebuild(ui)?;
+        designer.rebuild(ui).map_err(restore)?;
         Ok(designer)
     }
 
@@ -311,8 +318,9 @@ impl<M: 'static> Designer<M> {
         let previous = self.surface.borrow().clone();
         self.surface.borrow_mut().set_doc(doc);
         if let Err(error) = self.rebuild(ui) {
+            // `rebuild` leaves the old preview in place when it fails, so
+            // restoring the surface is all that is needed.
             *self.surface.borrow_mut() = previous;
-            let _ = self.rebuild(ui);
             ui.invalidate(self.id());
             return Err(error);
         }
@@ -461,33 +469,34 @@ impl<M: 'static> Designer<M> {
     /// The overlay is reinstalled even when the preview fails to build, so the
     /// designer keeps receiving input and the user can undo the edit that broke
     /// it; the build error is still returned.
+    ///
+    /// The replacement is built before anything is torn down: if the build
+    /// fails, the current preview and overlay stay exactly as they were (any
+    /// widgets the failed build created are dropped with the error), so the
+    /// designer keeps working and the edit can be undone.
     fn rebuild(&self, ui: &Ui<M>) -> Result<(), DesignerError> {
-        *self.live.borrow_mut() = None;
-        *self.overlay.borrow_mut() = None;
-        self.resize_panel(ui);
         let doc = self.surface.borrow().doc().clone();
-        let built = build_with(
+        let form = build_with(
             self.panel.ui(),
             &doc,
             &self.catalog,
             &self.factories,
             &self.binder,
             BuildOptions { design_mode: true },
-        );
-        let result = match built {
-            Ok(form) => {
-                *self.live.borrow_mut() = Some(form);
-                Ok(())
-            }
-            Err(error) => Err(DesignerError::from(error)),
-        };
-        self.install_overlay(ui)?;
-        result
+        )?;
+        // Create the new overlay before touching the current preview, so a
+        // failure leaves the old preview and overlay in place.
+        let overlay = self.create_overlay(ui)?;
+        *self.live.borrow_mut() = Some(form);
+        self.resize_panel(ui);
+        self.overlay_id.set(overlay.id());
+        *self.overlay.borrow_mut() = Some(overlay);
+        Ok(())
     }
 
     /// Creates the transparent overlay above the live widgets and wires its
-    /// painter and event mapper.
-    fn install_overlay(&self, ui: &Ui<M>) -> Result<(), BackendError> {
+    /// painter and event mapper; the caller installs it.
+    fn create_overlay(&self, ui: &Ui<M>) -> Result<Control<M>, BackendError> {
         let (width, height) = self.form_px(ui);
         let origin = self.panel_origin;
         let bounds = Rect::new(origin.x, origin.y, origin.x + width, origin.y + height);
@@ -503,10 +512,7 @@ impl<M: 'static> Designer<M> {
         let ui_for_events = ui.clone();
         overlay
             .on_events(move |event| designer_message(event, &ui_for_events).map(|msg| wrap(msg)));
-
-        self.overlay_id.set(overlay.id());
-        *self.overlay.borrow_mut() = Some(overlay);
-        Ok(())
+        Ok(overlay)
     }
 
     /// Pushes the document's geometry into the live widgets and resizes the
