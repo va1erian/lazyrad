@@ -95,16 +95,6 @@ struct Group {
     coalesce: bool,
 }
 
-/// The earliest char index any edit in `group` touches.
-fn earliest_anchor(group: &Group) -> usize {
-    group
-        .edits
-        .iter()
-        .map(|edit| edit.anchor)
-        .min()
-        .unwrap_or(0)
-}
-
 /// The char index where each line starts, plus the longest line's length.
 ///
 /// Rebuilt lazily: [`Buffer`] marks it stale after an edit and the next read
@@ -177,9 +167,9 @@ pub struct Buffer {
     redo: Vec<Group>,
     /// The group an explicit [`Buffer::begin_edit`] is accumulating into.
     pending: Option<Group>,
-    /// The earliest char index an edit has touched since the last
-    /// [`Buffer::take_dirty`], used to re-lex only the affected lines.
-    dirty: Option<usize>,
+    /// The char range, in the current text, that edits have changed since the
+    /// last [`Buffer::take_dirty`], used to re-lex only the affected lines.
+    dirty: Option<Range<usize>>,
 }
 
 impl Buffer {
@@ -198,16 +188,38 @@ impl Buffer {
         }
     }
 
-    /// Records `at` as the earliest char an edit has touched.
-    fn mark_dirty(&mut self, at: usize) {
-        self.dirty = Some(self.dirty.map_or(at, |dirty| dirty.min(at)));
+    /// Widens the dirty range for a change at `start` that replaced `removed`
+    /// chars with `inserted` chars, keeping it in current-text coordinates.
+    fn note_change(&mut self, start: usize, removed: usize, inserted: usize) {
+        if removed == 0 && inserted == 0 {
+            return;
+        }
+        let new_end = start + inserted;
+        self.dirty = Some(match self.dirty.take() {
+            None => start..new_end,
+            Some(range) => {
+                // Move the old end by this change: past it, it shifts; inside
+                // the removed text, it collapses to the new end; before the
+                // change, it stays.
+                let old_end = if range.end >= start + removed {
+                    range.end - removed + inserted
+                } else if range.end > start {
+                    new_end
+                } else {
+                    range.end
+                };
+                range.start.min(start)..old_end.max(new_end)
+            }
+        });
     }
 
-    /// Takes the earliest dirty char index since the last call, clearing it.
+    /// Takes the char range edits have changed since the last call, in the
+    /// current text, clearing it.
     ///
-    /// The editor turns it into a line and re-lexes from there, so a change at
-    /// the end of a file only touches the last line.
-    pub fn take_dirty(&mut self) -> Option<usize> {
+    /// The editor re-lexes from the range's first line and never stops before
+    /// its last one, so a change at the end of a file only touches the last
+    /// line and a multi-line replacement is always lexed in full.
+    pub fn take_dirty(&mut self) -> Option<Range<usize>> {
         self.dirty.take()
     }
 
@@ -319,9 +331,7 @@ impl Buffer {
     /// an adjacent typing run, the two share one undo group.
     pub fn insert(&mut self, at: usize, text: &str, coalesce: bool) {
         let at = at.min(self.rope.len_chars());
-        if !text.is_empty() {
-            self.mark_dirty(at);
-        }
+        self.note_change(at, 0, text.chars().count());
         let edit = Edit {
             anchor: at,
             before: String::new(),
@@ -338,7 +348,7 @@ impl Buffer {
         if start == end {
             return;
         }
-        self.mark_dirty(start);
+        self.note_change(start, end - start, 0);
         let before = self.rope.slice(start..end).to_string();
         let edit = Edit {
             anchor: start,
@@ -353,9 +363,7 @@ impl Buffer {
     pub fn replace(&mut self, range: Range<usize>, text: &str, coalesce: bool) {
         let start = range.start.min(self.rope.len_chars());
         let end = range.end.min(self.rope.len_chars()).max(start);
-        if start != end || !text.is_empty() {
-            self.mark_dirty(start);
-        }
+        self.note_change(start, end - start, text.chars().count());
         let before = self.rope.slice(start..end).to_string();
         let edit = Edit {
             anchor: start,
@@ -408,7 +416,6 @@ impl Buffer {
         for edit in group.edits.iter().rev() {
             self.apply_backward(edit);
         }
-        self.mark_dirty(earliest_anchor(&group));
         let caret = group.edits.first().map(|edit| edit.anchor);
         self.invalidate_index();
         self.redo.push(group);
@@ -421,7 +428,6 @@ impl Buffer {
         for edit in group.edits.iter() {
             self.apply_forward(edit);
         }
-        self.mark_dirty(earliest_anchor(&group));
         let caret = group
             .edits
             .last()
@@ -435,6 +441,7 @@ impl Buffer {
     fn apply_forward(&mut self, edit: &Edit) {
         let start = edit.anchor.min(self.rope.len_chars());
         let end = (start + edit.before_len()).min(self.rope.len_chars());
+        self.note_change(start, end - start, edit.after_len());
         self.rope.remove(start..end);
         self.rope.insert(start, &edit.after);
     }
@@ -443,6 +450,7 @@ impl Buffer {
     fn apply_backward(&mut self, edit: &Edit) {
         let start = edit.anchor.min(self.rope.len_chars());
         let end = (start + edit.after_len()).min(self.rope.len_chars());
+        self.note_change(start, end - start, edit.before_len());
         self.rope.remove(start..end);
         self.rope.insert(start, &edit.before);
     }
@@ -609,25 +617,33 @@ mod tests {
     }
 
     #[test]
-    fn edits_report_the_earliest_dirty_char_and_clear_it() {
+    fn edits_report_the_changed_range_and_clear_it() {
         let mut buffer = Buffer::new("one\ntwo\nthree");
         assert_eq!(buffer.take_dirty(), None);
 
+        // Two inserts: the range spans both, the later one shifted by the
+        // earlier ("one\n!two\n!three": 4..10).
         let late = buffer.line_start(2);
         let early = buffer.line_start(1);
         buffer.insert(late, "!", true);
         buffer.insert(early, "!", true);
-        assert_eq!(buffer.take_dirty(), Some(early));
+        assert_eq!(buffer.take_dirty(), Some(early..late + 2));
         assert_eq!(buffer.take_dirty(), None);
 
         buffer.remove(0..1, true);
-        assert_eq!(buffer.take_dirty(), Some(0));
+        assert_eq!(buffer.take_dirty(), Some(0..0));
+
+        // A replacement covers everything it inserted.
+        buffer.replace(0..2, "abc\ndef", false);
+        assert_eq!(buffer.take_dirty(), Some(0..7));
 
         let end = buffer.len_chars();
         buffer.insert(end, "x", true);
-        assert_eq!(buffer.take_dirty(), Some(end));
+        assert_eq!(buffer.take_dirty(), Some(end..end + 1));
         buffer.undo();
-        assert_eq!(buffer.take_dirty(), Some(end));
+        assert_eq!(buffer.take_dirty(), Some(end..end));
+        buffer.redo();
+        assert_eq!(buffer.take_dirty(), Some(end..end + 1));
     }
 
     #[test]

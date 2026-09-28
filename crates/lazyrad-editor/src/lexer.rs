@@ -654,22 +654,25 @@ impl LineLexer {
     /// Lexes the whole buffer.
     pub fn new(buffer: &Buffer) -> LineLexer {
         let mut lexer = LineLexer::default();
-        lexer.relex(buffer, 0);
+        lexer.relex(buffer, 0, 0);
         lexer
     }
 
     /// Clears the cache and lexes the whole buffer again.
     pub fn reset(&mut self, buffer: &Buffer) {
         self.lines.clear();
-        self.relex(buffer, 0);
+        self.relex(buffer, 0, 0);
     }
 
     /// Re-lexes from `from_line` until the state settles, returning the number
     /// of lines actually lexed.
     ///
-    /// `from_line` should be the line of the earliest character the edit
-    /// touched; the editor gets it from [`Buffer::take_dirty`].
-    pub fn relex(&mut self, buffer: &Buffer, from_line: usize) -> usize {
+    /// `from_line..=through_line` is the span an edit changed; the editor gets
+    /// it from [`Buffer::take_dirty`]. Every line in it is re-lexed, and the
+    /// pass only stops on a matching cache entry after it: inside a multi-line
+    /// replacement an old entry can line up with new text by chance, and
+    /// stopping there would leave the rest of the replacement stale.
+    pub fn relex(&mut self, buffer: &Buffer, from_line: usize, through_line: usize) -> usize {
         let count = buffer.line_count();
         let from = from_line.min(self.lines.len()).min(count);
         // Keep the cache aligned with the buffer's lines: an edit at `from`
@@ -702,7 +705,8 @@ impl LineLexer {
         let mut line = from;
         while line < count {
             let text = buffer.line_string(line);
-            if let Some(cached) = self.lines.get(line)
+            if line > through_line
+                && let Some(cached) = self.lines.get(line)
                 && !cached.stale
                 && cached.text == text
                 && cached.start == state
@@ -1009,28 +1013,52 @@ mod tests {
         // Edit one line in the middle: only that line needs re-lexing.
         let start = buffer.line_start(500);
         buffer.insert(start, "// ", true);
-        let from = buffer
-            .take_dirty()
-            .map(|anchor| buffer.line_of_char(anchor))
-            .unwrap_or(0);
-        assert_eq!(from, 500);
-        assert_eq!(lexer.relex(&buffer, from), 1);
+        let dirty = buffer.take_dirty().expect("the edit is dirty");
+        let from = buffer.line_of_char(dirty.start);
+        let through = buffer.line_of_char(dirty.end);
+        assert_eq!((from, through), (500, 500));
+        assert_eq!(lexer.relex(&buffer, from, through), 1);
     }
 
     /// Relexes from the buffer's dirty line and checks the cache against a
     /// fresh full lex, returning how many lines were lexed.
     fn relex_and_check(lexer: &mut LineLexer, buffer: &mut Buffer) -> usize {
-        let from = buffer
-            .take_dirty()
-            .map(|anchor| buffer.line_of_char(anchor))
-            .unwrap_or(0);
-        let relexed = lexer.relex(buffer, from);
+        let (from, through) = buffer.take_dirty().map_or((0, 0), |range| {
+            (
+                buffer.line_of_char(range.start),
+                buffer.line_of_char(range.end),
+            )
+        });
+        let relexed = lexer.relex(buffer, from, through);
         let fresh = LineLexer::new(buffer);
         assert_eq!(lexer.line_count(), fresh.line_count());
         for line in 0..fresh.line_count() {
             assert_eq!(lexer.tokens(line), fresh.tokens(line), "line {line}");
         }
         relexed
+    }
+
+    #[test]
+    fn a_multi_line_replacement_is_lexed_in_full() {
+        // The new `let` lines up with the old cached `let`, but the comment
+        // the replacement opens must still reach the line after it.
+        let mut buffer = Buffer::new("let\n1\n2\n");
+        let mut lexer = LineLexer::new(&buffer);
+        buffer.replace(0..6, "x\nlet\n/*\n", false);
+        relex_and_check(&mut lexer, &mut buffer);
+        assert_eq!(lexer.tokens(3)[0].class, TokenClass::Comment);
+    }
+
+    #[test]
+    fn undo_and_redo_mark_the_whole_change_dirty() {
+        let mut buffer = Buffer::new("let\n1\n2\n");
+        let mut lexer = LineLexer::new(&buffer);
+        buffer.replace(0..6, "x\nlet\n/*\n", false);
+        relex_and_check(&mut lexer, &mut buffer);
+        buffer.undo();
+        relex_and_check(&mut lexer, &mut buffer);
+        buffer.redo();
+        relex_and_check(&mut lexer, &mut buffer);
     }
 
     #[test]
@@ -1075,16 +1103,16 @@ mod tests {
         // Turn line 1 into an unterminated block comment: this propagates to EOF.
         let start = buffer.line_start(1);
         buffer.insert(start, "/*", true);
-        assert_eq!(lexer.relex(&buffer, 1), 4);
+        assert_eq!(lexer.relex(&buffer, 1, 1), 4);
 
         // Close it on the first line again. The lines the previous edit marked
         // as comment are repaired, then the state is back to code.
         buffer.insert(buffer.line_start(1) + 2, "*/", true);
-        assert_eq!(lexer.relex(&buffer, 1), 4);
+        assert_eq!(lexer.relex(&buffer, 1, 1), 4);
 
         // With the cache consistent, a balanced edit settles after one line.
         buffer.insert(buffer.line_start(2), " ", true);
-        assert_eq!(lexer.relex(&buffer, 2), 1);
+        assert_eq!(lexer.relex(&buffer, 2, 2), 1);
     }
 
     #[test]

@@ -157,9 +157,10 @@ impl EditorState {
     /// The [`Buffer`] records the dirty char index, so typing in a large file
     /// only re-lexes the lines the change affects (usually one).
     pub(crate) fn sync_highlight(&mut self) {
-        if let Some(anchor) = self.buffer.take_dirty() {
-            let line = self.buffer.line_of_char(anchor);
-            self.highlight.relex(&self.buffer, line);
+        if let Some(range) = self.buffer.take_dirty() {
+            let from = self.buffer.line_of_char(range.start);
+            let through = self.buffer.line_of_char(range.end);
+            self.highlight.relex(&self.buffer, from, through);
         }
     }
 
