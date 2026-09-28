@@ -322,7 +322,7 @@ impl IdeApp {
             Rect::new(8, 8, 132, 28),
             "Toolbox",
         )?);
-        for (index, name) in ["Label", "TextBox", "Button", "CheckBox", "ListBox"]
+        for (index, name) in ["Label", "Edit", "Button", "CheckBox", "ListView"]
             .iter()
             .enumerate()
         {

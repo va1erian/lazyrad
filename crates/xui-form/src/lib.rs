@@ -33,7 +33,7 @@
 //! format = 1
 //!
 //! [window]
-//! name = "frmMain"
+//! name = "main_form"
 //! title = "Hello"
 //!
 //! [[node]]

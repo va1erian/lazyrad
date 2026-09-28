@@ -4,13 +4,13 @@
 mod common;
 
 use xui_core::geometry::{Rect, Size};
-use xui_form::{BuildOptions, Catalog, FormDoc, Node, Value};
+use xui_form::{BuildOptions, Catalog, FormDoc, Node, Value, ValueType};
 
 use common::{Msg, aliased_catalog, click_node, with_form};
 
 /// A minimal form with one clickable button.
 fn click_doc() -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut button = Node::new("Button", "cmdGo");
     button.set_prop("left", Value::Int(10));
     button.set_prop("top", Value::Int(10));
@@ -45,7 +45,7 @@ fn design_mode_wires_no_events() {
 
 #[test]
 fn a_node_kind_may_use_an_alias() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut button = Node::new("CommandButton", "cmdGo");
     button.set_prop("left", Value::Int(0));
     button.set_prop("top", Value::Int(0));
@@ -60,7 +60,7 @@ fn a_node_kind_may_use_an_alias() {
 
 /// Builds a form containing one node of every built-in kind.
 fn all_kinds_doc() -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut push = |kind: &str, name: &str, props: &[(&str, Value)]| {
         let mut node = Node::new(kind, name);
         node.set_prop("width", Value::Int(120));
@@ -295,7 +295,7 @@ fn construction_only_properties_are_readable_in_design_mode() {
 
 /// A form with a filling panel and a bottom-right button inside it.
 fn anchor_doc() -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut panel = Node::new("Panel", "panMain");
     panel.set_prop("left", Value::Int(0));
     panel.set_prop("top", Value::Int(0));
@@ -331,8 +331,26 @@ fn relayout_fills_and_anchors_bottom_right() {
 }
 
 #[test]
+fn a_form_reports_a_node_kind_and_property_type() {
+    let doc = click_doc();
+    with_form(&doc, &Catalog::xui(), BuildOptions::default(), |form| {
+        assert_eq!(form.kind("cmdGo"), Some("Button"));
+        assert_eq!(form.kind("ghost"), None);
+        assert_eq!(
+            form.property_type("cmdGo", "text"),
+            Some(ValueType::Text { multiline: false })
+        );
+        assert_eq!(
+            form.property_type("cmdGo", "enabled"),
+            Some(ValueType::Bool)
+        );
+        assert_eq!(form.property_type("cmdGo", "nope"), None);
+    });
+}
+
+#[test]
 fn a_form_with_a_bad_parent_fails_to_build() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut child = Node::new("Button", "cmdGo");
     child.parent = Some("ghost".to_owned());
     doc.insert(child);
@@ -381,7 +399,7 @@ fn relayout_keeps_geometry_and_anchor_edits_made_through_set() {
 #[test]
 fn a_child_listed_before_its_container_still_builds() {
     let ordered = anchor_doc();
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     // The button (child) first, then its panel.
     doc.nodes = vec![ordered.nodes[1].clone(), ordered.nodes[0].clone()];
     let catalog = Catalog::xui();
@@ -393,7 +411,7 @@ fn a_child_listed_before_its_container_still_builds() {
 
 #[test]
 fn float_properties_accept_integers_at_runtime() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     doc.insert(Node::new("NumberField", "numOne"));
     doc.insert(Node::new("Slider", "sldOne"));
     let catalog = Catalog::xui();
@@ -408,7 +426,7 @@ fn float_properties_accept_integers_at_runtime() {
 
 #[test]
 fn a_list_view_without_selected_has_no_selection() {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut list = Node::new("ListView", "lstItems");
     list.set_prop("items", Value::List(vec!["a".to_owned(), "b".to_owned()]));
     doc.insert(list);
@@ -421,7 +439,7 @@ fn a_list_view_without_selected_has_no_selection() {
 
 /// A form with a three-option radio group pinned to the bottom-right corner.
 fn radio_doc() -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
+    let mut doc = FormDoc::new("main_form");
     let mut group = Node::new("RadioGroup", "optSize");
     group.set_prop(
         "items",

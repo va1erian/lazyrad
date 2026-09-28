@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn identifiers_are_checked() {
-        assert!(is_identifier("cmdHello"));
+        assert!(is_identifier("hello_button"));
         assert!(is_identifier("_x1"));
         assert!(!is_identifier(""));
         assert!(!is_identifier("1bad"));
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_and_unknown_kinds_are_reported() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         doc.insert(crate::doc::Node::new("Label", "lblOne"));
         doc.insert(crate::doc::Node::new("Label", "lblOne"));
         doc.insert(crate::doc::Node::new("Nope", "bad"));
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn unknown_and_mistyped_properties_are_reported() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut button = crate::doc::Node::new("Button", "cmdGo");
         button.set_prop("text", Value::Text("Go".to_owned()));
         button.set_prop("nonsense", Value::Bool(true));
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn enum_membership_and_ranges_are_reported() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut button = crate::doc::Node::new("Button", "cmdGo");
         button.set_prop("anchor", Value::Enum("sideways".to_owned()));
         button.set_prop("tab_index", Value::Int(-1));
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn a_missing_parent_and_cycles_are_reported() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut orphan = crate::doc::Node::new("Button", "cmdOrphan");
         orphan.parent = Some("ghost".to_owned());
         doc.insert(orphan);
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn parenting_checks_the_container_rule() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let panel = crate::doc::Node::new("Panel", "panA");
         doc.insert(panel);
         let mut child = crate::doc::Node::new("Button", "cmdGo");
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn duplicate_tab_index_is_a_warning() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut one = crate::doc::Node::new("Button", "cmdOne");
         one.set_prop("tab_index", Value::Int(0));
         let mut two = crate::doc::Node::new("Button", "cmdTwo");
