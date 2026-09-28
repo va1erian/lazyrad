@@ -11,7 +11,9 @@
 
 use std::cell::Cell;
 
+use xui_core::app::Ui;
 use xui_core::backend::Result as BackendResult;
+use xui_core::geometry::Rect;
 use xui_core::{HasText, Properties, WidgetId};
 
 use crate::build::{BuildCx, Factories, LiveWidget, SetError, WidgetFactory, WidgetProps};
@@ -319,6 +321,28 @@ impl<M: 'static> WidgetProps<M> for RadioGroupProps<M> {
 
     fn set_enabled_hint(&self, enabled: bool) {
         self.group.set_enabled(enabled);
+    }
+
+    fn node_ids(&self) -> Vec<WidgetId> {
+        self.group.ids()
+    }
+
+    /// One row per option, stacked from the top of `rect`. The row height is
+    /// read from the first option, as xui sizes the rows itself.
+    fn placements(&self, ui: &Ui<M>, rect: Rect) -> Vec<(WidgetId, Rect)> {
+        let ids = self.group.ids();
+        let row = ids
+            .first()
+            .map(|id| ui.bounds(*id).height())
+            .filter(|height| *height > 0)
+            .unwrap_or_else(|| rect.height() / ids.len().max(1) as i32);
+        ids.into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let top = rect.top + row * index as i32;
+                (id, Rect::new(rect.left, top, rect.right, top + row))
+            })
+            .collect()
     }
 }
 
