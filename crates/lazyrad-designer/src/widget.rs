@@ -292,8 +292,9 @@ impl<M: 'static> Designer<M> {
     /// Replaces the document and rebuilds the preview.
     ///
     /// The document is validated against the catalog first. If it has errors,
-    /// [`DesignerError::Invalid`] is returned and the current document, preview
-    /// and undo history are left exactly as they were.
+    /// [`DesignerError::Invalid`] is returned; if it validates but fails to
+    /// build, the build error is returned. Either way the current document,
+    /// preview and undo history are left exactly as they were.
     pub fn set_doc(&self, doc: FormDoc, ui: &Ui<M>) -> Result<(), DesignerError> {
         let errors: Vec<xui_form::Diagnostic> = doc
             .validate(&self.catalog)
@@ -303,8 +304,17 @@ impl<M: 'static> Designer<M> {
         if !errors.is_empty() {
             return Err(DesignerError::Invalid(errors));
         }
+        // A document can pass validation and still fail to build (a missing
+        // factory, a backend error), so keep the whole previous state and put
+        // it back, preview included, if the rebuild fails.
+        let previous = self.surface.borrow().clone();
         self.surface.borrow_mut().set_doc(doc);
-        self.rebuild(ui)?;
+        if let Err(error) = self.rebuild(ui) {
+            *self.surface.borrow_mut() = previous;
+            let _ = self.rebuild(ui);
+            ui.invalidate(self.id());
+            return Err(error);
+        }
         self.notify_selection();
         ui.invalidate(self.id());
         Ok(())

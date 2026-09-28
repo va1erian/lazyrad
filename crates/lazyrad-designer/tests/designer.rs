@@ -343,3 +343,72 @@ fn set_doc_keeps_the_current_form_when_the_new_one_is_invalid_and_resizes_the_pa
     assert_eq!(kept, "frmMain", "the current document is kept");
     assert_eq!(panel_width, 400, "the panel follows the new form size");
 }
+
+#[test]
+fn set_doc_rolls_back_when_a_valid_form_fails_to_build() {
+    // A kind the catalog knows but no factory builds: it validates, then the
+    // preview build fails with an unknown factory.
+    let mut catalog = lazyrad_project::lazyrad_catalog();
+    let mut fancy = catalog.get("Button").expect("Button spec").clone();
+    fancy.kind = "FancyButton".to_owned();
+    catalog.register(fancy);
+    let catalog = Rc::new(catalog);
+
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let results: Rc<RefCell<Option<(bool, String, bool)>>> = Rc::new(RefCell::new(None));
+    let results_for_check = Rc::clone(&results);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            button_doc(),
+            catalog,
+            Msg::Designer,
+        )
+        .expect("the designer builds");
+        // Make an undoable edit, so a reset history would show.
+        designer.update(
+            DesignerMsg::PointerDown {
+                x: 40,
+                y: 20,
+                ctrl: false,
+            },
+            ui,
+        );
+        designer.update(
+            DesignerMsg::PointerMove {
+                x: 50,
+                y: 30,
+                ctrl: false,
+            },
+            ui,
+        );
+        designer.update(
+            DesignerMsg::PointerUp {
+                x: 50,
+                y: 30,
+                ctrl: false,
+            },
+            ui,
+        );
+
+        let mut unbuildable = FormDoc::new("fancy_form");
+        unbuildable.insert(Node::new("FancyButton", "fancy1"));
+        let failed = designer.set_doc(unbuildable, ui).is_err();
+        let kept = designer.doc().window.name.clone();
+        let can_undo = designer.can_undo();
+
+        *results_for_check.borrow_mut() = Some((failed, kept, can_undo));
+        Editor {
+            designer: Rc::new(RefCell::new(designer)),
+        }
+    })
+    .expect("run_app succeeds");
+
+    let (failed, kept, can_undo) = results.borrow_mut().take().expect("the check ran");
+    assert!(failed, "the build failure is reported");
+    assert_eq!(kept, button_doc().window.name, "the current document is kept");
+    assert!(can_undo, "the undo history survives");
+}
