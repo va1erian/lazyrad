@@ -119,7 +119,7 @@ impl FormDoc {
             None => {
                 return Err(LoadError::at(
                     "missing or non-integer `format`",
-                    find_key_line(text, "format"),
+                    find_key_line(text, Section::Root, "format"),
                 ));
             }
         };
@@ -148,11 +148,11 @@ impl FormDoc {
             let raw_nodes = raw_nodes
                 .as_array()
                 .ok_or_else(|| LoadError::plain("`node` must be an array of tables"))?;
-            for raw in raw_nodes {
+            for (index, raw) in raw_nodes.iter().enumerate() {
                 let table = raw
                     .as_table()
                     .ok_or_else(|| LoadError::plain("each `node` entry must be a table"))?;
-                nodes.push(decode_node(table, catalog, text)?);
+                nodes.push(decode_node(table, catalog, text, index)?);
             }
         }
 
@@ -344,14 +344,23 @@ fn decode_window_props(
         let spec = catalog
             .window_spec()
             .property(key)
-            .ok_or_else(|| unknown_property("Window", key, None, text))?;
-        props.insert(key.clone(), decode(raw, spec.ty.clone(), key, None, text)?);
+            .ok_or_else(|| unknown_property("Window", key, None, text, Section::Window))?;
+        props.insert(
+            key.clone(),
+            decode(raw, spec.ty.clone(), key, None, text, Section::Window)?,
+        );
     }
     Ok(props)
 }
 
 /// Decodes one `[[node]]` table.
-fn decode_node(table: &toml::Table, catalog: &Catalog, text: &str) -> Result<Node, LoadError> {
+fn decode_node(
+    table: &toml::Table,
+    catalog: &Catalog,
+    text: &str,
+    index: usize,
+) -> Result<Node, LoadError> {
+    let section = Section::Node(index);
     let kind = table
         .get("kind")
         .and_then(toml::Value::as_str)
@@ -375,7 +384,7 @@ fn decode_node(table: &toml::Table, catalog: &Catalog, text: &str) -> Result<Nod
     let _spec = catalog.get(&kind).ok_or_else(|| {
         LoadError::at(
             format!("`{kind}` is not a known widget kind"),
-            find_key_line(text, "kind"),
+            find_key_line(text, section, "kind"),
         )
     })?;
 
@@ -386,10 +395,10 @@ fn decode_node(table: &toml::Table, catalog: &Catalog, text: &str) -> Result<Nod
         }
         let spec = catalog
             .property(&kind, key)
-            .ok_or_else(|| unknown_property(&kind, key, Some(&name), text))?;
+            .ok_or_else(|| unknown_property(&kind, key, Some(&name), text, section))?;
         props.insert(
             key.clone(),
-            decode(raw, spec.ty.clone(), key, Some(&name), text)?,
+            decode(raw, spec.ty.clone(), key, Some(&name), text, section)?,
         );
     }
 
@@ -409,6 +418,7 @@ fn decode(
     key: &str,
     node: Option<&str>,
     text: &str,
+    section: Section,
 ) -> Result<Value, LoadError> {
     Value::from_toml(raw, &ty).map_err(|source| {
         let subject = match node {
@@ -417,18 +427,24 @@ fn decode(
         };
         LoadError::at(
             format!("invalid {subject}: {source}"),
-            find_key_line(text, key),
+            find_key_line(text, section, key),
         )
     })
 }
 
 /// Builds an "unknown property" error.
-fn unknown_property(kind: &str, key: &str, node: Option<&str>, text: &str) -> LoadError {
+fn unknown_property(
+    kind: &str,
+    key: &str,
+    node: Option<&str>,
+    text: &str,
+    section: Section,
+) -> LoadError {
     let where_ = match node {
         Some(node) => format!("`{key}` is not a property of {kind} (node `{node}`)"),
         None => format!("`{key}` is not a property of {kind}"),
     };
-    LoadError::at(where_, find_key_line(text, key))
+    LoadError::at(where_, find_key_line(text, section, key))
 }
 
 /// Turns a `toml` parse failure into a located [`LoadError`].
@@ -451,13 +467,44 @@ fn line_for_offset(text: &str, offset: usize) -> usize {
 }
 
 /// Finds the one-based line of a top-level `key = value` entry, if present.
-fn find_key_line(text: &str, key: &str) -> Option<usize> {
-    text.lines().enumerate().find_map(|(index, line)| {
-        let trimmed = line.trim_start();
-        let mut parts = trimmed.splitn(2, '=');
-        let found = parts.next().map(str::trim)?;
-        (found == key).then_some(index + 1)
-    })
+/// The part of a form file a key is looked up in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    /// The keys before any table header (`format`).
+    Root,
+    /// The `[window]` table.
+    Window,
+    /// The `index`-th `[[node]]` table.
+    Node(usize),
+}
+
+/// The one-based line of `key` inside `section`, so an error in the third
+/// node points at that node rather than at the first `key` in the file.
+fn find_key_line(text: &str, section: Section, key: &str) -> Option<usize> {
+    let mut current = Some(Section::Root);
+    let mut nodes_seen = 0;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            current = match trimmed {
+                "[[node]]" => {
+                    nodes_seen += 1;
+                    Some(Section::Node(nodes_seen - 1))
+                }
+                "[window]" => Some(Section::Window),
+                _ => None,
+            };
+            continue;
+        }
+        if current != Some(section) {
+            continue;
+        }
+        let found = trimmed.split('=').next().map(str::trim);
+        if found == Some(key) {
+            return Some(index + 1);
+        }
+    }
+    None
 }
 
 /// Writes the window's non-default properties, in map order.

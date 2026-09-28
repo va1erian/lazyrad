@@ -380,17 +380,46 @@ impl<M: 'static> LiveForm<M> {
         dpi: u32,
         moves: &mut Vec<(WidgetId, Rect)>,
     ) {
-        for node in &self.nodes {
+        for (index, node) in self.nodes.iter().enumerate() {
             if node.parent.as_deref() != parent {
                 continue;
             }
-            let design = px_rect(node.design, dpi);
-            let placed = anchored(parent_design, parent_new, design, node.anchor);
+            let (geometry, anchor) = self.current_placement(index, node);
+            let design = px_rect(geometry, dpi);
+            let placed = anchored(parent_design, parent_new, design, anchor);
             moves.push((node.id, placed));
             if node.is_container {
                 self.anchor_children(Some(&node.name), design.size(), placed.size(), dpi, moves);
             }
         }
+    }
+
+    /// The design rectangle and anchor of the node at `index`, read from the
+    /// live widget so edits made through [`LiveForm::set`] survive a relayout.
+    /// A custom widget that does not report a common property falls back to
+    /// the value the node was built with.
+    fn current_placement(&self, index: usize, node: &NodeMeta) -> ((i64, i64, i64, i64), Anchor) {
+        let widget = &self.widgets[index];
+        let int = |prop: &str, fallback: i64| {
+            widget
+                .get(prop)
+                .and_then(|value| value.as_int())
+                .unwrap_or(fallback)
+        };
+        let (left, top, width, height) = node.design;
+        let geometry = (
+            int("left", left),
+            int("top", top),
+            int("width", width),
+            int("height", height),
+        );
+        let anchor = widget
+            .get("anchor")
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(crate::schema::anchor_from_name)
+            .unwrap_or(node.anchor);
+        (geometry, anchor)
     }
 }
 
@@ -421,7 +450,13 @@ pub fn build_with<M: 'static>(
     let mut nodes = Vec::new();
     let mut container_uis: BTreeMap<String, Ui<M>> = BTreeMap::new();
 
-    for node in &doc.nodes {
+    // A container must exist before its children, whatever order the document
+    // lists them in (`reparent` does not move nodes, and files may be hand
+    // written), so build parents first.
+    for node in build_order(&doc.nodes)
+        .into_iter()
+        .map(|index| &doc.nodes[index])
+    {
         let spec = catalog
             .get(&node.kind)
             .ok_or_else(|| BuildError::UnknownKind {
@@ -510,6 +545,37 @@ pub fn build_with<M: 'static>(
         nodes,
         design_size,
     })
+}
+
+/// The indices of `nodes` in an order where every parent comes before its
+/// children, keeping the document order among nodes that are ready together.
+///
+/// Nodes whose parent never becomes available (a missing parent or a cycle)
+/// are appended in document order, so the build reports them as
+/// [`BuildError::UnknownParent`].
+fn build_order(nodes: &[Node]) -> Vec<usize> {
+    let mut order = Vec::with_capacity(nodes.len());
+    let mut placed = std::collections::BTreeSet::new();
+    let mut pending: Vec<usize> = (0..nodes.len()).collect();
+    loop {
+        let before = pending.len();
+        pending.retain(|&index| {
+            let ready = nodes[index]
+                .parent
+                .as_deref()
+                .is_none_or(|parent| placed.contains(parent));
+            if ready {
+                order.push(index);
+                placed.insert(nodes[index].name.as_str());
+            }
+            !ready
+        });
+        if pending.is_empty() || pending.len() == before {
+            break;
+        }
+    }
+    order.extend(pending);
+    order
 }
 
 /// The design rectangle of a node, in DIPs, filling in the widget's default

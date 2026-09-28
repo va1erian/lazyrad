@@ -174,3 +174,29 @@ fn a_syntax_error_carries_its_line() {
         FormDoc::from_toml("format = 1\n\n[window\nname = ", &catalog).expect_err("syntax error");
     assert!(error.line().is_some());
 }
+
+#[test]
+fn a_load_error_points_into_the_failing_node() {
+    // The window and the first node both set `width`; the second node's
+    // `width` is mistyped, and the error must point at that line.
+    let text = "\
+format = 1
+
+[window]
+name = \"frmMain\"
+width = 400
+
+[[node]]
+kind = \"Button\"
+name = \"cmdOne\"
+width = 80
+
+[[node]]
+kind = \"Button\"
+name = \"cmdTwo\"
+width = \"wide\"
+";
+    let error = xui_form::FormDoc::from_toml(text, &xui_form::Catalog::xui())
+        .expect_err("a mistyped width is rejected");
+    assert_eq!(error.line(), Some(15));
+}

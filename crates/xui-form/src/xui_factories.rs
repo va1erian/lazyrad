@@ -484,12 +484,14 @@ impl<M: 'static> WidgetProps<M> for NumberFieldProps<M> {
     }
 
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
-        let Value::Float(number) = value else {
+        // An int is accepted wherever a float is expected (see `ValueType`).
+        let Some(number) = value.as_float() else {
             return match prop {
                 "value" | "min" | "max" => Err(SetError::TypeMismatch),
                 _ => Err(SetError::UnknownProperty),
             };
         };
+        let number = &number;
         match prop {
             "value" => {
                 self.field.set_value(*number);
@@ -568,12 +570,14 @@ impl<M: 'static> WidgetProps<M> for SliderProps<M> {
     }
 
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
-        let Value::Float(number) = value else {
+        // An int is accepted wherever a float is expected (see `ValueType`).
+        let Some(number) = value.as_float() else {
             return match prop {
                 "value" | "min" | "max" => Err(SetError::TypeMismatch),
                 _ => Err(SetError::UnknownProperty),
             };
         };
+        let number = &number;
         match prop {
             "value" => {
                 self.slider.set_value(*number);
@@ -735,7 +739,9 @@ impl<M: 'static> WidgetFactory<M> for ListViewFactory {
         let labels: Vec<&str> = items.iter().map(String::as_str).collect();
         let multi = cx.bool("multi_select", false);
         let mut list = xui_core::ListView::new(cx.ui(), cx.rect(), &labels)?.multi_select(multi);
-        let selected = cx.int("selected", 0);
+        // The schema default is -1 (no selection), and the writer drops
+        // defaults, so a missing key means "nothing selected".
+        let selected = cx.int("selected", -1);
         if selected >= 0 {
             list.select(Some(selected as usize));
         } else {

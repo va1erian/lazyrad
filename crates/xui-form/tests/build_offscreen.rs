@@ -359,3 +359,62 @@ fn a_form_with_a_bad_parent_fails_to_build() {
     };
     assert!(matches!(error, xui_form::BuildError::UnknownParent { .. }));
 }
+
+#[test]
+fn relayout_keeps_geometry_and_anchor_edits_made_through_set() {
+    let doc = anchor_doc();
+    let catalog = Catalog::xui();
+    let button = with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        // Move the button and pin it top-left instead of bottom-right.
+        form.set("cmdGo", "left", &Value::Int(10))
+            .expect("left is settable");
+        form.set("cmdGo", "top", &Value::Int(20))
+            .expect("top is settable");
+        form.set("cmdGo", "anchor", &Value::Enum("top_left".to_owned()))
+            .expect("anchor is settable");
+        form.relayout(Size::new(500, 400));
+        form.bounds("cmdGo")
+    });
+    assert_eq!(button, Some(Rect::new(10, 20, 60, 60)));
+}
+
+#[test]
+fn a_child_listed_before_its_container_still_builds() {
+    let ordered = anchor_doc();
+    let mut doc = FormDoc::new("frmMain");
+    // The button (child) first, then its panel.
+    doc.nodes = vec![ordered.nodes[1].clone(), ordered.nodes[0].clone()];
+    let catalog = Catalog::xui();
+    let bounds = with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        form.bounds("cmdGo")
+    });
+    assert_eq!(bounds, Some(Rect::new(200, 150, 250, 190)));
+}
+
+#[test]
+fn float_properties_accept_integers_at_runtime() {
+    let mut doc = FormDoc::new("frmMain");
+    doc.insert(Node::new("NumberField", "numOne"));
+    doc.insert(Node::new("Slider", "sldOne"));
+    let catalog = Catalog::xui();
+    with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        form.set("numOne", "value", &Value::Int(3))
+            .expect("an int sets a NumberField value");
+        assert_eq!(form.get("numOne", "value"), Some(Value::Float(3.0)));
+        form.set("sldOne", "value", &Value::Int(0))
+            .expect("an int sets a Slider value");
+    });
+}
+
+#[test]
+fn a_list_view_without_selected_has_no_selection() {
+    let mut doc = FormDoc::new("frmMain");
+    let mut list = Node::new("ListView", "lstItems");
+    list.set_prop("items", Value::List(vec!["a".to_owned(), "b".to_owned()]));
+    doc.insert(list);
+    let catalog = Catalog::xui();
+    let selected = with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        form.get("lstItems", "selected")
+    });
+    assert_eq!(selected, Some(Value::Int(-1)));
+}
