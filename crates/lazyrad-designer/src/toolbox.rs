@@ -5,7 +5,7 @@
 //! xui's [`Toolbar`](xui_core::widget::Toolbar) has text labels only (PLAN.md
 //! gap G9), so the toolbox is a small [`Custom`](xui_core::backend::NodeKind)
 //! grid that draws each entry with `Canvas` calls: a simple vector icon plus the
-//! control's VB alias (`CommandButton`, `TextBox`, …).
+//! control's kind name (`Button`, `Edit`, …).
 //!
 //! The widget owns the *tool selection*, not the form. It maps a click to
 //! [`ToolboxMsg::Select`] and a double-click to [`ToolboxMsg::Activate`], each
@@ -30,15 +30,15 @@ use xui_core::units::Dip;
 use xui_core::widget::Control;
 use xui_core::{Color, Theme};
 
-/// The Iteration 1 control kinds the toolbox offers, in VB's order.
+/// The Iteration 1 control kinds the toolbox offers, by xui kind name.
 pub const CONTROL_KINDS: [&str; 8] = [
-    "CommandButton",
-    "TextBox",
+    "Button",
+    "Edit",
     "Label",
     "CheckBox",
-    "OptionButton",
-    "Frame",
-    "ListBox",
+    "RadioGroup",
+    "GroupBox",
+    "ListView",
     "ComboBox",
 ];
 
@@ -83,7 +83,7 @@ impl Tool {
         }
     }
 
-    /// The label shown on the tile: the pointer's name, or the VB alias.
+    /// The label shown on the tile: the pointer's name, or the control's kind.
     pub fn label(&self) -> &str {
         match self {
             Tool::Pointer => "Pointer",
@@ -321,11 +321,11 @@ fn draw_icon(canvas: &mut dyn Canvas, tool: &Tool, rect: Rect, color: Color) {
             canvas.fill_polygon(&arrow, color);
         }
         Tool::Control(kind) => match kind.as_str() {
-            "CommandButton" => {
+            "Button" => {
                 canvas.stroke_rounded_rect(rect, 3.0, color, stroke);
                 canvas.draw_line(at(0.28, 0.75), at(0.72, 0.75), color, stroke);
             }
-            "TextBox" => {
+            "Edit" => {
                 canvas.stroke_rect(rect, color, stroke);
                 canvas.draw_line(at(0.22, 0.18), at(0.22, 0.82), color, stroke);
             }
@@ -360,7 +360,7 @@ fn draw_icon(canvas: &mut dyn Canvas, tool: &Tool, rect: Rect, color: Color) {
                     stroke,
                 );
             }
-            "OptionButton" => {
+            "RadioGroup" => {
                 let radius = (width.min(height) / 2) as f32 - 1.0;
                 let center = Point::new(rect.left + width / 3, rect.top + height / 2);
                 canvas.stroke_ellipse(center, radius, radius, color, stroke);
@@ -372,11 +372,11 @@ fn draw_icon(canvas: &mut dyn Canvas, tool: &Tool, rect: Rect, color: Color) {
                     stroke,
                 );
             }
-            "Frame" => {
+            "GroupBox" => {
                 canvas.stroke_rect(rect, color, stroke);
                 canvas.draw_line(at(0.10, 0.30), at(0.70, 0.30), color, stroke);
             }
-            "ListBox" => {
+            "ListView" => {
                 canvas.stroke_rect(rect, color, stroke);
                 for row in [0.32_f32, 0.52, 0.72] {
                     canvas.draw_line(at(0.15, row), at(0.70, row), color, stroke);
@@ -496,8 +496,8 @@ mod tests {
         let tools = tools();
         assert_eq!(tools.len(), CONTROL_KINDS.len() + 1);
         assert_eq!(tools[0], Tool::Pointer);
-        assert_eq!(tools[1].kind(), Some("CommandButton"));
-        assert_eq!(tools[1].label(), "CommandButton");
+        assert_eq!(tools[1].kind(), Some("Button"));
+        assert_eq!(tools[1].label(), "Button");
         assert_eq!(tools.last().and_then(Tool::kind), Some("ComboBox"));
     }
 

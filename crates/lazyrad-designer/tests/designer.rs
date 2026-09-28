@@ -425,8 +425,8 @@ fn a_tool_drag_on_the_designer_creates_a_control() {
             Msg::Designer,
         )
         .expect("the designer builds");
-        designer.set_tool(Some("CommandButton"), ui);
-        assert_eq!(designer.tool().as_deref(), Some("CommandButton"));
+        designer.set_tool(Some("Button"), ui);
+        assert_eq!(designer.tool().as_deref(), Some("Button"));
         designer.update(
             DesignerMsg::PointerDown {
                 x: 10,
@@ -461,9 +461,9 @@ fn a_tool_drag_on_the_designer_creates_a_control() {
     let created = created.borrow();
     let node = created
         .as_ref()
-        .and_then(|doc| doc.node("Command1"))
+        .and_then(|doc| doc.node("button1"))
         .expect("the control was created");
-    assert_eq!(node.kind, "CommandButton");
+    assert_eq!(node.kind, "Button");
     assert_eq!(node.prop("width"), Some(&Value::Int(80)));
     assert_eq!(node.prop("height"), Some(&Value::Int(40)));
 }
@@ -511,7 +511,14 @@ fn dropping_every_toolbox_kind_creates_it_and_undo_removes_it() {
     assert_eq!(
         names,
         [
-            "Command1", "Text1", "Label1", "Check1", "Option1", "Frame1", "List1", "Combo1"
+            "button1",
+            "edit1",
+            "label1",
+            "check_box1",
+            "radio_group1",
+            "group_box1",
+            "list_view1",
+            "combo_box1"
         ]
     );
     let after_undo = after_undo.borrow();
@@ -528,7 +535,7 @@ fn clicking_a_toolbox_tile_arms_the_tool() {
         |backend, window| click(backend, window, 350, 40),
         |designer| designer.tool(),
     );
-    assert_eq!(armed.as_deref(), Some("CommandButton"));
+    assert_eq!(armed.as_deref(), Some("Button"));
 }
 
 #[test]
@@ -537,8 +544,8 @@ fn double_clicking_a_toolbox_tile_drops_a_control() {
         |backend, window| double_click(backend, window, 350, 40),
         |designer| designer.doc(),
     );
-    let node = doc.node("Command1").expect("the control was dropped");
-    // The CommandButton's 100x28 default centred in a 320x200 form.
+    let node = doc.node("button1").expect("the control was dropped");
+    // The Button's 100x28 default centred in a 320x200 form.
     assert_eq!(node.prop("left"), Some(&Value::Int(110)));
     assert_eq!(node.prop("top"), Some(&Value::Int(86)));
 }
