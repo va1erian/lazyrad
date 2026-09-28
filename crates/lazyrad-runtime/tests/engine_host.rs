@@ -41,7 +41,7 @@ impl App for TestApp {
 fn greeting_doc() -> FormDoc {
     let mut doc = FormDoc::new("frmMain");
 
-    let mut name = Node::new("TextBox", "name_edit");
+    let mut name = Node::new("Edit", "name_edit");
     name.set_prop("left", Value::Int(10));
     name.set_prop("top", Value::Int(10));
     name.set_prop("width", Value::Int(160));
@@ -114,7 +114,7 @@ fn a_handler_copies_a_text_field_into_a_label() {
 }
 
 #[test]
-fn me_state_outlives_a_single_event() {
+fn form_state_outlives_a_single_event() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {
         let ast = host
@@ -156,7 +156,7 @@ fn form_title_persists_across_calls() {
 }
 
 #[test]
-fn me_hide_hides_every_control() {
+fn form_hide_hides_every_control() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {
         let ast = host
