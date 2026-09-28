@@ -1,0 +1,17 @@
+[package]
+name = "lazyrad-runtime"
+description = "LazyRAD Rhai runtime: engine setup, stdlib, form instantiation and event binding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lazyrad-project.workspace = true
+rhai.workspace = true
+xui-canvas.workspace = true
+xui-core.workspace = true

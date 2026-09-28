@@ -1,0 +1,21 @@
+[package]
+name = "lazyrad-ide"
+description = "The LazyRAD IDE shell: windows, menus, project explorer and wiring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lazyrad-ide"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lazyrad-designer.workspace = true
+lazyrad-editor.workspace = true
+lazyrad-project.workspace = true
+lazyrad-runtime.workspace = true
