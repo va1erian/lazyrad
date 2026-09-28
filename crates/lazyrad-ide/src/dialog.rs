@@ -1,0 +1,358 @@
+#![forbid(unsafe_code)]
+
+//! A small in-window choice dialog: a scrim, a card and up to three buttons.
+//!
+//! xui's own [`Dialog`](xui_core::widget::Dialog) covers messages, confirms and
+//! prompts, but the "save changes?" prompt needs three outcomes (Save, Discard,
+//! Cancel) and custom labels, which that widget does not offer. Canvas has no
+//! modal windows either (PLAN.md §10, gap G14), so this is an in-window card
+//! that covers the client area and takes the focus, exactly like xui's dialog
+//! does. It is deliberately generic: the app passes the button labels and maps
+//! the chosen index to its own message.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use xui_core::app::Ui;
+use xui_core::backend::{Event, NodeKind, NodeSpec, Result, TextStyle, WidgetId};
+use xui_core::geometry::Rect;
+use xui_core::message::Key;
+use xui_core::theme::Theme;
+use xui_core::units::Dip;
+use xui_core::widget::{Button, Control};
+
+/// Padding between the card edge and its content.
+const PADDING: Dip = Dip(16.0);
+/// Vertical gap between the card's blocks.
+const GAP: Dip = Dip(12.0);
+/// The smallest and largest card widths.
+const MIN_WIDTH: Dip = Dip(280.0);
+const MAX_WIDTH: Dip = Dip(460.0);
+/// The button size.
+const BUTTON_WIDTH: Dip = Dip(88.0);
+const BUTTON_HEIGHT: Dip = Dip(28.0);
+/// The margin kept between the card and the window edges.
+const MARGIN: Dip = Dip(24.0);
+/// The title and message text sizes.
+const TITLE_SIZE: Dip = Dip(15.0);
+const MESSAGE_SIZE: Dip = Dip(12.0);
+/// The card's corner radius, in pixels.
+const RADIUS: f32 = 8.0;
+
+/// Maps the chosen button's index to an optional app message.
+type ActionMapper<M> = RefCell<Option<Box<dyn Fn(usize) -> Option<M>>>>;
+
+/// The geometry the painter draws from.
+#[derive(Clone, Copy, Default)]
+struct Layout {
+    card: Rect,
+    title: Rect,
+    message: Rect,
+    visible: bool,
+}
+
+/// State the painter, the key listeners and the buttons share.
+struct Shared<M: 'static> {
+    ui: Ui<M>,
+    /// Every node the dialog owns, shown and hidden together.
+    nodes: RefCell<Vec<WidgetId>>,
+    title: RefCell<String>,
+    message: RefCell<String>,
+    action: ActionMapper<M>,
+    open: Cell<bool>,
+    /// The index Enter picks, and the index Escape picks.
+    accept: Cell<usize>,
+    cancel: Cell<usize>,
+}
+
+/// A modal, in-window card with up to three labelled buttons.
+pub struct ChoiceDialog<M: 'static> {
+    shared: Rc<Shared<M>>,
+    layout: Rc<Cell<Layout>>,
+    scrim: Control<M>,
+    buttons: Vec<Button<M>>,
+}
+
+impl<M: 'static> ChoiceDialog<M> {
+    /// Builds a hidden dialog with `buttons`' labels.
+    ///
+    /// `accept` is the index Enter picks and the one given the initial focus;
+    /// `cancel` is the index Escape picks. Both must be valid indices.
+    pub fn new(
+        ui: &Ui<M>,
+        title: &str,
+        message: &str,
+        labels: &[&str],
+        accept: usize,
+        cancel: usize,
+    ) -> Result<ChoiceDialog<M>> {
+        assert!(!labels.is_empty(), "a dialog needs at least one button");
+        assert!(accept < labels.len() && cancel < labels.len());
+
+        let shared = Rc::new(Shared {
+            ui: ui.clone(),
+            nodes: RefCell::new(Vec::new()),
+            title: RefCell::new(title.to_string()),
+            message: RefCell::new(message.to_string()),
+            action: RefCell::new(None),
+            open: Cell::new(false),
+            accept: Cell::new(accept),
+            cancel: Cell::new(cancel),
+        });
+        let scrim = Control::new(ui, &NodeSpec::new(NodeKind::Custom, Rect::default()))?;
+        shared.nodes.borrow_mut().push(scrim.id());
+
+        let layout = Rc::new(Cell::new(Layout::default()));
+        {
+            let shared = Rc::clone(&shared);
+            let layout = Rc::clone(&layout);
+            let theme = ui.theme_handle();
+            scrim.set_painter(Rc::new(move |canvas| {
+                let theme = theme.get();
+                let layout = layout.get();
+                canvas.clear(scrim_color(theme));
+                if !layout.visible {
+                    return;
+                }
+                canvas.fill_rounded_rect(layout.card, RADIUS, theme.raised);
+                canvas.stroke_rounded_rect(layout.card, RADIUS, theme.border, 1.0);
+                let title = shared.title.borrow();
+                canvas.draw_text(
+                    &title,
+                    layout.title,
+                    &TextStyle::new(theme.text, TITLE_SIZE).bold(),
+                );
+                let message = shared.message.borrow();
+                canvas.draw_text(
+                    &message,
+                    layout.message,
+                    &TextStyle::new(theme.text_secondary, MESSAGE_SIZE).wrapped(),
+                );
+            }));
+        }
+
+        {
+            let shared = Rc::clone(&shared);
+            let scrim_ui = ui.clone();
+            scrim.on_events(move |event| {
+                if scrim_ui.is_design_mode() && event.is_input() {
+                    return None;
+                }
+                on_key(&shared, event)
+            });
+        }
+
+        let mut buttons = Vec::new();
+        for (index, label) in labels.iter().enumerate() {
+            let shared = Rc::clone(&shared);
+            buttons.push(
+                Button::new(ui, Rect::default(), label)?.on_click(move || dismiss(&shared, index)),
+            );
+        }
+        {
+            let mut nodes = shared.nodes.borrow_mut();
+            for button in &buttons {
+                nodes.push(button.id());
+            }
+            for id in nodes.iter() {
+                ui.set_visible(*id, false);
+            }
+        }
+
+        Ok(ChoiceDialog {
+            shared,
+            layout,
+            scrim,
+            buttons,
+        })
+    }
+
+    /// Maps a chosen button's index to the app's message.
+    pub fn on_action(self, mapper: impl Fn(usize) -> Option<M> + 'static) -> ChoiceDialog<M> {
+        *self.shared.action.borrow_mut() = Some(Box::new(mapper));
+        self
+    }
+
+    /// Replaces the message text; a visible dialog rewrites its card.
+    pub fn set_message(&self, message: &str) {
+        *self.shared.message.borrow_mut() = message.to_string();
+        if self.shared.open.get() {
+            self.open();
+        }
+    }
+
+    /// Opens the dialog: centre the card, raise it and focus a button.
+    pub fn open(&self) {
+        let ui = &self.shared.ui;
+        let title = self.shared.title.borrow().clone();
+        let message = self.shared.message.borrow().clone();
+        let button_ids: Vec<WidgetId> = self.buttons.iter().map(Button::id).collect();
+        let placement = place(ui, self.scrim.id(), &button_ids, &title, &message);
+
+        ui.apply_moves(&placement.moves);
+        self.layout.set(placement.layout);
+        for id in self.shared.nodes.borrow().iter() {
+            ui.set_visible(*id, true);
+        }
+        ui.raise(self.scrim.id());
+        for button in &self.buttons {
+            ui.raise(button.id());
+        }
+        // Focus the scrim, not a button: the scrim's own listener handles
+        // Enter and Escape, and buttons keep their click handlers.
+        ui.focus(self.scrim.id());
+        self.shared.open.set(true);
+        ui.invalidate(self.scrim.id());
+    }
+
+    /// Closes the dialog without raising an action.
+    pub fn close(&self) {
+        if self.shared.open.replace(false) {
+            hide(&self.shared);
+        }
+    }
+
+    /// Whether the dialog is currently open.
+    pub fn is_open(&self) -> bool {
+        self.shared.open.get()
+    }
+
+    /// The scrim's node identity.
+    pub fn id(&self) -> WidgetId {
+        self.scrim.id()
+    }
+}
+
+/// The layout of the card and the moves that place every node.
+struct Placement {
+    layout: Layout,
+    moves: Vec<(WidgetId, Rect)>,
+}
+
+/// Centres the card in the client area and lays the buttons out right-aligned,
+/// the last one rightmost.
+fn place<M: 'static>(
+    ui: &Ui<M>,
+    scrim: WidgetId,
+    buttons: &[WidgetId],
+    title: &str,
+    message: &str,
+) -> Placement {
+    let dpi = ui.dpi();
+    let px = |value: Dip| value.to_px(dpi).value();
+    let client = ui.client_rect();
+    let theme = ui.theme();
+
+    let pad = px(PADDING);
+    let gap = px(GAP);
+    let button_w = px(BUTTON_WIDTH);
+    let button_h = px(BUTTON_HEIGHT);
+    let margin = px(MARGIN);
+    let title_metrics = ui.measure_text(title, &TextStyle::new(theme.text, TITLE_SIZE).bold(), dpi);
+    let message_metrics = ui.measure_text(message, &TextStyle::new(theme.text, MESSAGE_SIZE), dpi);
+
+    let avail = (client.width() - margin * 2).max(px(MIN_WIDTH));
+    let wanted = title_metrics.width.max(message_metrics.width) + pad * 2;
+    let card_w = wanted.clamp(px(MIN_WIDTH), px(MAX_WIDTH)).min(avail);
+    let content_w = (card_w - pad * 2).max(1);
+    let lines = if message_metrics.width > content_w {
+        (message_metrics.width + content_w - 1) / content_w
+    } else {
+        1
+    };
+    let message_h = message_metrics.height.max(1) * lines;
+    let card_h = pad * 2 + title_metrics.height + gap + message_h + gap + button_h;
+
+    let left = client.left + (client.width() - card_w).max(0) / 2;
+    let top = client.top + (client.height() - card_h).max(0) / 2;
+    let card = Rect::new(left, top, left + card_w, top + card_h);
+    let title_rect = Rect::new(
+        card.left + pad,
+        card.top + pad,
+        card.right - pad,
+        card.top + pad + title_metrics.height,
+    );
+    let message_rect = Rect::new(
+        card.left + pad,
+        title_rect.bottom + gap,
+        card.right - pad,
+        title_rect.bottom + gap + message_h,
+    );
+    let row_top = card.bottom - pad - button_h;
+
+    let mut moves = vec![(scrim, client)];
+    let count = buttons.len();
+    for (index, button) in buttons.iter().enumerate() {
+        let offset = (count - 1 - index) as i32 * (button_w + gap);
+        let right = card.right - pad - offset;
+        moves.push((
+            *button,
+            Rect::new(right - button_w, row_top, right, row_top + button_h),
+        ));
+    }
+
+    Placement {
+        layout: Layout {
+            card,
+            title: title_rect,
+            message: message_rect,
+            visible: true,
+        },
+        moves,
+    }
+}
+
+/// Handles Escape and Enter while the dialog is open.
+fn on_key<M: 'static>(shared: &Shared<M>, event: &Event) -> Option<M> {
+    if !shared.open.get() {
+        return None;
+    }
+    let Event::KeyDown {
+        key,
+        repeat,
+        system,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if *repeat > 1 || *system {
+        return None;
+    }
+    match *key {
+        Key::ESCAPE => dismiss(shared, shared.cancel.get()),
+        Key::RETURN => dismiss(shared, shared.accept.get()),
+        _ => None,
+    }
+}
+
+/// Hides the dialog and raises the chosen button's action once.
+fn dismiss<M: 'static>(shared: &Shared<M>, index: usize) -> Option<M> {
+    if !shared.open.replace(false) {
+        return None;
+    }
+    hide(shared);
+    let mapper = shared.action.borrow();
+    mapper.as_ref().and_then(|mapper| mapper(index))
+}
+
+/// Hides every node the dialog owns.
+fn hide<M: 'static>(shared: &Shared<M>) {
+    for id in shared.nodes.borrow().iter() {
+        shared.ui.set_visible(*id, false);
+    }
+    shared.ui.invalidate(
+        shared
+            .nodes
+            .borrow()
+            .first()
+            .copied()
+            .unwrap_or(WidgetId::NONE),
+    );
+}
+
+/// The scrim colour: the window background darkened. Opaque, because a painted
+/// child window does not blend with the widgets behind it on every backend.
+fn scrim_color(theme: Theme) -> xui_core::Color {
+    theme.background.lerp(xui_core::Color::rgb(0, 0, 0), 0.35)
+}

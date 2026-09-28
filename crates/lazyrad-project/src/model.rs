@@ -6,7 +6,7 @@
 //! are [`xui_form::FormDoc`]s (see [`crate::io`] and [`crate::lazyrad_catalog`]);
 //! this crate no longer has a form model of its own.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,30 @@ impl Project {
     pub fn file_name(&self) -> String {
         format!("{}.lrp", self.name)
     }
+
+    /// The first item path that is not a plain file name in the project
+    /// folder, if any (see [`is_plain_file_name`]).
+    pub fn unsafe_item_path(&self) -> Option<&Path> {
+        self.items.iter().find_map(|item| {
+            std::iter::once(item.code())
+                .chain(item.layout())
+                .find(|path| !is_plain_file_name(path))
+        })
+    }
+}
+
+/// Whether `path` is a single plain file name, such as `frmMain.lfm`.
+///
+/// Project item paths are relative to the project folder and must stay inside
+/// it: an absolute path, a `..`, a drive prefix or a subfolder is rejected, so
+/// opening a crafted `.lrp` can never make the IDE read, write or delete a file
+/// elsewhere.
+pub fn is_plain_file_name(path: &Path) -> bool {
+    let mut components = path.components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 /// One form or standard module in a project.

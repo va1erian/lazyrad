@@ -50,6 +50,11 @@ time = { version = "0.3", default-features = false, features = ["std", "local-of
 directories = "6"
 dark-light = "3"
 
+# File and folder dialogs. xui has no portal dialogs (PLAN.md §10, gap G4), so
+# the desktop IDE uses `rfd`; LazyOS will supply a painted dialog behind the
+# same `platform::dialogs` module.
+rfd = "0.17"
+
 xui-form = { path = "crates/xui-form" }
 lazyrad-project = { path = "crates/lazyrad-project" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime" }
