@@ -184,7 +184,7 @@ impl Project {
         if let Some(bad) = project.unsafe_item_path() {
             return Err(Error::Diagnostic(Diagnostic::new(
                 DiagnosticKind::ProjectFile,
-                path.clone(),
+                path,
                 format!(
                     "item path `{}` must be a plain file name in the project folder",
                     bad.display()
@@ -193,6 +193,10 @@ impl Project {
         }
         // A plain name can still be a symlink pointing elsewhere; following it
         // would read (and later write) outside the project folder.
+        let dir = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
         for item in &project.items {
             for relative in std::iter::once(item.code()).chain(item.layout()) {
                 let linked = fs::symlink_metadata(dir.join(relative))
@@ -200,7 +204,7 @@ impl Project {
                 if linked {
                     return Err(Error::Diagnostic(Diagnostic::new(
                         DiagnosticKind::ProjectFile,
-                        path.clone(),
+                        path,
                         format!(
                             "item file `{}` is a symbolic link; project files must be regular files in the project folder",
                             relative.display()
