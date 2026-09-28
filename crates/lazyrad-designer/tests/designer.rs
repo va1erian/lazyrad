@@ -300,3 +300,46 @@ fn undo_and_redo_round_trip_a_move() {
 
     assert_eq!(*observed.borrow(), vec![24, 16, 24]);
 }
+
+#[test]
+fn set_doc_keeps_the_current_form_when_the_new_one_is_invalid_and_resizes_the_panel() {
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let results: Rc<RefCell<Option<(bool, String, i32)>>> = Rc::new(RefCell::new(None));
+    let results_for_check = Rc::clone(&results);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            button_doc(),
+            catalog,
+            Msg::Designer,
+        )
+        .expect("the designer builds");
+
+        // An unknown kind is rejected, and the current form survives.
+        let mut invalid = FormDoc::new("frmBroken");
+        invalid.insert(Node::new("NoSuchKind", "ghost"));
+        let rejected = designer.set_doc(invalid, ui).is_err();
+        let kept = designer.doc().window.name.clone();
+
+        // A valid, wider form resizes the preview panel with the rebuild.
+        let mut wider = button_doc();
+        wider.window.set_prop("width", Value::Int(400));
+        designer.set_doc(wider, ui).expect("a valid form loads");
+        let panel_width = ui.bounds(designer.panel_id()).width();
+
+        *results_for_check.borrow_mut() = Some((rejected, kept, panel_width));
+        Editor {
+            designer: Rc::new(RefCell::new(designer)),
+        }
+    })
+    .expect("run_app succeeds");
+
+    let (rejected, kept, panel_width) = results.borrow_mut().take().expect("the check ran");
+    assert!(rejected, "an invalid document is refused");
+    assert_eq!(kept, "frmMain", "the current document is kept");
+    assert_eq!(panel_width, 400, "the panel follows the new form size");
+}
