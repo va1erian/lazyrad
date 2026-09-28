@@ -51,6 +51,11 @@ impl SaveReport {
 /// Writes `contents` to `path` only when the bytes differ.
 pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<SaveReport, Error> {
     let mut report = SaveReport::default();
+    // Refuse a link up front, even when its target already holds `contents`:
+    // an unchanged-looking save must not leave a link the next load rejects.
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(Error::io(path, symlink_refused()));
+    }
     if existing_bytes(path)?.as_deref() != Some(contents) {
         if let Some(parent) = path
             .parent()
@@ -334,6 +339,8 @@ mod tests {
 
         write_if_changed(&link, b"overwrite").expect_err("a link is refused");
         assert_eq!(fs::read(&outside).expect("target is readable"), b"keep");
+        // Matching contents would skip the write; the link is still refused.
+        write_if_changed(&link, b"keep").expect_err("an unchanged link is refused");
 
         let _ = fs::remove_dir_all(&dir);
     }

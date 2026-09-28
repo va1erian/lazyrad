@@ -715,6 +715,10 @@ impl IdeApp {
         let dir = session.dir().to_path_buf();
         let startup = session.startup().to_owned();
         self.session = Some(session);
+        // A prompt or context target names an item of the old project; left
+        // open, it would act on a same-named item of the new one.
+        self.prompt = None;
+        self.context_target = None;
 
         if let Err(error) = self.reset_documents() {
             self.log(ui, format!("the document area could not be reset: {error}"));
@@ -852,6 +856,7 @@ impl IdeApp {
     fn close_project(&mut self, ui: &mut Ui<Msg>) {
         self.session = None;
         self.prompt = None;
+        self.context_target = None;
         if let Err(error) = self.reset_documents() {
             self.log(ui, format!("the document area could not be reset: {error}"));
         }
