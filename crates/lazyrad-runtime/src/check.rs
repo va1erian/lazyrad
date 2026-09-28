@@ -14,11 +14,12 @@
 //! [`Project::validate`](lazyrad_project::Project::validate) and whose
 //! [`scripts`](CheckReport::scripts) are the scripts that did not parse.
 //!
-//! The check only *parses* scripts; it never runs them. A module's top-level
-//! statements run when the startup form is built, so a runtime error there is
-//! not caught here: it surfaces as a fatal runtime error (the player's exit code
-//! 2) rather than a check failure. Evaluating modules during the check would run
-//! their side effects (a `msg_box`, say) before the program starts.
+//! The check only *parses* scripts; it never runs them. The top-level
+//! statements of a module or of the startup form's script run when that form is
+//! built, so a runtime error there is not caught here: it surfaces as a fatal
+//! runtime error (the player's exit code 2) rather than a check failure.
+//! Evaluating scripts during the check would run their side effects (a
+//! `msg_box`, say) before the program starts.
 
 use std::fs;
 use std::path::Path;
