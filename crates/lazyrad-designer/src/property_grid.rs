@@ -22,6 +22,13 @@
 //! commits, and Escape reverts. A bool or enum cell opens a `CheckBox` or
 //! `ComboBox`, whose own change is the commit.
 //!
+//! The keyboard drives a *current row*, drawn like the hover highlight: Up,
+//! Down, Home, End, PageUp and PageDown move it, Tab and Shift+Tab too while no
+//! edit is open, and Return or F2 edits it. While the object dropdown is open
+//! the same keys move its highlight, Return picks it and Escape closes it. An
+//! open inline text editor keeps every key but Escape. The pure movement and
+//! dropdown layout logic is in `grid_nav`.
+//!
 //! The host owns both widgets as `Rc<RefCell<Designer<_>>>` and forwards the
 //! grid's messages from `App::update`. The grid subscribes to the designer's
 //! selection, so the object combo and the rows follow the surface; the host can
@@ -81,6 +88,7 @@ use xui_core::units::Dip;
 use xui_core::widget::{CheckBox, ComboBox, Control};
 use xui_form::{Access, Catalog, FormDoc, Value, ValueType};
 
+use crate::grid_nav::{ObjectDropdown, RowMove, move_row};
 use crate::surface::Target;
 use crate::widget::Designer;
 
@@ -152,8 +160,18 @@ pub enum PropertyGridMsg {
     CommitChoice(usize),
     /// A bool editor committed a state.
     CommitBool(bool),
-    /// The user pressed Escape: revert the active editor.
+    /// The user pressed Escape: revert the active editor, or close the open
+    /// object dropdown.
     Cancel,
+    /// The user pressed a navigation key: move the current row, or the
+    /// highlighted object while the dropdown is open.
+    MoveRow(RowMove),
+    /// The user pressed Return or F2: begin editing the current row, or pick
+    /// the highlighted object while the dropdown is open.
+    Activate,
+    /// The user scrolled the open object dropdown by this many entries
+    /// (positive shows later objects).
+    ScrollObjects(i32),
     /// The user scrolled the rows by this many pixels (positive moves the
     /// content up, showing later rows).
     Scroll(i32),
@@ -363,6 +381,7 @@ fn visual_lines(rows: &[PropertyRow], view: View) -> Vec<Line> {
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     width: i32,
+    height: i32,
     combo: Rect,
     tab_alpha: Rect,
     tab_cat: Rect,
@@ -393,6 +412,7 @@ impl Layout {
         );
         Layout {
             width,
+            height,
             combo,
             tab_alpha,
             tab_cat,
@@ -439,15 +459,21 @@ impl Layout {
     }
 
     /// The scroll offset that brings `row_index` fully into view, moving as
-    /// little as possible from `scroll`.
+    /// little as possible from `scroll`. A row that opens a category also brings
+    /// its header into view when scrolling up.
     fn scroll_to_row(&self, lines: &[Line], scroll: i32, row_index: usize) -> i32 {
         let mut top = 0;
+        let mut header_top = None;
         for line in lines {
             let height = self.line_height(line);
             if matches!(line, Line::Row(index) if *index == row_index) {
                 let body = self.body_bottom - self.body_top;
-                let scroll = if top < scroll {
-                    top
+                // The header only when header and row fit the body together.
+                let reveal = header_top
+                    .filter(|header| top + height - header <= body)
+                    .unwrap_or(top);
+                let scroll = if reveal < scroll {
+                    reveal
                 } else if top + height > scroll + body {
                     top + height - body
                 } else {
@@ -455,6 +481,7 @@ impl Layout {
                 };
                 return self.clamp_scroll(lines, scroll);
             }
+            header_top = matches!(line, Line::Header(_)).then_some(top);
             top += height;
         }
         self.clamp_scroll(lines, scroll)
@@ -501,15 +528,18 @@ impl Layout {
         None
     }
 
-    /// The dropdown rectangle while the object combo is open.
-    fn dropdown(&self, count: usize, dpi: u32) -> Rect {
-        let row = ROW_HEIGHT.to_px(dpi).value().max(1);
-        Rect::new(
-            self.combo.left,
-            self.combo.bottom,
-            self.combo.right,
-            self.combo.bottom + row * count as i32,
-        )
+    /// The rows a page key moves by: the whole rows that fit in the body, less
+    /// one so consecutive pages overlap.
+    fn page_rows(&self) -> usize {
+        let fit = (self.body_bottom - self.body_top) / self.row_h;
+        (fit - 1).max(1) as usize
+    }
+
+    /// The object dropdown while the combo is open, bounded by the grid's
+    /// height and scrolled to entry `first`. Painting and hit-testing both use
+    /// this, so they agree.
+    fn dropdown(&self, count: usize, first: usize) -> ObjectDropdown {
+        ObjectDropdown::new(self.combo, self.height, self.row_h, count, first)
     }
 }
 
@@ -523,6 +553,13 @@ struct GridState<M: 'static> {
     objects_open: bool,
     scroll: i32,
     hover: Option<usize>,
+    /// The row the keyboard is on, kept apart from the mouse hover. Only
+    /// property rows (never headers) can be current.
+    current_row: Option<usize>,
+    /// The highlighted object while the dropdown is open.
+    dropdown_highlight: usize,
+    /// The first object the open dropdown shows.
+    dropdown_first: usize,
     active_row: Option<usize>,
     error: Option<String>,
     editor: Option<Editor<M>>,
@@ -540,6 +577,9 @@ impl<M: 'static> GridState<M> {
             objects_open: false,
             scroll: 0,
             hover: None,
+            current_row: None,
+            dropdown_highlight: 0,
+            dropdown_first: 0,
             active_row: None,
             error: None,
             editor: None,
@@ -756,7 +796,9 @@ impl<M: 'static> PropertyGrid<M> {
         let grid_id = grid.id();
         designer.borrow().add_selection_sink(move |_| {
             if let (Some(state), Some(designer)) = (weak_state.upgrade(), weak_designer.upgrade()) {
-                refresh_rows(&mut state.borrow_mut(), &designer.borrow(), &catalog);
+                let stale_editor =
+                    refresh_rows(&mut state.borrow_mut(), &designer.borrow(), &catalog);
+                drop(stale_editor);
                 ui_sink.invalidate(grid_id);
             }
         });
@@ -812,11 +854,13 @@ impl<M: 'static> PropertyGrid<M> {
 
     /// Re-reads the designer's selection and document into the grid.
     pub fn sync(&self, ui: &Ui<M>) {
-        refresh_rows(
+        let stale_editor = refresh_rows(
             &mut self.state.borrow_mut(),
             &self.designer.borrow(),
             &self.catalog,
         );
+        // Dropped only now, with the state released: it can deliver events.
+        drop(stale_editor);
         self.clamp_scroll(ui);
         ui.invalidate(self.id());
     }
@@ -824,6 +868,56 @@ impl<M: 'static> PropertyGrid<M> {
     /// The rows' current scroll offset in pixels (0 is the top).
     pub fn scroll_offset(&self) -> i32 {
         self.state.borrow().scroll
+    }
+
+    /// The current row (the one the keyboard is on), as an index into
+    /// [`rows`](PropertyGrid::rows).
+    pub fn current_row(&self) -> Option<usize> {
+        self.state.borrow().current_row
+    }
+
+    /// Whether the object dropdown is open.
+    pub fn objects_open(&self) -> bool {
+        self.state.borrow().objects_open
+    }
+
+    /// The highlighted object's index while the dropdown is open.
+    pub fn dropdown_highlight(&self) -> usize {
+        self.state.borrow().dropdown_highlight
+    }
+
+    /// The index of the first object the open dropdown shows, at the grid's
+    /// current size.
+    pub fn dropdown_first(&self, ui: &Ui<M>) -> usize {
+        let layout = self.layout(ui);
+        let state = self.state.borrow();
+        layout
+            .dropdown(state.objects.len(), state.dropdown_first)
+            .first()
+    }
+
+    /// The open dropdown's rectangle in the grid's local pixels, or `None`
+    /// while it is closed. It never extends below the grid.
+    pub fn dropdown_rect(&self, ui: &Ui<M>) -> Option<Rect> {
+        let layout = self.layout(ui);
+        let state = self.state.borrow();
+        state.objects_open.then(|| {
+            layout
+                .dropdown(state.objects.len(), state.dropdown_first)
+                .rect
+        })
+    }
+
+    /// The object the open dropdown draws under the grid-local point
+    /// `(x, y)`, or `None` when it is closed or the point misses its entries.
+    /// A click uses exactly this test.
+    pub fn object_at(&self, ui: &Ui<M>, x: i32, y: i32) -> Option<Target> {
+        let layout = self.layout(ui);
+        let state = self.state.borrow();
+        if !state.objects_open {
+            return None;
+        }
+        dropdown_pick(&state, &layout, Point::new(x, y))
     }
 
     /// The grid's layout at its current bounds.
@@ -858,11 +952,37 @@ impl<M: 'static> PropertyGrid<M> {
                     }
                     state.view = view;
                 }
+                // The rows reorder; the sync keeps the current row by name and
+                // it is brought back into view.
                 self.sync(ui);
+                self.reveal_current(ui);
             }
             PropertyGridMsg::ToggleObjects => {
+                let layout = self.layout(ui);
                 let mut state = self.state.borrow_mut();
                 state.objects_open = !state.objects_open && !state.objects.is_empty();
+                if state.objects_open {
+                    // Open on the selected object, scrolled into view.
+                    let count = state.objects.len();
+                    state.dropdown_highlight = state.selected_object.min(count - 1);
+                    state.dropdown_first = layout
+                        .dropdown(count, 0)
+                        .first_showing(state.dropdown_highlight);
+                }
+                drop(state);
+                ui.invalidate(self.id());
+            }
+            PropertyGridMsg::MoveRow(mv) => self.move_row(mv, ui),
+            PropertyGridMsg::Activate => self.activate(ui),
+            PropertyGridMsg::ScrollObjects(delta) => {
+                let layout = self.layout(ui);
+                let mut state = self.state.borrow_mut();
+                if state.objects_open {
+                    let count = state.objects.len();
+                    let first = state.dropdown_first as i64 + i64::from(delta);
+                    let first = first.clamp(0, count as i64) as usize;
+                    state.dropdown_first = layout.dropdown(count, first).first();
+                }
                 drop(state);
                 ui.invalidate(self.id());
             }
@@ -921,13 +1041,95 @@ impl<M: 'static> PropertyGrid<M> {
             }
             PropertyGridMsg::CommitBool(checked) => self.apply(Value::Bool(checked), ui),
             PropertyGridMsg::Cancel => {
-                {
+                // Take the editor out first: dropping it can deliver events
+                // that reach the grid's state.
+                let editor = {
                     let mut state = self.state.borrow_mut();
-                    state.editor = None;
+                    state.objects_open = false;
                     state.error = None;
+                    state.active_row = None;
+                    state.editor.take()
+                };
+                let had_editor = editor.is_some();
+                drop(editor);
+                if had_editor {
+                    // The editor held the focus; hand it back for the keyboard.
+                    ui.focus(self.id());
                 }
                 ui.invalidate(self.id());
             }
+        }
+    }
+
+    /// Moves the current row by `mv`, or the highlighted object while the
+    /// dropdown is open, scrolling the target into view.
+    fn move_row(&self, mv: RowMove, ui: &Ui<M>) {
+        let layout = self.layout(ui);
+        let dropdown_open = self.state.borrow().objects_open;
+        if dropdown_open {
+            let mut state = self.state.borrow_mut();
+            let count = state.objects.len();
+            let view = layout.dropdown(count, state.dropdown_first);
+            if let Some(next) = move_row(
+                Some(state.dropdown_highlight),
+                count,
+                mv,
+                view.visible().max(1),
+            ) {
+                state.dropdown_highlight = next;
+                state.dropdown_first = layout.dropdown(count, view.first_showing(next)).first();
+            }
+            drop(state);
+            ui.invalidate(self.id());
+            return;
+        }
+        // An open editor sits at its row's position; close it, as scrolling does.
+        self.close_editor(ui);
+        let mut state = self.state.borrow_mut();
+        state.active_row = None;
+        let next = move_row(state.current_row, state.rows.len(), mv, layout.page_rows());
+        state.current_row = next;
+        if let Some(next) = next {
+            let lines = visual_lines(&state.rows, state.view);
+            state.scroll = layout.scroll_to_row(&lines, state.scroll, next);
+        }
+        drop(state);
+        ui.invalidate(self.id());
+    }
+
+    /// Scrolls the current row into view, if there is one.
+    fn reveal_current(&self, ui: &Ui<M>) {
+        let layout = self.layout(ui);
+        let mut state = self.state.borrow_mut();
+        if let Some(current) = state.current_row {
+            let lines = visual_lines(&state.rows, state.view);
+            state.scroll = layout.scroll_to_row(&lines, state.scroll, current);
+        }
+        drop(state);
+        ui.invalidate(self.id());
+    }
+
+    /// Begins editing the current row, or picks the highlighted object while
+    /// the dropdown is open.
+    fn activate(&self, ui: &Ui<M>) {
+        let (open, object, current) = {
+            let state = self.state.borrow();
+            (
+                state.objects_open,
+                state
+                    .objects
+                    .get(state.dropdown_highlight)
+                    .map(|(_, target)| target.clone()),
+                state.current_row,
+            )
+        };
+        if open {
+            match object {
+                Some(target) => self.update(PropertyGridMsg::SelectObject(target), ui),
+                None => self.update(PropertyGridMsg::Cancel, ui),
+            }
+        } else if let Some(index) = current {
+            self.begin_edit(index, ui);
         }
     }
 
@@ -942,10 +1144,13 @@ impl<M: 'static> PropertyGrid<M> {
             state.scroll = layout.scroll_to_row(&lines, state.scroll, index);
         }
         let (row, scroll) = {
-            let state = self.state.borrow();
+            let mut state = self.state.borrow_mut();
             let Some(row) = state.rows.get(index).cloned() else {
                 return;
             };
+            // Clicking or activating a row makes it the current one, editable
+            // or not.
+            state.current_row = Some(index);
             (row, state.scroll)
         };
         if !row.editable() {
@@ -1036,7 +1241,11 @@ impl<M: 'static> PropertyGrid<M> {
 
     /// Drops the active editor without committing.
     fn close_editor(&self, ui: &Ui<M>) {
-        if self.state.borrow_mut().editor.take().is_some() {
+        // Take the editor out first: dropping it can deliver events that reach
+        // the grid's state, which must not be borrowed then.
+        let editor = self.state.borrow_mut().editor.take();
+        if editor.is_some() {
+            drop(editor);
             ui.invalidate(self.id());
         }
     }
@@ -1059,7 +1268,11 @@ impl<M: 'static> PropertyGrid<M> {
             .designer
             .borrow()
             .set_property(&target, &name, value, ui);
-        self.state.borrow_mut().editor = None;
+        // Drop the editor outside the borrow: dropping it can deliver events.
+        let editor = self.state.borrow_mut().editor.take();
+        drop(editor);
+        // The editor held the focus; hand it back so the keyboard keeps working.
+        ui.focus(self.id());
         // Refresh first: `sync` rebuilds the rows, which clears the error, so a
         // rejected commit's message is set afterwards and stays visible.
         self.sync(ui);
@@ -1071,12 +1284,25 @@ impl<M: 'static> PropertyGrid<M> {
 }
 
 /// Recomputes the rows, object list and targets from the designer.
-fn refresh_rows<M: 'static>(state: &mut GridState<M>, designer: &Designer<M>, catalog: &Catalog) {
+/// Returns the editor the refresh displaced, for the caller to drop once the
+/// state is no longer borrowed.
+fn refresh_rows<M: 'static>(
+    state: &mut GridState<M>,
+    designer: &Designer<M>,
+    catalog: &Catalog,
+) -> Option<Editor<M>> {
     let target = target_for(&designer.selection());
-    if target != state.target {
+    // The current row survives by property name, unless the object changed.
+    let current = if target == state.target {
+        state
+            .current_row
+            .and_then(|index| state.rows.get(index))
+            .map(|row| row.name.clone())
+    } else {
         // Another object's rows start from the top.
         state.scroll = 0;
-    }
+        None
+    };
     let doc = designer.doc();
     state.rows = property_rows(catalog, &doc, &target, state.view);
     state.objects = objects_of(&doc);
@@ -1086,11 +1312,14 @@ fn refresh_rows<M: 'static>(state: &mut GridState<M>, designer: &Designer<M>, ca
         .position(|(_, object)| object == &target)
         .unwrap_or(0);
     state.target = target;
+    state.current_row = current.and_then(|name| state.rows.iter().position(|row| row.name == name));
     state.objects_open = false;
+    state.dropdown_highlight = state.selected_object;
+    state.dropdown_first = 0;
     state.hover = None;
     state.active_row = None;
     state.error = None;
-    state.editor = None;
+    state.editor.take()
 }
 
 /// The target a designer selection means.
@@ -1240,7 +1469,7 @@ fn paint_rows<M: 'static>(
                 let rect = Rect::new(0, top, layout.width, top + layout.row_h);
                 if state.active_row == Some(*index) {
                     canvas.fill_rect(rect, theme.selection);
-                } else if state.hover == Some(*index) {
+                } else if state.current_row == Some(*index) || state.hover == Some(*index) {
                     canvas.fill_rect(rect, theme.hover);
                 }
                 let name_rect = Rect::new(pad, top, layout.name_right - pad, rect.bottom);
@@ -1271,31 +1500,96 @@ fn paint_dropdown<M: 'static>(
     layout: &Layout,
     dpi: u32,
 ) {
-    let rect = layout.dropdown(state.objects.len(), dpi);
-    canvas.push_clip(Rect::new(
-        0,
-        layout.combo.bottom,
-        layout.width,
-        layout.body_bottom,
-    ));
+    let dropdown = layout.dropdown(state.objects.len(), state.dropdown_first);
+    let rect = dropdown.rect;
+    canvas.push_clip(rect);
     canvas.fill_rect(rect, theme.surface);
     canvas.stroke_rect(rect, theme.input_border, 1.0);
     let pad = PADDING.to_px(dpi).value().max(0);
-    let row = ROW_HEIGHT.to_px(dpi).value().max(1);
-    for (index, (name, _)) in state.objects.iter().enumerate() {
-        let row_rect = Rect::new(
-            rect.left,
-            rect.top + row * index as i32,
-            rect.right,
-            rect.top + row * (index + 1) as i32,
-        );
-        if index == state.selected_object {
+    for index in dropdown.range() {
+        let Some((name, _)) = state.objects.get(index) else {
+            continue;
+        };
+        let Some(row_rect) = dropdown.row_rect(index) else {
+            continue;
+        };
+        // The keyboard highlight, and the object the grid is showing.
+        if index == state.dropdown_highlight {
             canvas.fill_rect(row_rect, theme.selection);
+        } else if index == state.selected_object {
+            canvas.fill_rect(row_rect, theme.hover);
         }
         let style = TextStyle::new(theme.text, TEXT_SIZE).middle();
         canvas.draw_text(name, row_rect.shrink(pad), &style);
     }
     canvas.pop_clip();
+}
+
+/// The object the open dropdown shows under local `point`, if any. Hit-testing
+/// goes through the same clamped layout [`paint_dropdown`] draws.
+fn dropdown_pick<M: 'static>(
+    state: &GridState<M>,
+    layout: &Layout,
+    point: Point,
+) -> Option<Target> {
+    let index = layout
+        .dropdown(state.objects.len(), state.dropdown_first)
+        .index_at(point)?;
+    state.objects.get(index).map(|(_, target)| target.clone())
+}
+
+/// Which part of the grid owns the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyOwner {
+    /// The rows: navigation keys move the current row.
+    Grid,
+    /// The open object dropdown: navigation keys move its highlight.
+    Dropdown,
+    /// An inline text editor, which has its own use for the navigation keys.
+    TextEditor,
+}
+
+/// The message a key press means, or `None` to leave it unconsumed.
+///
+/// `editing` is whether any inline editor is open, `current` the current row
+/// and `rows` how many rows there are. A held key repeats the movement keys,
+/// but Return, F2 and Escape act once per press. While a text editor owns the
+/// keyboard, only Escape (which reverts the edit either way) is the grid's;
+/// Tab moves rows only when no edit is open, and lets focus move on at the ends.
+fn key_message(
+    key: Key,
+    shift: bool,
+    repeat: u16,
+    owner: KeyOwner,
+    editing: bool,
+    current: Option<usize>,
+    rows: usize,
+) -> Option<PropertyGridMsg> {
+    let once = repeat <= 1;
+    match key {
+        Key::ESCAPE if once => return Some(PropertyGridMsg::Cancel),
+        _ if owner == KeyOwner::TextEditor => return None,
+        Key::RETURN | Key::F2 if once => return Some(PropertyGridMsg::Activate),
+        _ => {}
+    }
+    let mv = match key {
+        Key::UP => RowMove::Up,
+        Key::DOWN => RowMove::Down,
+        Key::HOME => RowMove::Home,
+        Key::END => RowMove::End,
+        Key::PAGE_UP => RowMove::PageUp,
+        Key::PAGE_DOWN => RowMove::PageDown,
+        Key::TAB if owner == KeyOwner::Grid && !editing => {
+            let mv = if shift { RowMove::Up } else { RowMove::Down };
+            // At either end, let Tab move the focus out of the grid.
+            if move_row(current, rows, mv, 1) == current {
+                return None;
+            }
+            mv
+        }
+        _ => return None,
+    };
+    Some(PropertyGridMsg::MoveRow(mv))
 }
 
 /// Turns one input event into a [`PropertyGridMsg`], wrapped into the host's
@@ -1336,24 +1630,15 @@ fn grid_message<M: 'static>(
         } => {
             ui.focus(id);
             // An open dropdown takes the click first.
-            let dropdown_target = {
+            let dropdown_click = {
                 let state = shared.borrow();
-                if state.objects_open {
-                    Some((
-                        layout.dropdown(state.objects.len(), ui.dpi()),
-                        state.objects.clone(),
-                    ))
-                } else {
-                    None
-                }
+                state
+                    .objects_open
+                    .then(|| dropdown_pick(&state, &layout, Point::new(*x, *y)))
             };
-            if let Some((dropdown, objects)) = dropdown_target {
-                if dropdown.contains(Point::new(*x, *y)) {
-                    let row = ROW_HEIGHT.to_px(ui.dpi()).value().max(1);
-                    let index = ((*y - dropdown.top) / row).max(0) as usize;
-                    if let Some((_, target)) = objects.get(index).cloned() {
-                        return Some(wrap(PropertyGridMsg::SelectObject(target)));
-                    }
+            if let Some(picked) = dropdown_click {
+                if let Some(target) = picked {
+                    return Some(wrap(PropertyGridMsg::SelectObject(target)));
                 }
                 shared.borrow_mut().objects_open = false;
                 ui.invalidate(id);
@@ -1374,12 +1659,25 @@ fn grid_message<M: 'static>(
         }
         Event::MouseWheel {
             delta,
+            x,
+            y,
             horizontal: false,
             ..
         } => {
-            // The object dropdown overlays the rows; leave it be.
-            if shared.borrow().objects_open {
-                return None;
+            // The object dropdown overlays the rows: the wheel over it scrolls
+            // its list, and elsewhere does nothing while it is open.
+            let dropdown = {
+                let state = shared.borrow();
+                state
+                    .objects_open
+                    .then(|| layout.dropdown(state.objects.len(), state.dropdown_first))
+            };
+            if let Some(dropdown) = dropdown {
+                return dropdown.rect.contains(Point::new(*x, *y)).then(|| {
+                    wrap(PropertyGridMsg::ScrollObjects(
+                        -i32::from(*delta) * WHEEL_ROWS,
+                    ))
+                });
             }
             // A notch scrolls three rows; a positive delta is "away from the
             // user", which shows earlier rows.
@@ -1388,16 +1686,30 @@ fn grid_message<M: 'static>(
         }
         Event::KeyDown {
             key,
+            modifiers,
             repeat,
             system,
-            ..
-        } if *repeat <= 1 && !*system => {
-            let active = shared.borrow().active_row;
-            match *key {
-                Key::ESCAPE => Some(wrap(PropertyGridMsg::Cancel)),
-                Key::RETURN => active.map(|index| wrap(PropertyGridMsg::BeginEdit(index))),
-                _ => None,
-            }
+        } if !*system => {
+            let msg = {
+                let state = shared.borrow();
+                let owner = if state.objects_open {
+                    KeyOwner::Dropdown
+                } else if matches!(state.editor, Some(Editor::Text(_))) {
+                    KeyOwner::TextEditor
+                } else {
+                    KeyOwner::Grid
+                };
+                key_message(
+                    *key,
+                    modifiers.shift,
+                    *repeat,
+                    owner,
+                    state.editor.is_some(),
+                    state.current_row,
+                    state.rows.len(),
+                )
+            };
+            msg.map(|msg| wrap(msg))
         }
         _ => None,
     }
@@ -1571,5 +1883,123 @@ mod tests {
         );
         let row = rows.iter().find(|row| row.name == "shown").expect("row");
         assert!(!row.editable());
+    }
+
+    fn press(key: Key, owner: KeyOwner) -> Option<PropertyGridMsg> {
+        key_message(key, false, 1, owner, false, Some(1), 5)
+    }
+
+    #[test]
+    fn navigation_keys_map_to_row_moves() {
+        for (key, mv) in [
+            (Key::UP, RowMove::Up),
+            (Key::DOWN, RowMove::Down),
+            (Key::HOME, RowMove::Home),
+            (Key::END, RowMove::End),
+            (Key::PAGE_UP, RowMove::PageUp),
+            (Key::PAGE_DOWN, RowMove::PageDown),
+            (Key::TAB, RowMove::Down),
+        ] {
+            assert_eq!(
+                press(key, KeyOwner::Grid),
+                Some(PropertyGridMsg::MoveRow(mv))
+            );
+        }
+        assert_eq!(
+            key_message(Key::TAB, true, 1, KeyOwner::Grid, false, Some(1), 5),
+            Some(PropertyGridMsg::MoveRow(RowMove::Up))
+        );
+        // The open dropdown takes the same movement keys.
+        assert_eq!(
+            press(Key::DOWN, KeyOwner::Dropdown),
+            Some(PropertyGridMsg::MoveRow(RowMove::Down))
+        );
+    }
+
+    #[test]
+    fn return_and_f2_activate_once_per_press() {
+        assert_eq!(
+            press(Key::RETURN, KeyOwner::Grid),
+            Some(PropertyGridMsg::Activate)
+        );
+        assert_eq!(
+            press(Key::F2, KeyOwner::Dropdown),
+            Some(PropertyGridMsg::Activate)
+        );
+        assert_eq!(
+            key_message(Key::RETURN, false, 2, KeyOwner::Grid, false, Some(1), 5),
+            None
+        );
+        // Held movement keys repeat.
+        assert_eq!(
+            key_message(Key::DOWN, false, 5, KeyOwner::Grid, false, Some(1), 5),
+            Some(PropertyGridMsg::MoveRow(RowMove::Down))
+        );
+    }
+
+    #[test]
+    fn a_text_editor_keeps_its_keys() {
+        for key in [
+            Key::UP,
+            Key::DOWN,
+            Key::HOME,
+            Key::END,
+            Key::PAGE_UP,
+            Key::PAGE_DOWN,
+            Key::TAB,
+            Key::RETURN,
+            Key::F2,
+        ] {
+            assert_eq!(press(key, KeyOwner::TextEditor), None, "{key:?}");
+        }
+        // Escape reverts the edit whoever sees it.
+        assert_eq!(
+            press(Key::ESCAPE, KeyOwner::TextEditor),
+            Some(PropertyGridMsg::Cancel)
+        );
+    }
+
+    #[test]
+    fn tab_only_moves_rows_when_idle_and_lets_focus_leave_at_the_ends() {
+        let tab = |shift, owner, editing, current| {
+            key_message(Key::TAB, shift, 1, owner, editing, current, 5)
+        };
+        assert_eq!(tab(false, KeyOwner::Grid, true, Some(1)), None, "editing");
+        assert_eq!(tab(false, KeyOwner::Dropdown, false, Some(1)), None);
+        assert_eq!(tab(false, KeyOwner::Grid, false, Some(4)), None, "last row");
+        assert_eq!(tab(true, KeyOwner::Grid, false, Some(0)), None, "first row");
+        assert!(tab(false, KeyOwner::Grid, false, None).is_some());
+        assert_eq!(
+            key_message(Key::TAB, false, 1, KeyOwner::Grid, false, None, 0),
+            None,
+            "no rows"
+        );
+    }
+
+    #[test]
+    fn a_dropdown_click_picks_the_entry_that_is_drawn() {
+        let mut state = GridState::<()>::new();
+        state.objects = (0..10)
+            .map(|index| {
+                (
+                    format!("object_{index}"),
+                    Target::Node(format!("object_{index}")),
+                )
+            })
+            .collect();
+        state.objects_open = true;
+        let layout = Layout::new(200, 110, 96);
+        for first in [0, 3, 99] {
+            state.dropdown_first = first;
+            let dropdown = layout.dropdown(state.objects.len(), state.dropdown_first);
+            assert!(dropdown.rect.bottom <= 110);
+            for index in dropdown.range() {
+                let cell = dropdown.row_rect(index).expect("drawn");
+                let hit = dropdown_pick(&state, &layout, Point::new(cell.left + 1, cell.top + 1));
+                assert_eq!(hit, Some(state.objects[index].1.clone()));
+            }
+            let below = Point::new(dropdown.rect.left + 1, dropdown.rect.bottom + 1);
+            assert_eq!(dropdown_pick(&state, &layout, below), None);
+        }
     }
 }

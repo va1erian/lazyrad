@@ -82,6 +82,7 @@
 //! preview unwired from the host's events.
 
 pub mod geometry;
+mod grid_nav;
 pub mod history;
 pub mod property_grid;
 pub mod surface;
@@ -89,6 +90,7 @@ pub mod toolbox;
 pub mod widget;
 
 pub use geometry::{DesignRect, Handle, handle_at, resize, resize_form, snap};
+pub use grid_nav::RowMove;
 pub use history::History;
 pub use property_grid::{
     PropertyGrid, PropertyGridError, PropertyGridMsg, PropertyRow, View, property_rows,
