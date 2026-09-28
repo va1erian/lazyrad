@@ -1183,7 +1183,9 @@ dependencies = [
 name = "lazyrad-player"
 version = "0.1.0"
 dependencies = [
+ "lazyrad-project",
  "lazyrad-runtime",
+ "serde_json",
 ]
 
 [[package]]

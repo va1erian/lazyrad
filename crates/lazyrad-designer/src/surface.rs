@@ -29,6 +29,10 @@ pub const HANDLE_TOLERANCE: i64 = 4;
 /// The smallest node a resize may leave behind, in design units.
 const MIN_SIZE: i64 = 1;
 
+/// A drag shorter than this in either axis is treated as a click, so the tool
+/// drops the control at its schema default size instead of a degenerate one.
+const MIN_DRAW: i64 = 2;
+
 /// What the designer has selected: the form itself, or one or more controls.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Selection {
@@ -237,6 +241,9 @@ enum Drag {
     },
     /// Rubber-band selection from `origin` to the live pointer position.
     Marquee { origin: (i64, i64) },
+    /// Drawing a new control of `kind` from `origin` to the live pointer
+    /// position (the click-then-drag creation gesture).
+    Create { kind: String, origin: (i64, i64) },
 }
 
 /// The designer's document, selection, clipboard, history and live gesture.
@@ -251,6 +258,8 @@ pub struct Surface {
     drag: Drag,
     preview: Option<DesignRect>,
     marquee: Option<DesignRect>,
+    /// The active creation tool: a catalog kind, or `None` for the pointer.
+    tool: Option<String>,
 }
 
 impl Surface {
@@ -267,6 +276,7 @@ impl Surface {
             drag: Drag::None,
             preview: None,
             marquee: None,
+            tool: None,
         }
     }
 
@@ -298,6 +308,19 @@ impl Surface {
     /// Sets the grid spacing; a value below one is clamped to one.
     pub fn set_grid(&mut self, grid: i64) {
         self.grid = grid.max(1);
+    }
+
+    /// The active creation tool, or `None` for the pointer.
+    pub fn tool(&self) -> Option<&str> {
+        self.tool.as_deref()
+    }
+
+    /// Sets the active creation tool (`None` is the pointer). An unknown kind
+    /// is rejected, so a stale toolbox entry cannot arm a broken tool.
+    pub fn set_tool(&mut self, tool: Option<&str>) {
+        self.tool = tool
+            .filter(|kind| self.catalog.contains(kind))
+            .map(str::to_owned);
     }
 
     /// Whether an undo step is available.
@@ -434,6 +457,9 @@ impl Surface {
 
     /// The cursor to show at `(x, y)`.
     pub fn cursor_at(&self, x: i64, y: i64) -> CursorHint {
+        if self.tool.is_some() {
+            return CursorHint::Default;
+        }
         match self.handle_at(x, y) {
             Some(Handle::West | Handle::East) => CursorHint::SizeHorizontal,
             Some(Handle::North | Handle::South) => CursorHint::SizeVertical,
@@ -443,6 +469,16 @@ impl Surface {
 
     /// Handles a left-button press at `(x, y)`.
     pub fn pointer_down(&mut self, x: i64, y: i64, ctrl: bool) -> Outcome {
+        // An armed tool draws a new control; selection and handles are ignored
+        // until the tool is set back to the pointer.
+        if let Some(kind) = self.tool.clone() {
+            self.drag = Drag::Create {
+                kind,
+                origin: (x, y),
+            };
+            self.preview = Some(DesignRect::new(x, y, x, y));
+            return Outcome::none();
+        }
         let cursor = self.cursor_at(x, y);
         if let Some(handle) = self.handle_at(x, y) {
             self.drag = match &self.selection {
@@ -538,6 +574,10 @@ impl Surface {
                 self.marquee = Some(DesignRect::from_points(origin, (x, y)));
                 (Drag::Marquee { origin }, Change::NONE)
             }
+            Drag::Create { kind, origin } => {
+                self.preview = Some(DesignRect::from_points(origin, (x, y)));
+                (Drag::Create { kind, origin }, Change::NONE)
+            }
         };
         self.drag = drag;
         Outcome::changed(change).cursor(cursor)
@@ -560,6 +600,14 @@ impl Surface {
                 let hits = self.nodes_in(rect);
                 self.selection = Selection::Nodes(hits);
                 Outcome::changed(Change::SELECTION).cursor(cursor)
+            }
+            Drag::Create { kind, origin } => {
+                self.preview = None;
+                if self.finish_create(&kind, origin, (x, y)).is_some() {
+                    Outcome::changed(Change::STRUCTURE).cursor(cursor)
+                } else {
+                    Outcome::none().cursor(cursor)
+                }
             }
         }
     }
@@ -667,6 +715,154 @@ impl Surface {
         self.selection = Selection::Form;
         self.history.record(&self.doc);
         Outcome::changed(Change::STRUCTURE)
+    }
+
+    /// Creates a control of `kind` filling `rect` (in form coordinates),
+    /// parented to `parent` when that container accepts the child.
+    ///
+    /// The node gets the catalog's schema defaults, a unique snake_case name
+    /// (`button1`, `edit1`, …) and the next free tab index among its siblings.
+    /// It is inserted into the model and recorded as one undo step, and it
+    /// becomes the selection. Returns the new node's name, or `None` when the
+    /// kind is unknown or `parent` was rejected.
+    pub fn create_control(
+        &mut self,
+        kind: &str,
+        rect: DesignRect,
+        parent: Option<String>,
+    ) -> Option<String> {
+        self.catalog.get(kind)?;
+        let parent = parent.filter(|name| {
+            self.doc
+                .node(name)
+                .is_some_and(|node| self.catalog.accepts_child(&node.kind, kind))
+        });
+
+        let (left, top) = match &parent {
+            Some(parent) => {
+                let origin = self.node_rect(parent)?;
+                (rect.left - origin.left, rect.top - origin.top)
+            }
+            None => (rect.left, rect.top),
+        };
+
+        let name = self.auto_name(&control_base_name(kind));
+        let mut node = Node::new(kind, name.clone());
+        node.parent = parent.clone();
+        for (property, value) in self.schema_defaults(kind) {
+            node.set_prop(property, value);
+        }
+        node.set_prop("left", Value::Int(left));
+        node.set_prop("top", Value::Int(top));
+        node.set_prop("width", Value::Int(rect.width().max(MIN_SIZE)));
+        node.set_prop("height", Value::Int(rect.height().max(MIN_SIZE)));
+        node.set_prop(
+            "tab_index",
+            Value::Int(self.next_tab_index(parent.as_deref())),
+        );
+
+        self.doc.insert(node);
+        self.selection = Selection::Nodes(vec![name.clone()]);
+        self.history.record(&self.doc);
+        Some(name)
+    }
+
+    /// Drops a control of `kind` at its catalog default size in the centre of
+    /// the form (the toolbox's double-click action). Returns the new name.
+    pub fn drop_control(&mut self, kind: &str) -> Option<String> {
+        let (width, height) = self.default_size(kind);
+        let form = self.form_rect();
+        let left = ((form.width() - width) / 2).max(0);
+        let top = ((form.height() - height) / 2).max(0);
+        self.create_control(kind, DesignRect::from_size(left, top, width, height), None)
+    }
+
+    /// The topmost container whose rectangle contains `(x, y)`, so a control
+    /// dropped on a `Frame` becomes its child.
+    pub fn container_at(&self, x: i64, y: i64) -> Option<String> {
+        self.doc
+            .nodes
+            .iter()
+            .rev()
+            .find(|node| {
+                self.catalog.is_container(&node.kind)
+                    && self
+                        .node_rect(&node.name)
+                        .is_some_and(|rect| rect.contains(x, y))
+            })
+            .map(|node| node.name.clone())
+    }
+
+    /// The catalog default size `(width, height)` of `kind`, or `(0, 0)`.
+    fn default_size(&self, kind: &str) -> (i64, i64) {
+        match self.catalog.get(kind) {
+            Some(spec) => (
+                spec.default_size.0.value().round() as i64,
+                spec.default_size.1.value().round() as i64,
+            ),
+            None => (0, 0),
+        }
+    }
+
+    /// Finishes a click-then-drag creation: snaps the drag to the grid, falls
+    /// back to the default size for a click, finds the target container and
+    /// creates the control.
+    fn finish_create(&mut self, kind: &str, origin: (i64, i64), end: (i64, i64)) -> Option<String> {
+        // Normalised, so a drag up or to the left creates what the preview
+        // showed instead of falling back to the default size.
+        let dragged = DesignRect::from_points(
+            (snap(origin.0, self.grid), snap(origin.1, self.grid)),
+            (snap(end.0, self.grid), snap(end.1, self.grid)),
+        );
+        let rect = if dragged.width() < MIN_DRAW || dragged.height() < MIN_DRAW {
+            let (width, height) = self.default_size(kind);
+            DesignRect::from_size(dragged.left, dragged.top, width, height)
+        } else {
+            dragged
+        };
+        let parent = self.container_at(rect.left, rect.top);
+        self.create_control(kind, rect, parent)
+    }
+
+    /// The schema defaults for `kind`: the common properties, then its own.
+    fn schema_defaults(&self, kind: &str) -> Vec<(String, Value)> {
+        let mut defaults = Vec::new();
+        for property in self.catalog.common_properties() {
+            if let Some(spec) = self.catalog.property(kind, &property.name) {
+                defaults.push((property.name.clone(), spec.default));
+            }
+        }
+        if let Some(spec) = self.catalog.get(kind) {
+            for property in &spec.properties {
+                defaults.push((property.name.clone(), property.default.clone()));
+            }
+        }
+        defaults
+    }
+
+    /// The next tab index among the children of `parent`: one past the highest
+    /// in use, so a new control joins the end of the tab order.
+    fn next_tab_index(&self, parent: Option<&str>) -> i64 {
+        self.doc
+            .nodes
+            .iter()
+            .filter(|node| node.parent.as_deref() == parent)
+            .map(|node| int_prop(node, "tab_index", 0))
+            .max()
+            .map_or(0, |max| max + 1)
+    }
+
+    /// A fresh unique name derived from `base`, starting at one and skipping
+    /// names already in use.
+    fn auto_name(&self, base: &str) -> String {
+        let mut index = 1;
+        loop {
+            let candidate = format!("{base}{index}");
+            if self.doc.node(&candidate).is_none() {
+                return candidate;
+            }
+            index += 1;
+        }
     }
 
     /// Copies the selected controls (with their descendants) to the in-process
@@ -909,6 +1105,24 @@ impl Surface {
 /// Reads an int property, or `default` when absent or the wrong type.
 fn int_prop(node: &Node, name: &str, default: i64) -> i64 {
     node.prop(name).and_then(Value::as_int).unwrap_or(default)
+}
+
+/// The base name a control kind is auto-named from: the kind in snake_case
+/// (PLAN.md §1.1), so the first ones become `button1`, `edit1`, `check_box1`
+/// and so on.
+pub fn control_base_name(kind: &str) -> String {
+    let mut out = String::with_capacity(kind.len() + 4);
+    for (index, character) in kind.chars().enumerate() {
+        if character.is_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.extend(character.to_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1188,6 +1402,165 @@ mod tests {
         // Only non-default values are written, so the canonical text is what
         // must round-trip byte-for-byte, not the in-memory defaults.
         assert_eq!(round_tripped.to_toml(&catalog), text);
+    }
+
+    /// An empty form surface for the creation tests.
+    fn empty() -> Surface {
+        Surface::new(
+            FormDoc::new("frmMain"),
+            Rc::new(lazyrad_project::lazyrad_catalog()),
+            DEFAULT_GRID,
+        )
+    }
+
+    #[test]
+    fn an_unknown_tool_is_rejected() {
+        let mut surface = empty();
+        surface.set_tool(Some("Button"));
+        assert_eq!(surface.tool(), Some("Button"));
+        surface.set_tool(Some("Nope"));
+        assert_eq!(surface.tool(), None);
+        surface.set_tool(None);
+        assert_eq!(surface.tool(), None);
+    }
+
+    #[test]
+    fn a_tool_drag_creates_a_control_at_the_dragged_size() {
+        let mut surface = empty();
+        surface.set_tool(Some("Button"));
+        surface.pointer_down(10, 10, false);
+        surface.pointer_move(90, 50, false);
+        let outcome = surface.pointer_up(90, 50, false);
+        assert!(outcome.change.structure);
+        let node = surface.doc.node("button1").expect("created");
+        assert_eq!(node.kind, "Button");
+        assert_eq!(node.prop("left"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("width"), Some(&Value::Int(80)));
+        assert_eq!(node.prop("height"), Some(&Value::Int(40)));
+        assert!(surface.selection().contains("button1"));
+    }
+
+    #[test]
+    fn a_reverse_tool_drag_creates_the_same_control() {
+        let mut surface = empty();
+        surface.set_tool(Some("Button"));
+        surface.pointer_down(90, 50, false);
+        surface.pointer_move(10, 10, false);
+        surface.pointer_up(10, 10, false);
+        let node = surface.doc.node("button1").expect("created");
+        assert_eq!(node.prop("left"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("width"), Some(&Value::Int(80)));
+        assert_eq!(node.prop("height"), Some(&Value::Int(40)));
+    }
+
+    #[test]
+    fn a_tool_click_uses_the_schema_default_size() {
+        let mut surface = empty();
+        surface.set_tool(Some("Button"));
+        surface.pointer_down(40, 40, false);
+        surface.pointer_up(40, 40, false);
+        let node = surface.doc.node("button1").expect("created");
+        assert_eq!(node.prop("width"), Some(&Value::Int(100)));
+        assert_eq!(node.prop("height"), Some(&Value::Int(28)));
+        assert_eq!(node.prop("left"), Some(&Value::Int(40)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(40)));
+    }
+
+    #[test]
+    fn creation_names_follow_vb_and_skip_taken_names() {
+        let mut surface = empty();
+        assert_eq!(
+            surface.create_control("Button", DesignRect::default(), None),
+            Some("button1".into())
+        );
+        assert_eq!(
+            surface.create_control("Button", DesignRect::default(), None),
+            Some("button2".into())
+        );
+        surface.select_node("button2");
+        surface.key(KeyPress::new(KeyInput::Escape));
+        assert_eq!(
+            surface.create_control("Button", DesignRect::default(), None),
+            Some("button3".into())
+        );
+        assert_eq!(
+            surface.create_control("Label", DesignRect::default(), None),
+            Some("label1".into())
+        );
+        assert_eq!(
+            surface.create_control("Edit", DesignRect::default(), None),
+            Some("edit1".into())
+        );
+    }
+
+    #[test]
+    fn a_new_control_gets_schema_defaults_and_the_next_tab_index() {
+        let mut surface = empty();
+        surface.create_control("Button", DesignRect::new(0, 0, 100, 28), None);
+        surface.create_control("Label", DesignRect::new(0, 40, 120, 20), None);
+        let button = surface.doc.node("button1").expect("button");
+        assert_eq!(button.prop("text"), Some(&Value::Text(String::new())));
+        assert_eq!(button.prop("enabled"), Some(&Value::Bool(true)));
+        assert_eq!(button.prop("tab_index"), Some(&Value::Int(0)));
+        let label = surface.doc.node("label1").expect("label");
+        assert_eq!(label.prop("tab_index"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn a_control_dropped_on_a_frame_becomes_its_child() {
+        let mut doc = FormDoc::new("frmMain");
+        let mut frame = Node::new("GroupBox", "group_box1");
+        frame.set_prop("left", Value::Int(40));
+        frame.set_prop("top", Value::Int(40));
+        frame.set_prop("width", Value::Int(200));
+        frame.set_prop("height", Value::Int(120));
+        doc.insert(frame);
+        let mut surface = Surface::new(
+            doc,
+            Rc::new(lazyrad_project::lazyrad_catalog()),
+            DEFAULT_GRID,
+        );
+
+        surface.set_tool(Some("Label"));
+        surface.pointer_down(48, 48, false);
+        surface.pointer_move(96, 80, false);
+        surface.pointer_up(96, 80, false);
+
+        let node = surface.doc.node("label1").expect("created");
+        assert_eq!(node.parent.as_deref(), Some("group_box1"));
+        assert_eq!(node.prop("left"), Some(&Value::Int(8)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(8)));
+        assert_eq!(
+            surface.node_rect("label1"),
+            Some(DesignRect::new(48, 48, 96, 80))
+        );
+    }
+
+    #[test]
+    fn creating_a_control_is_undoable() {
+        let mut surface = empty();
+        surface.set_tool(Some("CheckBox"));
+        surface.pointer_down(8, 8, false);
+        surface.pointer_up(8, 8, false);
+        assert!(surface.doc.node("check_box1").is_some());
+        assert!(surface.undo());
+        assert!(surface.doc.node("check_box1").is_none());
+        assert!(surface.redo());
+        assert!(surface.doc.node("check_box1").is_some());
+    }
+
+    #[test]
+    fn drop_control_centres_a_default_sized_control() {
+        let mut surface = empty();
+        assert_eq!(surface.drop_control("Button"), Some("button1".into()));
+        let node = surface.doc.node("button1").expect("created");
+        assert_eq!(node.parent, None);
+        assert_eq!(node.prop("left"), Some(&Value::Int(110)));
+        assert_eq!(node.prop("top"), Some(&Value::Int(86)));
+        assert_eq!(node.prop("width"), Some(&Value::Int(100)));
+        assert_eq!(node.prop("height"), Some(&Value::Int(28)));
     }
 
     #[test]
