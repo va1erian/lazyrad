@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use lazyrad_editor::Editor;
 use xui_core::app::{App, Ui};
-use xui_core::backend::{Backend, Event, PlatformSpec, Result as UiResult, WidgetId};
+use xui_core::backend::{Backend, BackendError, Event, PlatformSpec, Result as UiResult, WidgetId};
 use xui_core::geometry::Point;
 use xui_core::layout::Dock;
 use xui_core::units::Px;
@@ -913,20 +913,21 @@ impl IdeApp {
             SaveChoice::Cancel => {}
             SaveChoice::Discard => self.continue_pending(pending, ui),
             SaveChoice::Save => {
-                let saved = {
-                    self.sync_documents();
-                    self.session
-                        .as_mut()
-                        .is_some_and(|session| session.save().is_ok())
-                };
-                if saved {
-                    for document in &mut self.documents {
-                        document.dirty = false;
+                self.sync_documents();
+                match self.session.as_mut().map(ProjectSession::save) {
+                    Some(Ok(_)) => {
+                        for document in &mut self.documents {
+                            document.dirty = false;
+                        }
+                        self.update_title(ui);
+                        self.continue_pending(pending, ui);
                     }
-                    self.update_title(ui);
-                    self.continue_pending(pending, ui);
-                } else {
-                    self.log(ui, "The project could not be saved; it is still open.");
+                    Some(Err(error)) => self.log(
+                        ui,
+                        format!("The project could not be saved ({error}); it is still open."),
+                    ),
+                    // Nothing to save: carry on with what the prompt guarded.
+                    None => self.continue_pending(pending, ui),
                 }
             }
         }
@@ -1130,14 +1131,19 @@ impl IdeApp {
             return Ok(());
         }
 
-        let scoped = self
-            .docs
-            .as_ref()
-            .expect("the document tabs exist")
-            .ui()
-            .clone();
+        // The tabs can be missing if rebuilding them failed earlier; report it
+        // instead of panicking, since every caller logs this error.
+        let Some(scoped) = self.docs.as_ref().map(|docs| docs.ui().clone()) else {
+            return Err(BackendError::Other(
+                "the document tabs are not available".to_owned(),
+            ));
+        };
         let (view, id, title) = self.build_view(&scoped, name, kind)?;
-        let tabs = self.docs.take().expect("the document tabs exist");
+        let Some(tabs) = self.docs.take() else {
+            return Err(BackendError::Other(
+                "the document tabs are not available".to_owned(),
+            ));
+        };
         self.documents.push(Document {
             name: name.to_owned(),
             kind,
