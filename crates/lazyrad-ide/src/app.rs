@@ -225,6 +225,9 @@ impl IdeApp {
             matches!(event, Event::Resize { .. }).then_some(Msg::Relayout)
         });
 
+        // The window's close button goes through Exit, which saves the
+        // settings before quitting (and is where "save changes?" will hook in).
+        ui.on_close(|| Some(Msg::Command(Command::Exit)));
         Ok(app)
     }
 
@@ -336,7 +339,8 @@ impl IdeApp {
         self.log(ui, format!("Theme: {}", choice.label()));
     }
 
-    /// Records a moved divider in the settings and persists it.
+    /// Records a moved divider in the settings. They are written to disk on
+    /// exit (see [`Command::Exit`]), not on every drag step.
     fn on_pane_moved(&mut self, slot: PaneSlot, position: f32, ui: &Ui<Msg>) {
         let dpi = ui.dpi();
         match slot {
@@ -350,7 +354,6 @@ impl IdeApp {
                     second_extent(self.centre.id(), position, false, ui, dpi)
             }
         }
-        let _ = self.settings.save();
     }
 }
 

@@ -135,12 +135,21 @@ impl Settings {
     }
 
     /// Writes the settings to `path`, creating its parent directory.
+    ///
+    /// The write is atomic: the text goes to a temporary file next to `path`,
+    /// which is then renamed over it, so a crash mid-write never leaves a
+    /// truncated settings file behind.
     pub fn save_to(&self, path: &Path) -> Result<(), SettingsError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(SettingsError::Io)?;
         }
         let text = self.to_toml()?;
-        std::fs::write(path, text).map_err(SettingsError::Io)
+        let temp = path.with_extension("toml.tmp");
+        std::fs::write(&temp, text).map_err(SettingsError::Io)?;
+        std::fs::rename(&temp, path).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            SettingsError::Io(error)
+        })
     }
 
     /// Serialises the settings to TOML.
@@ -250,6 +259,14 @@ mod tests {
 
         let loaded = Settings::load_from(&path).expect("settings load");
         assert_eq!(loaded, settings);
+
+        // A second save replaces the file and leaves no temporary behind.
+        settings.theme = ThemeChoice::Dark;
+        settings
+            .save_to(&path)
+            .expect("settings save over an existing file");
+        assert_eq!(Settings::load_from(&path).expect("settings load"), settings);
+        assert!(!path.with_extension("toml.tmp").exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }
