@@ -35,3 +35,11 @@ top = 108
 width = 120
 height = 32
 text = "Say hello"
+
+[[node]]
+kind = "Label"
+name = "lblOut"
+left = 16
+top = 148
+width = 200
+height = 24

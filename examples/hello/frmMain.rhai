@@ -1,3 +1,3 @@
 fn cmdHello_Click() {
-    MsgBox(Greeting(txtName.text));
+    lblOut.caption = Greeting(txtName.text);
 }
