@@ -185,11 +185,25 @@ pub fn register_form(engine: &mut Engine) {
         *form.title.borrow_mut() = title.to_string();
     });
     engine.register_get("state", |form: &mut Form| form.state.borrow().clone());
+<<<<<<< HEAD
     engine.register_set("state", |form: &mut Form, value: Dynamic| {
         if let Some(map) = value.try_cast::<Map>() {
             *form.state.borrow_mut() = map;
         }
     });
+=======
+    engine.register_set(
+        "state",
+        |form: &mut Form, value: Dynamic| -> Result<(), Box<EvalAltResult>> {
+            let found = value.type_name();
+            let map = value.try_cast::<Map>().ok_or_else(|| {
+                runtime_error(format!("`form.state` must be a map, found {found}"))
+            })?;
+            *form.state.borrow_mut() = map;
+            Ok(())
+        },
+    );
+>>>>>>> origin/main
     engine.register_fn("show", |form: &mut Form| form.set_visible(true));
     engine.register_fn("hide", |form: &mut Form| form.set_visible(false));
 }
