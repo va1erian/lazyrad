@@ -75,12 +75,9 @@ pub struct EngineHost {
     file: String,
     progress: Rc<Progress>,
     globals: Rc<RefCell<BTreeMap<String, Dynamic>>>,
-<<<<<<< HEAD
     /// Every module registered through [`EngineHost::register_module`], so
     /// `import "name" as …` can resolve them again after a later registration.
     modules: rhai::module_resolvers::StaticModuleResolver,
-=======
->>>>>>> origin/main
 }
 
 impl EngineHost {
@@ -135,10 +132,7 @@ impl EngineHost {
             file: file.into(),
             progress,
             globals,
-<<<<<<< HEAD
             modules: rhai::module_resolvers::StaticModuleResolver::new(),
-=======
->>>>>>> origin/main
         }
     }
 
@@ -191,17 +185,12 @@ impl EngineHost {
             .map_err(|error| ScriptError::from_parse(&self.file, &error))
     }
 
-<<<<<<< HEAD
     /// Calls a script function defined in `ast` with no arguments, locating any
     /// runtime error.
-=======
-    /// Calls a script function defined in `ast`, locating any runtime error.
->>>>>>> origin/main
     ///
     /// A fresh scope is used for each call; the resolver re-populates it with
     /// the control and form handles the function reaches for.
     pub fn call(&self, ast: &AST, function: &str) -> Result<Dynamic, ScriptError> {
-<<<<<<< HEAD
         self.call_with(ast, function, Vec::new())
     }
 
@@ -250,13 +239,6 @@ impl EngineHost {
         self.engine.register_static_module(name, shared);
         Ok(())
     }
-=======
-        let mut scope = Scope::new();
-        self.engine
-            .call_fn::<Dynamic>(&mut scope, ast, function, ())
-            .map_err(|error| ScriptError::from_eval(&self.file, &error))
-    }
->>>>>>> origin/main
 }
 
 #[cfg(test)]

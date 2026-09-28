@@ -136,8 +136,6 @@ fn form_state_outlives_a_single_event() {
 }
 
 #[test]
-<<<<<<< HEAD
-=======
 fn assigning_a_non_map_to_form_state_is_an_error() {
     let doc = greeting_doc();
     run_form(&doc, |host, _form| {
@@ -150,7 +148,6 @@ fn assigning_a_non_map_to_form_state_is_an_error() {
 }
 
 #[test]
->>>>>>> origin/main
 fn form_title_persists_across_calls() {
     let doc = greeting_doc();
     run_form(&doc, |host, form| {

@@ -185,13 +185,6 @@ pub fn register_form(engine: &mut Engine) {
         *form.title.borrow_mut() = title.to_string();
     });
     engine.register_get("state", |form: &mut Form| form.state.borrow().clone());
-<<<<<<< HEAD
-    engine.register_set("state", |form: &mut Form, value: Dynamic| {
-        if let Some(map) = value.try_cast::<Map>() {
-            *form.state.borrow_mut() = map;
-        }
-    });
-=======
     engine.register_set(
         "state",
         |form: &mut Form, value: Dynamic| -> Result<(), Box<EvalAltResult>> {
@@ -203,7 +196,6 @@ pub fn register_form(engine: &mut Engine) {
             Ok(())
         },
     );
->>>>>>> origin/main
     engine.register_fn("show", |form: &mut Form| form.set_visible(true));
     engine.register_fn("hide", |form: &mut Form| form.set_visible(false));
 }
