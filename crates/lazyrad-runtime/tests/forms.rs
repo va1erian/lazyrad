@@ -309,3 +309,78 @@ fn a_standard_module_function_is_callable_from_a_form() {
         Some(Value::Text("Hello, Ada!".to_owned()))
     );
 }
+
+#[test]
+fn a_top_level_import_alias_resolves_in_handlers() {
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "main_form",
+            doc,
+            "import \"util\" as u;
+fn form_load() { result_label.text = u::greeting(\"Lin\"); }",
+        )],
+        vec![ModuleSource::new(
+            "util",
+            "fn greeting(name) { `Hello, ${name}!` }",
+        )],
+    );
+
+    let form = capture_form(runtime, "main_form");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("Hello, Lin!".to_owned()))
+    );
+}
+
+#[test]
+fn top_level_code_runs_once_and_extra_handler_parameters_are_unit() {
+    let mut doc = FormDoc::new("main_form");
+    let mut button = Node::new("Button", "go_button");
+    button.set_prop("left", Value::Int(10));
+    button.set_prop("top", Value::Int(10));
+    button.set_prop("width", Value::Int(100));
+    button.set_prop("height", Value::Int(28));
+    doc.insert(button);
+    let mut label = Node::new("Label", "result_label");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(50));
+    label.set_prop("width", Value::Int(160));
+    doc.insert(label);
+
+    // `sender` is not supplied by `Click`; it arrives as `()`.
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "main_form",
+            doc,
+            "result_label.text += \"x\";
+             fn go_button_click(sender) { if sender == () { result_label.text += \"c\"; } }",
+        )],
+        Vec::new(),
+    );
+    let backend = Rc::new(OffscreenBackend::new());
+    let backend_for_click = Rc::clone(&backend);
+    let capture: Rc<RefCell<Option<Rc<LiveForm<Msg>>>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&capture);
+    run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+        let app = runtime.build_app(ui, "main_form").expect("the form builds");
+        let form = app.root_form().expect("the form is live").clone();
+        click(&backend_for_click, ui, &form, "go_button");
+        click(&backend_for_click, ui, &form, "go_button");
+        *slot.borrow_mut() = Some(form);
+        app
+    })
+    .expect("the event loop runs");
+
+    let form = capture.borrow_mut().take().expect("the form was captured");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("xcc".to_owned()))
+    );
+}

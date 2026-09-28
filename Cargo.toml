@@ -23,8 +23,8 @@ repository = "https://github.com/va1erian/lazyrad"
 [workspace.dependencies]
 # The UI toolkit, pinned to the revision LazyOS builds against (PLAN.md §1).
 # A `[patch]` for local xui fixes is kept at the bottom of this file.
-xui-core = { git = "https://github.com/va1erian/xui", rev = "ec94d605258be5bd19abe876fccd285091c05fdb" }
-xui-canvas = { git = "https://github.com/va1erian/xui", rev = "ec94d605258be5bd19abe876fccd285091c05fdb" }
+xui-core = { git = "https://github.com/va1erian/xui", rev = "d89f39257b2f058aaeb5c7ef0c3be031bf357122" }
+xui-canvas = { git = "https://github.com/va1erian/xui", rev = "d89f39257b2f058aaeb5c7ef0c3be031bf357122" }
 
 # The scripting language. `debugging` gives breakpoints and call stacks,
 # `metadata` feeds completion and signature help, and `internals` exposes the
@@ -39,7 +39,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 thiserror = "2"
 
-# `Now()`/`Date()`/`Time()` report the local clock. Only the offset lookup and
+# `now()` and `today()` report the local clock. Only the offset lookup and
 # the core date/time types are needed; formatting is done by the runtime, so
 # the macros and parsing features are left off (PLAN.md §4.4).
 time = { version = "0.3", default-features = false, features = ["std", "local-offset"] }
