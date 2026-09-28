@@ -298,8 +298,10 @@ fn wheel_scroll(first: usize, rest: &mut i32, delta: i16, per_notch: i32, max: u
     *rest = units % WHEEL_NOTCH;
     let target = first as i64 - i64::from(units / WHEEL_NOTCH);
     let clamped = target.clamp(0, max as i64);
-    if clamped != target {
-        // Pinned at an end: leftover travel must not carry past it.
+    // At an end, leftover travel pointing past it is dropped, so reversing
+    // direction scrolls at once instead of first unwinding that travel.
+    let outward = (clamped == 0 && *rest > 0) || (clamped == max as i64 && *rest < 0);
+    if clamped != target || outward {
         *rest = 0;
     }
     clamped as usize
@@ -689,10 +691,7 @@ mod tests {
     /// A long, wide document that scrolls both ways.
     fn tall_state() -> EditorState {
         let line = "x".repeat(200);
-        let text = vec![line.as_str(); 200].join(
-            "
-",
-        );
+        let text = vec![line.as_str(); 200].join("\n");
         state(&text)
     }
 
@@ -808,8 +807,20 @@ mod tests {
         assert_eq!(wheel_scroll(5, &mut rest, -20, 3, 50), 6);
         assert_eq!(rest, 0);
         assert_eq!(wheel_scroll(0, &mut rest, 20, 3, 50), 0);
-        assert_eq!(rest, 60, "half a line up is carried, not yet clamped");
-        assert_eq!(wheel_scroll(0, &mut rest, 60, 3, 50), 0);
-        assert_eq!(rest, 0, "travel past the top is dropped");
+        assert_eq!(rest, 0, "partial travel past the top is dropped");
+        assert_eq!(
+            wheel_scroll(0, &mut rest, -40, 3, 50),
+            1,
+            "reversing at the top scrolls at once"
+        );
+        assert_eq!(wheel_scroll(50, &mut rest, -20, 3, 50), 50);
+        assert_eq!(rest, 0, "partial travel past the bottom is dropped");
+        assert_eq!(
+            wheel_scroll(50, &mut rest, 40, 3, 50),
+            49,
+            "reversing at the bottom scrolls at once"
+        );
+        assert_eq!(wheel_scroll(49, &mut rest, -140, 3, 50), 50);
+        assert_eq!(rest, 0, "landing exactly on the bottom drops the rest");
     }
 }
