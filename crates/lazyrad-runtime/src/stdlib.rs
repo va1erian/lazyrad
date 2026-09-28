@@ -181,8 +181,11 @@ fn register_random(engine: &mut Engine) {
                     "random_range needs start < end, got {start}..{end}"
                 )));
             }
-            let span = (end - start) as f64;
-            Ok(start + (next_random(&generator) * span) as i64)
+            // In i128, so even random_range(i64::MIN, i64::MAX) cannot
+            // overflow; the offset is clamped below the (excluded) end.
+            let span = end as i128 - start as i128;
+            let offset = ((next_random(&generator) * span as f64) as i128).min(span - 1);
+            Ok((start as i128 + offset) as i64)
         }
     );
 
@@ -439,6 +442,17 @@ mod tests {
         assert!((0.0..1.0).contains(&unit));
         let integer = first[1].as_int().expect("random_range is an int");
         assert!((0..10).contains(&integer));
+    }
+
+    #[test]
+    fn random_range_handles_the_widest_range() {
+        let engine = engine_with(&StdlibContext::headless("main_form"));
+        for _ in 0..100 {
+            let value: i64 = engine
+                .eval("random_range(-9223372036854775807 - 1, 9223372036854775807)")
+                .expect("the widest range works");
+            assert!(value < i64::MAX, "the end is excluded");
+        }
     }
 
     #[test]
