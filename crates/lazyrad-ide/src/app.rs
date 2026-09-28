@@ -1658,6 +1658,9 @@ impl IdeApp {
             self.log(ui, format!("`{name}` is not in the project."));
             return;
         }
+        // A compile of the removed item may still be running; its result must
+        // not bring the item's errors back.
+        self.diagnostics.borrow_mut().invalidate(name);
         self.documents.retain(|document| document.name != name);
         self.errors.retain(|entry| entry.name != name);
         self.refresh_error_list();
@@ -1675,6 +1678,8 @@ impl IdeApp {
         };
         match session.rename(old, new) {
             Ok(()) => {
+                // A compile still running under the old name is stale.
+                self.diagnostics.borrow_mut().invalidate(old);
                 for document in &mut self.documents {
                     if document.name == old {
                         document.name = new.to_owned();
@@ -1751,6 +1756,10 @@ impl IdeApp {
                 // Page 0 is the Start Page.
                 docs.select(index + 1);
             }
+            // `select` raises no change message, so place the page's code
+            // children (the procedure combos) here.
+            let docs_ui = self.docs_ui.clone();
+            self.layout_code_views(&docs_ui, docs_ui.dpi());
             return Ok(());
         }
 

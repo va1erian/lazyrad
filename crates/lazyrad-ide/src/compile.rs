@@ -141,6 +141,13 @@ impl CompileScheduler {
         self.revision(name) == Some(revision)
     }
 
+    /// Forgets `name`'s revision and pending job, so a compile of it already
+    /// running is stale when it lands (the item was removed or renamed).
+    pub fn invalidate(&mut self, name: &str) {
+        self.latest.remove(name);
+        self.pending.remove(name);
+    }
+
     /// Whether any job is waiting for its debounce to elapse.
     pub fn is_pending(&self) -> bool {
         !self.pending.is_empty()
@@ -246,6 +253,23 @@ mod tests {
         assert_eq!(names, ["main_form", "util"], "neither job is lost");
         for job in &jobs {
             assert!(scheduler.is_current(&job.name, job.revision));
+        }
+    }
+
+    #[test]
+    fn invalidating_a_document_makes_its_in_flight_result_stale() {
+        let start = Instant::now();
+        let mut scheduler = CompileScheduler::new();
+        scheduler.schedule("main_form", "a", start);
+        scheduler.schedule("util", "b", start);
+        let jobs = scheduler.take_due(start + COMPILE_DEBOUNCE);
+        scheduler.invalidate("main_form");
+        for job in &jobs {
+            assert_eq!(
+                scheduler.is_current(&job.name, job.revision),
+                job.name == "util",
+                "only the invalidated document goes stale"
+            );
         }
     }
 
