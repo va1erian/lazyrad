@@ -1,0 +1,46 @@
+[form]
+name = "frmMain"
+caption = "Hello"
+width = 320
+height = 200
+
+[[control]]
+type = "Label"
+name = "lblPrompt"
+left = 16
+top = 16
+width = 120
+height = 20
+tab_index = 0
+caption = "Enter your name:"
+
+[[control]]
+type = "TextBox"
+name = "txtName"
+left = 16
+top = 44
+width = 200
+height = 24
+tab_index = 1
+text = ""
+
+[[control]]
+type = "ComboBox"
+name = "cboGreeting"
+left = 16
+top = 76
+width = 200
+height = 24
+tab_index = 2
+style = "dropdown"
+
+[[control]]
+type = "CommandButton"
+name = "cmdHello"
+left = 16
+top = 108
+width = 120
+height = 32
+tab_index = 3
+caption = "Say hello"
+default = true
