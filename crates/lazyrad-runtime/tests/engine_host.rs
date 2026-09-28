@@ -285,10 +285,10 @@ fn a_registered_global_resolves_in_a_handler() {
             &catalog,
             "frmMain.rhai",
         );
-        host.set_global("App", rhai::Dynamic::from("LazyRAD".to_owned()));
+        host.set_global("app", rhai::Dynamic::from("LazyRAD".to_owned()));
 
         let ast = host
-            .compile("fn copy() { result_label.text = App; }")
+            .compile("fn copy() { result_label.text = app; }")
             .expect("the handler compiles");
         let _ = host.call(&ast, "copy").expect("copy runs");
 
