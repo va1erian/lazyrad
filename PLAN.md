@@ -357,6 +357,7 @@ contributed to xui.
 | G15 | **`xui-canvas` hard-depends on `winit`, `softbuffer` and `glutin`.** LazyOS vendors a patched copy (`set_default_font`, `Surface::pixels`) | The LazyOS build of the player and IDE | Track the `xui-skia` split proposed in `lazyos/docs/xui-plan.md`. LazyRAD adds nothing new beyond it |
 | G16 | **Single window per task on LazyOS** (see `lazyos/docs/xui-plan.md`) | Multi-form apps and IDE secondary windows | On LazyOS, show secondary forms as in-window `Dialog`-style surfaces until multi-window lands |
 | G17 | **No per-control font, colour or back-colour overrides.** Widgets draw only from theme tokens | VB users expect `ForeColor`, `BackColor` and `Font` properties | Upstream: optional per-node style overrides. For v1, support `Font.Size`/`Bold` on `Label` only and leave colours theme-driven (a deliberate trade-off) |
+| G18 | **No per-widget timers.** `Ui::on_timer` is one window-level mapping, and the per-widget timer listeners are `pub(crate)` | The editor's caret blink (and any self-animating custom widget) needs the host to forward ticks | Workaround: `Editor::handle_timer`, called from the host's `on_timer`. Upstream: a public per-widget timer listener (`Control::on_timer`) |
 
 **G11** is worth a one-day spike before M0 ends. **G14** is confirmed and shapes the `MsgBox` API. The rest have workarounds and are not blockers.
 
