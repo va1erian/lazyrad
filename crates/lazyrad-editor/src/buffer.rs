@@ -103,6 +103,9 @@ struct Group {
 struct LineIndex {
     starts: Vec<usize>,
     max_line_chars: usize,
+    /// The widest line in display columns, cached with the tab width it was
+    /// measured at; cleared on every rebuild.
+    max_line_cols: Option<(usize, usize)>,
     stale: bool,
 }
 
@@ -119,6 +122,7 @@ impl LineIndex {
     fn rebuild(&mut self, rope: &Rope) {
         self.starts.clear();
         self.max_line_chars = 0;
+        self.max_line_cols = None;
         let lines = rope.len_lines().max(1);
         self.starts.reserve(lines);
         for line in 0..lines {
@@ -211,6 +215,32 @@ impl Buffer {
     /// The number of chars in the longest line, for the horizontal extent.
     pub fn max_line_chars(&self) -> usize {
         self.index().max_line_chars
+    }
+
+    /// The widest line in display columns, with tabs expanded to
+    /// `tab_width`. This is the horizontal extent the view scrolls over; it is
+    /// cached until the next edit or a different tab width.
+    pub fn max_line_cols(&self, tab_width: usize) -> usize {
+        let mut index = self.index();
+        if let Some((cached_tab, width)) = index.max_line_cols
+            && cached_tab == tab_width
+        {
+            return width;
+        }
+        let width = (0..index.starts.len())
+            .map(|line| {
+                let slice = self.rope.line(line);
+                slice
+                    .chars()
+                    .take(line_content_len(&slice))
+                    .fold(0, |col, character| {
+                        crate::text::advance(col, character, tab_width)
+                    })
+            })
+            .max()
+            .unwrap_or(0);
+        index.max_line_cols = Some((tab_width, width));
+        width
     }
 
     /// The zero-based line holding `char_idx`.
@@ -548,6 +578,16 @@ mod tests {
         assert_eq!(buffer.max_line_chars(), 6);
         buffer.insert(0, "xxxxxxx\n", false);
         assert_eq!(buffer.max_line_chars(), 7);
+    }
+
+    #[test]
+    fn the_widest_line_counts_tabs_as_display_columns() {
+        let mut buffer = Buffer::new("\t\tx\nabcdef");
+        assert_eq!(buffer.max_line_chars(), 6);
+        assert_eq!(buffer.max_line_cols(4), 9);
+        assert_eq!(buffer.max_line_cols(8), 17);
+        buffer.insert(0, "\t", false);
+        assert_eq!(buffer.max_line_cols(4), 13, "an edit invalidates the cache");
     }
 
     #[test]

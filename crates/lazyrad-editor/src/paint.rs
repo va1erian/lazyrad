@@ -37,7 +37,7 @@ pub(crate) fn paint(
         bounds,
         metrics,
         line_count,
-        state.buffer.max_line_chars(),
+        state.buffer.max_line_cols(state.options.tab_width),
         dpi,
     );
     let first_line = state.view.first_line.min(line_count.saturating_sub(1));
@@ -367,7 +367,7 @@ fn paint_scrollbars(
     if let Some(track) = viewport.hbar {
         let scroll = Scroll {
             viewport: viewport.text.width(),
-            content: state.buffer.max_line_chars() as i32 * metrics.advance,
+            content: state.buffer.max_line_cols(state.options.tab_width) as i32 * metrics.advance,
             offset: first_col as i32 * metrics.advance,
         };
         scrollbar::paint(canvas, track, scroll, Orientation::Horizontal, *xui_theme);

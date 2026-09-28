@@ -41,7 +41,7 @@ fn viewport<M: 'static>(ui: &Ui<M>, id: WidgetId, state: &EditorState) -> Viewpo
         ui.bounds(id),
         metrics,
         line_count,
-        state.buffer.max_line_chars(),
+        state.buffer.max_line_cols(state.options.tab_width),
         dpi,
     )
 }
@@ -343,7 +343,7 @@ pub(crate) fn ensure_visible<M: 'static>(state: &mut EditorState, ui: &Ui<M>, id
     state.view.first_line = state.view.first_line.min(max_line);
     let max_col = state
         .buffer
-        .max_line_chars()
+        .max_line_cols(state.options.tab_width)
         .saturating_sub(layout.visible_cols);
     state.view.first_col = state.view.first_col.min(max_col);
 }
@@ -502,14 +502,15 @@ fn vertical_scroll(state: &EditorState, layout: &Viewport, first_line: usize) ->
 fn max_first_col(state: &EditorState, layout: &Viewport) -> i32 {
     state
         .buffer
-        .max_line_chars()
+        .max_line_cols(state.options.tab_width)
         .saturating_sub(layout.visible_cols) as i32
 }
 
 fn horizontal_scroll(state: &EditorState, layout: &Viewport) -> Scroll {
     Scroll {
         viewport: layout.text.width(),
-        content: state.buffer.max_line_chars() as i32 * layout.metrics.advance,
+        content: state.buffer.max_line_cols(state.options.tab_width) as i32
+            * layout.metrics.advance,
         offset: state.view.first_col as i32 * layout.metrics.advance,
     }
 }

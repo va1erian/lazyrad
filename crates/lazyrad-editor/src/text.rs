@@ -25,7 +25,7 @@ fn char_class(character: char) -> u8 {
 }
 
 /// The display column after `character` was placed at column `col`.
-fn advance(col: usize, character: char, tab_width: usize) -> usize {
+pub(crate) fn advance(col: usize, character: char, tab_width: usize) -> usize {
     if character == '\t' {
         let width = tab_width.max(1);
         col + width - (col % width)
