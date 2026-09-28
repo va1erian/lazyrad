@@ -251,17 +251,22 @@ fn is_ident_char(c: char) -> bool {
 }
 
 /// Rewrites event-handler definitions in a form's `.rhai` source so a control
-/// rename keeps them bound: every `fn old_Event(` becomes `fn new_Event(`.
+/// rename keeps them bound: `fn <old>_<event>(` becomes `fn <new>_<event>(` for
+/// each of the control's `events` (snake_case, see [`handler_events`]).
 ///
-/// Only function declarations are touched, and only when `old` is the whole
-/// prefix before the `_`; a control whose name merely starts with `old` (for
-/// example `cmdOk` versus `cmdOkExtra`) is left alone. This is the textual
-/// rename the property grid's `(Name)` edit requests from the host.
-pub fn rename_handlers(source: &str, old: &str, new: &str) -> String {
+/// Only function declarations are touched, and only for the given events:
+/// control names are snake_case and may contain `_`, so renaming `ok` must not
+/// touch `fn ok_button_click()`, which belongs to a control named `ok_button`.
+/// This is the textual rename the property grid's `(Name)` edit requests from
+/// the host.
+pub fn rename_handlers(source: &str, old: &str, new: &str, events: &[String]) -> String {
     if old.is_empty() || old == new {
         return source.to_owned();
     }
-    let prefix = format!("{old}_");
+    let handlers: Vec<String> = events
+        .iter()
+        .map(|event| format!("{old}_{event}"))
+        .collect();
     let mut out = String::with_capacity(source.len());
     let mut i = 0;
     while i < source.len() {
@@ -276,11 +281,18 @@ pub fn rename_handlers(source: &str, old: &str, new: &str) -> String {
             while j < source.len() && (bytes[j] as char).is_whitespace() {
                 j += 1;
             }
-            if source[j..].starts_with(&prefix) {
+            let matched = handlers.iter().find(|handler| {
+                source[j..].starts_with(handler.as_str())
+                    && source[j + handler.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| !is_ident_char(next))
+            });
+            if let Some(handler) = matched {
                 out.push_str(&source[i..j]);
                 out.push_str(new);
-                out.push('_');
-                i = j + prefix.len();
+                out.push_str(&handler[old.len()..]);
+                i = j + handler.len();
                 continue;
             }
         }
@@ -1328,8 +1340,28 @@ fn int_prop(node: &Node, name: &str, default: i64) -> i64 {
 /// (PLAN.md §1.1), so the first ones become `button1`, `edit1`, `check_box1`
 /// and so on.
 pub fn control_base_name(kind: &str) -> String {
-    let mut out = String::with_capacity(kind.len() + 4);
-    for (index, character) in kind.chars().enumerate() {
+    snake_case(kind)
+}
+
+/// The snake_case event names a control of `kind` can have handlers for, from
+/// the catalog: a `Button`'s `Click` is `click`, so its handler is
+/// `<name>_click`.
+pub fn handler_events(catalog: &Catalog, kind: &str) -> Vec<String> {
+    catalog
+        .get(kind)
+        .map(|spec| {
+            spec.events
+                .iter()
+                .map(|event| snake_case(&event.name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `PascalCase` to `snake_case`: `CheckBox` → `check_box`, `Click` → `click`.
+pub fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (index, character) in name.chars().enumerate() {
         if character.is_uppercase() {
             if index > 0 {
                 out.push('_');
@@ -1348,30 +1380,30 @@ mod tests {
 
     /// A form with two buttons and a panel holding a label.
     fn sample() -> Surface {
-        let mut doc = FormDoc::new("frmMain");
-        let mut button = Node::new("Button", "cmdOk");
+        let mut doc = FormDoc::new("main_form");
+        let mut button = Node::new("Button", "ok_button");
         button.set_prop("left", Value::Int(16));
         button.set_prop("top", Value::Int(16));
         button.set_prop("width", Value::Int(80));
         button.set_prop("height", Value::Int(24));
         doc.insert(button);
 
-        let mut other = Node::new("Button", "cmdCancel");
+        let mut other = Node::new("Button", "cancel_button");
         other.set_prop("left", Value::Int(120));
         other.set_prop("top", Value::Int(16));
         other.set_prop("width", Value::Int(80));
         other.set_prop("height", Value::Int(24));
         doc.insert(other);
 
-        let mut panel = Node::new("Panel", "panMain");
+        let mut panel = Node::new("Panel", "main_panel");
         panel.set_prop("left", Value::Int(50));
         panel.set_prop("top", Value::Int(80));
         panel.set_prop("width", Value::Int(160));
         panel.set_prop("height", Value::Int(100));
         doc.insert(panel);
 
-        let mut label = Node::new("Label", "lblInner");
-        label.parent = Some("panMain".to_owned());
+        let mut label = Node::new("Label", "inner_label");
+        label.parent = Some("main_panel".to_owned());
         label.set_prop("left", Value::Int(10));
         label.set_prop("top", Value::Int(10));
         label.set_prop("width", Value::Int(60));
@@ -1387,7 +1419,7 @@ mod tests {
 
     #[test]
     fn a_paste_never_gives_two_nodes_the_same_name() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         doc.insert(Node::new("Button", "btn"));
         doc.insert(Node::new("Button", "btn1"));
         let mut surface = Surface::new(
@@ -1418,7 +1450,7 @@ mod tests {
     fn a_child_rectangle_is_relative_to_its_parent() {
         let surface = sample();
         assert_eq!(
-            surface.node_rect("lblInner"),
+            surface.node_rect("inner_label"),
             Some(DesignRect::new(60, 90, 120, 110))
         );
     }
@@ -1428,7 +1460,10 @@ mod tests {
         let mut surface = sample();
         let outcome = surface.pointer_down(20, 20, false);
         assert!(outcome.change.selection);
-        assert_eq!(surface.selection(), &Selection::Nodes(vec!["cmdOk".into()]));
+        assert_eq!(
+            surface.selection(),
+            &Selection::Nodes(vec!["ok_button".into()])
+        );
         surface.pointer_up(20, 20, false);
     }
 
@@ -1440,17 +1475,20 @@ mod tests {
         surface.pointer_down(130, 20, true);
         assert_eq!(
             surface.selection(),
-            &Selection::Nodes(vec!["cmdOk".into(), "cmdCancel".into()])
+            &Selection::Nodes(vec!["ok_button".into(), "cancel_button".into()])
         );
         surface.pointer_up(130, 20, true);
         surface.pointer_down(130, 20, true);
-        assert_eq!(surface.selection(), &Selection::Nodes(vec!["cmdOk".into()]));
+        assert_eq!(
+            surface.selection(),
+            &Selection::Nodes(vec!["ok_button".into()])
+        );
     }
 
     #[test]
     fn escape_selects_the_form() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         let outcome = surface.key(KeyPress::new(KeyInput::Escape));
         assert!(outcome.change.selection);
         assert!(surface.selection().is_form());
@@ -1462,7 +1500,7 @@ mod tests {
         surface.pointer_down(20, 20, false);
         surface.pointer_move(30, 30, false);
         surface.pointer_up(30, 30, false);
-        let node = surface.doc.node("cmdOk").expect("node");
+        let node = surface.doc.node("ok_button").expect("node");
         assert_eq!(node.prop("left"), Some(&Value::Int(24)));
         assert_eq!(node.prop("top"), Some(&Value::Int(24)));
     }
@@ -1470,12 +1508,12 @@ mod tests {
     #[test]
     fn a_handle_resizes_a_single_node() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         // Grab the south-east handle at (96, 40) and drag to (120, 64).
         surface.pointer_down(96, 40, false);
         surface.pointer_move(120, 64, false);
         surface.pointer_up(120, 64, false);
-        let node = surface.doc.node("cmdOk").expect("node");
+        let node = surface.doc.node("ok_button").expect("node");
         assert_eq!(node.prop("width"), Some(&Value::Int(104)));
         assert_eq!(node.prop("height"), Some(&Value::Int(48)));
     }
@@ -1500,22 +1538,22 @@ mod tests {
         surface.pointer_up(130, 20, false);
         assert_eq!(
             surface.selection(),
-            &Selection::Nodes(vec!["cmdOk".into(), "cmdCancel".into()])
+            &Selection::Nodes(vec!["ok_button".into(), "cancel_button".into()])
         );
     }
 
     #[test]
     fn arrow_keys_nudge_by_the_grid_and_one_unit_with_ctrl() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         surface.key(KeyPress::new(KeyInput::Right));
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("left")),
             Some(&Value::Int(24))
         );
         surface.key(KeyPress::ctrl(KeyInput::Right));
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("left")),
             Some(&Value::Int(25))
         );
     }
@@ -1526,7 +1564,7 @@ mod tests {
         surface.set_grid(4);
         surface.key(KeyPress::new(KeyInput::Down));
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("top")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("top")),
             Some(&Value::Int(16))
         );
         assert_eq!(surface.grid(), 4);
@@ -1535,25 +1573,25 @@ mod tests {
     #[test]
     fn delete_removes_the_selection_and_cascades() {
         let mut surface = sample();
-        surface.select_node("panMain");
+        surface.select_node("main_panel");
         let outcome = surface.delete_selection();
         assert!(outcome.change.structure);
-        assert!(surface.doc.node("panMain").is_none());
-        assert!(surface.doc.node("lblInner").is_none());
+        assert!(surface.doc.node("main_panel").is_none());
+        assert!(surface.doc.node("inner_label").is_none());
         assert!(surface.selection().is_form());
     }
 
     #[test]
     fn copy_paste_gives_a_unique_offset_copy() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         assert!(surface.copy());
         assert!(surface.paste());
         assert_eq!(
             surface.selection(),
-            &Selection::Nodes(vec!["cmdOk1".into()])
+            &Selection::Nodes(vec!["ok_button1".into()])
         );
-        let node = surface.doc.node("cmdOk1").expect("pasted");
+        let node = surface.doc.node("ok_button1").expect("pasted");
         assert_eq!(node.prop("left"), Some(&Value::Int(24)));
         assert_eq!(node.prop("top"), Some(&Value::Int(24)));
     }
@@ -1561,14 +1599,14 @@ mod tests {
     #[test]
     fn pasting_a_container_remaps_its_children() {
         let mut surface = sample();
-        surface.select_node("panMain");
+        surface.select_node("main_panel");
         assert!(surface.duplicate());
-        let copy = surface.doc.node("panMain1").expect("copied panel");
+        let copy = surface.doc.node("main_panel1").expect("copied panel");
         assert_eq!(copy.parent, None);
-        let child = surface.doc.node("lblInner1").expect("copied child");
-        assert_eq!(child.parent.as_deref(), Some("panMain1"));
+        let child = surface.doc.node("inner_label1").expect("copied child");
+        assert_eq!(child.parent.as_deref(), Some("main_panel1"));
         assert_eq!(
-            surface.node_rect("lblInner1"),
+            surface.node_rect("inner_label1"),
             Some(DesignRect::new(68, 98, 128, 118))
         );
     }
@@ -1576,21 +1614,21 @@ mod tests {
     #[test]
     fn undo_and_redo_restore_every_edit() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         surface.key(KeyPress::new(KeyInput::Right));
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("left")),
             Some(&Value::Int(24))
         );
         assert!(surface.can_undo());
         assert!(surface.undo());
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("left")),
             Some(&Value::Int(16))
         );
         assert!(surface.redo());
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("left")),
             Some(&Value::Int(24))
         );
     }
@@ -1598,19 +1636,19 @@ mod tests {
     #[test]
     fn undoing_a_delete_restores_the_node() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         surface.delete_selection();
         assert!(surface.undo());
-        assert!(surface.doc.node("cmdOk").is_some());
+        assert!(surface.doc.node("ok_button").is_some());
     }
 
     #[test]
     fn edits_round_trip_through_toml() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         surface.key(KeyPress::new(KeyInput::Right));
         surface.duplicate();
-        surface.select_node("panMain");
+        surface.select_node("main_panel");
         surface.key(KeyPress::new(KeyInput::Escape));
 
         let catalog = lazyrad_project::lazyrad_catalog();
@@ -1624,7 +1662,7 @@ mod tests {
     /// An empty form surface for the creation tests.
     fn empty() -> Surface {
         Surface::new(
-            FormDoc::new("frmMain"),
+            FormDoc::new("main_form"),
             Rc::new(lazyrad_project::lazyrad_catalog()),
             DEFAULT_GRID,
         )
@@ -1727,7 +1765,7 @@ mod tests {
 
     #[test]
     fn a_control_dropped_on_a_frame_becomes_its_child() {
-        let mut doc = FormDoc::new("frmMain");
+        let mut doc = FormDoc::new("main_form");
         let mut frame = Node::new("GroupBox", "group_box1");
         frame.set_prop("left", Value::Int(40));
         frame.set_prop("top", Value::Int(40));
@@ -1783,7 +1821,7 @@ mod tests {
     #[test]
     fn a_click_on_empty_space_clears_the_selection() {
         let mut surface = sample();
-        surface.select_node("cmdOk");
+        surface.select_node("ok_button");
         surface.pointer_down(300, 190, false);
         assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
         surface.pointer_up(300, 190, false);
@@ -1795,18 +1833,21 @@ mod tests {
         let mut surface = sample();
         let change = surface
             .set_property(
-                &Target::Node("cmdOk".into()),
+                &Target::Node("ok_button".into()),
                 "text",
                 Value::Text("Go".into()),
             )
             .expect("text is editable");
         assert_eq!(change, Change::PROPERTY);
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("text")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("text")),
             Some(&Value::Text("Go".into()))
         );
         assert!(surface.undo());
-        assert_eq!(surface.doc.node("cmdOk").and_then(|n| n.prop("text")), None);
+        assert_eq!(
+            surface.doc.node("ok_button").and_then(|n| n.prop("text")),
+            None
+        );
         assert!(surface.redo());
     }
 
@@ -1814,11 +1855,11 @@ mod tests {
     fn geometry_edits_report_geometry() {
         let mut surface = sample();
         let change = surface
-            .set_property(&Target::Node("cmdOk".into()), "left", Value::Int(32))
+            .set_property(&Target::Node("ok_button".into()), "left", Value::Int(32))
             .expect("left is editable");
         assert_eq!(change, Change::GEOMETRY);
         assert_eq!(
-            surface.doc.node("cmdOk").and_then(|n| n.prop("left")),
+            surface.doc.node("ok_button").and_then(|n| n.prop("left")),
             Some(&Value::Int(32))
         );
     }
@@ -1842,12 +1883,12 @@ mod tests {
     fn a_typed_mismatch_is_rejected() {
         let mut surface = sample();
         assert_eq!(
-            surface.set_property(&Target::Node("cmdOk".into()), "text", Value::Int(3)),
+            surface.set_property(&Target::Node("ok_button".into()), "text", Value::Int(3)),
             Err(PropertyError::InvalidValue("text".into()))
         );
         assert_eq!(
             surface.set_property(
-                &Target::Node("cmdGo".into()),
+                &Target::Node("go_button".into()),
                 "text",
                 Value::Text("x".into())
             ),
@@ -1860,7 +1901,7 @@ mod tests {
         let mut surface = sample();
         assert_eq!(
             surface.set_property(
-                &Target::Node("cmdOk".into()),
+                &Target::Node("ok_button".into()),
                 "name",
                 Value::Text("1bad".into())
             ),
@@ -1868,23 +1909,23 @@ mod tests {
         );
         assert_eq!(
             surface.set_property(
-                &Target::Node("cmdOk".into()),
+                &Target::Node("ok_button".into()),
                 "name",
-                Value::Text("cmdCancel".into())
+                Value::Text("cancel_button".into())
             ),
-            Err(PropertyError::DuplicateName("cmdCancel".into()))
+            Err(PropertyError::DuplicateName("cancel_button".into()))
         );
         let change = surface
             .set_property(
-                &Target::Node("cmdOk".into()),
+                &Target::Node("ok_button".into()),
                 "name",
-                Value::Text("cmdGo".into()),
+                Value::Text("go_button".into()),
             )
             .expect("a fresh identifier is accepted");
         assert_eq!(change, Change::STRUCTURE);
-        assert!(surface.doc.node("cmdGo").is_some());
+        assert!(surface.doc.node("go_button").is_some());
         assert!(surface.undo());
-        assert!(surface.doc.node("cmdOk").is_some());
+        assert!(surface.doc.node("ok_button").is_some());
     }
 
     #[test]
@@ -1892,7 +1933,7 @@ mod tests {
         let mut surface = sample();
         let change = surface
             .set_property(
-                &Target::Node("cmdOk".into()),
+                &Target::Node("ok_button".into()),
                 "text",
                 Value::Text(String::new()),
             )
@@ -1902,20 +1943,32 @@ mod tests {
     }
 
     #[test]
-    fn rename_handlers_rewrites_only_the_matching_prefix() {
+    fn rename_handlers_rewrites_only_the_controls_own_handlers() {
+        let events = vec!["click".to_owned()];
         let source = "\
-fn cmdOk_Click() {
-    cmdOk_Click();
+fn ok_click() {
+    ok_click();
 }
-fn cmdOkExtra_Click() {}
-fn other_Load() {}
+fn ok_button_click() {}
+fn ok_clicked() {}
+fn other_click() {}
 ";
-        let renamed = rename_handlers(source, "cmdOk", "cmdGo");
-        assert!(renamed.contains("fn cmdGo_Click() {"));
+        let renamed = rename_handlers(source, "ok", "go", &events);
+        assert!(renamed.contains("fn go_click() {"));
         // A call is not a declaration, so it is left for the developer.
-        assert!(renamed.contains("    cmdOk_Click();"));
-        assert!(renamed.contains("fn cmdOkExtra_Click() {}"));
-        assert!(renamed.contains("fn other_Load() {}"));
-        assert_eq!(rename_handlers(source, "cmdOk", "cmdOk"), source);
+        assert!(renamed.contains("    ok_click();"));
+        // `ok_button` is a different control, and `clicked` is not an event.
+        assert!(renamed.contains("fn ok_button_click() {}"));
+        assert!(renamed.contains("fn ok_clicked() {}"));
+        assert!(renamed.contains("fn other_click() {}"));
+        assert_eq!(rename_handlers(source, "ok", "ok", &events), source);
+    }
+
+    #[test]
+    fn handler_events_are_the_catalogs_events_in_snake_case() {
+        let catalog = lazyrad_project::lazyrad_catalog();
+        assert_eq!(handler_events(&catalog, "Button"), vec!["click".to_owned()]);
+        assert!(handler_events(&catalog, "CheckBox").contains(&"toggle".to_owned()));
+        assert_eq!(snake_case("CheckBox"), "check_box");
     }
 }

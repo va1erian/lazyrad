@@ -63,7 +63,7 @@
 //!
 //! # fn build(ui: &mut Ui<Msg>) -> Editor {
 //! let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
-//! let doc = FormDoc::new("frmMain");
+//! let doc = FormDoc::new("main_form");
 //! let designer = Designer::new(ui, Rect::default(), doc, catalog, Msg::Designer)
 //!     .expect("the designer builds");
 //! Editor { designer }
@@ -95,7 +95,8 @@ pub use property_grid::{
 };
 pub use surface::{
     Change, CursorHint, DEFAULT_GRID, HANDLE_TOLERANCE, KeyInput, KeyPress, Outcome, PropertyError,
-    Selection, Surface, Target, control_base_name, is_valid_name, rename_handlers,
+    Selection, Surface, Target, control_base_name, handler_events, is_valid_name, rename_handlers,
+    snake_case,
 };
 pub use toolbox::{CONTROL_KINDS, Tool, Toolbox, ToolboxMsg, tools};
 pub use widget::{Designer, DesignerError, DesignerMsg};

@@ -77,8 +77,8 @@ impl App for ShellApp {
 
 /// A form with one button, for the interaction tests.
 fn button_doc() -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
-    let mut button = Node::new("Button", "cmdOk");
+    let mut doc = FormDoc::new("main_form");
+    let mut button = Node::new("Button", "ok_button");
     button.set_prop("left", Value::Int(16));
     button.set_prop("top", Value::Int(16));
     button.set_prop("width", Value::Int(80));
@@ -156,7 +156,7 @@ fn the_designer_builds_the_form_and_turns_on_design_mode() {
     assert!(design_mode, "the designer runs the window in design mode");
     assert_eq!(doc.nodes.len(), 1);
     assert_eq!(
-        doc.node("cmdOk").map(|node| node.kind.as_str()),
+        doc.node("ok_button").map(|node| node.kind.as_str()),
         Some("Button")
     );
 }
@@ -168,7 +168,7 @@ fn clicking_a_control_selects_it_rather_than_firing_an_event() {
         |backend, window| drag(backend, window, (40, 20), (40, 20)),
         |designer| designer.selection(),
     );
-    assert_eq!(selection, Selection::Nodes(vec!["cmdOk".to_owned()]));
+    assert_eq!(selection, Selection::Nodes(vec!["ok_button".to_owned()]));
 }
 
 #[test]
@@ -179,8 +179,8 @@ fn dragging_a_control_moves_it_and_snaps_to_the_grid() {
         |designer| {
             let node = designer.doc();
             (
-                node.node("cmdOk").and_then(|n| n.prop("left").cloned()),
-                node.node("cmdOk").and_then(|n| n.prop("top").cloned()),
+                node.node("ok_button").and_then(|n| n.prop("left").cloned()),
+                node.node("ok_button").and_then(|n| n.prop("top").cloned()),
             )
         },
     );
@@ -227,7 +227,7 @@ fn the_selection_sink_is_notified() {
 
     assert_eq!(
         log.borrow().last(),
-        Some(&Selection::Nodes(vec!["cmdOk".to_owned()]))
+        Some(&Selection::Nodes(vec!["ok_button".to_owned()]))
     );
 }
 
@@ -313,7 +313,7 @@ fn undo_and_redo_round_trip_a_move() {
         let left = |designer: &Designer<Msg>| {
             designer
                 .doc()
-                .node("cmdOk")
+                .node("ok_button")
                 .and_then(|node| node.prop("left").and_then(Value::as_int))
                 .unwrap_or_default()
         };
@@ -351,7 +351,7 @@ fn with_toolbox<R>(
         let designer = Designer::new(
             ui,
             Rect::new(0, 0, 320, 200),
-            FormDoc::new("frmMain"),
+            FormDoc::new("main_form"),
             catalog,
             Shell::Designer,
         )
@@ -420,7 +420,7 @@ fn a_tool_drag_on_the_designer_creates_a_control() {
         let designer = Designer::new(
             ui,
             Rect::new(0, 0, 320, 200),
-            FormDoc::new("frmMain"),
+            FormDoc::new("main_form"),
             catalog,
             Msg::Designer,
         )
@@ -482,7 +482,7 @@ fn dropping_every_toolbox_kind_creates_it_and_undo_removes_it() {
         let designer = Designer::new(
             ui,
             Rect::new(0, 0, 320, 200),
-            FormDoc::new("frmMain"),
+            FormDoc::new("main_form"),
             catalog,
             Msg::Designer,
         )
@@ -563,7 +563,7 @@ fn the_toolbox_paints_without_panicking() {
         let designer = Designer::new(
             ui,
             Rect::new(0, 0, 320, 200),
-            FormDoc::new("frmMain"),
+            FormDoc::new("main_form"),
             catalog,
             Shell::Designer,
         )

@@ -45,8 +45,8 @@ impl App for Editor {
 
 /// A form with one button, for the grid tests.
 fn button_doc() -> FormDoc {
-    let mut doc = FormDoc::new("frmMain");
-    let mut button = Node::new("Button", "cmdOk");
+    let mut doc = FormDoc::new("main_form");
+    let mut button = Node::new("Button", "ok_button");
     button.set_prop("left", Value::Int(16));
     button.set_prop("top", Value::Int(16));
     button.set_prop("width", Value::Int(80));
@@ -114,37 +114,37 @@ fn row_index(editor: &Editor, name: &str) -> usize {
 #[test]
 fn the_grid_follows_the_designer_selection() {
     let (target, _) = with_editor(button_doc(), |editor, ui| {
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let target = editor.grid.target();
         let rows = editor.grid.rows();
-        assert_eq!(target, lazyrad_designer::Target::Node("cmdOk".into()));
+        assert_eq!(target, lazyrad_designer::Target::Node("ok_button".into()));
         assert!(rows.iter().any(|row| row.is_name));
         assert!(rows.iter().any(|row| row.name == "text"));
         target
     });
-    assert_eq!(target, lazyrad_designer::Target::Node("cmdOk".into()));
+    assert_eq!(target, lazyrad_designer::Target::Node("ok_button".into()));
 }
 
 #[test]
 fn editing_text_updates_the_model_and_is_undoable() {
     let (after, _) = with_editor(button_doc(), |editor, ui| {
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(editor, "text");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
         editor
             .grid
             .update(PropertyGridMsg::CommitText("Hello".into()), ui);
         let edited = editor.designer.borrow().doc();
-        let live = editor.designer.borrow().live_value("cmdOk", "text");
+        let live = editor.designer.borrow().live_value("ok_button", "text");
         assert!(editor.designer.borrow().undo(ui));
         let undone = editor.designer.borrow().doc();
-        let live_after_undo = editor.designer.borrow().live_value("cmdOk", "text");
+        let live_after_undo = editor.designer.borrow().live_value("ok_button", "text");
         (edited, live, undone, live_after_undo)
     });
     assert_eq!(
         after
             .0
-            .node("cmdOk")
+            .node("ok_button")
             .and_then(|node| node.prop("text"))
             .cloned(),
         Some(Value::Text("Hello".into()))
@@ -153,7 +153,7 @@ fn editing_text_updates_the_model_and_is_undoable() {
     assert_eq!(
         after
             .2
-            .node("cmdOk")
+            .node("ok_button")
             .and_then(|node| node.prop("text"))
             .cloned(),
         Some(Value::Text("Go".into()))
@@ -165,7 +165,7 @@ fn editing_text_updates_the_model_and_is_undoable() {
 #[test]
 fn editing_geometry_updates_the_model() {
     let (_, doc) = with_editor(button_doc(), |editor, ui| {
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(editor, "left");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
         editor
@@ -174,7 +174,7 @@ fn editing_geometry_updates_the_model() {
     });
     assert_eq!(
         doc.expect("a document")
-            .node("cmdOk")
+            .node("ok_button")
             .and_then(|node| node.prop("left")),
         Some(&Value::Int(64))
     );
@@ -183,7 +183,7 @@ fn editing_geometry_updates_the_model() {
 #[test]
 fn editing_an_enum_commits_the_chosen_variant() {
     let (_, doc) = with_editor(button_doc(), |editor, ui| {
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(editor, "anchor");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
         // `fill` is the last variant of the anchor enum.
@@ -191,7 +191,7 @@ fn editing_an_enum_commits_the_chosen_variant() {
     });
     assert_eq!(
         doc.expect("a document")
-            .node("cmdOk")
+            .node("ok_button")
             .and_then(|node| node.prop("anchor")),
         Some(&Value::Enum("fill".into()))
     );
@@ -200,14 +200,14 @@ fn editing_an_enum_commits_the_chosen_variant() {
 #[test]
 fn editing_a_bool_commits_the_new_state() {
     let (_, doc) = with_editor(button_doc(), |editor, ui| {
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(editor, "enabled");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
         editor.grid.update(PropertyGridMsg::CommitBool(false), ui);
     });
     assert_eq!(
         doc.expect("a document")
-            .node("cmdOk")
+            .node("ok_button")
             .and_then(|node| node.prop("enabled")),
         Some(&Value::Bool(false))
     );
@@ -245,12 +245,12 @@ fn renaming_a_control_fires_the_rename_sink() {
         )
         .expect("the grid builds");
         let editor = Editor { designer, grid };
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(&editor, "name");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
         editor
             .grid
-            .update(PropertyGridMsg::CommitText("cmdGo".into()), ui);
+            .update(PropertyGridMsg::CommitText("go_button".into()), ui);
         *doc_for_app.borrow_mut() = Some(editor.designer.borrow().doc());
         editor
     })
@@ -258,13 +258,22 @@ fn renaming_a_control_fires_the_rename_sink() {
 
     assert_eq!(
         renamed.borrow().as_ref(),
-        Some(&("cmdOk".to_owned(), "cmdGo".to_owned()))
+        Some(&("ok_button".to_owned(), "go_button".to_owned()))
     );
     let doc = doc_after.borrow();
-    let node = doc.as_ref().expect("a doc").node("cmdGo").expect("renamed");
+    let node = doc
+        .as_ref()
+        .expect("a doc")
+        .node("go_button")
+        .expect("renamed");
     assert_eq!(
-        rename_handlers("fn cmdOk_Click() {}", "cmdOk", "cmdGo"),
-        "fn cmdGo_Click() {}"
+        rename_handlers(
+            "fn ok_button_click() {}",
+            "ok_button",
+            "go_button",
+            &["click".to_owned()]
+        ),
+        "fn go_button_click() {}"
     );
     assert_eq!(node.kind, "Button");
 }
@@ -272,7 +281,7 @@ fn renaming_a_control_fires_the_rename_sink() {
 #[test]
 fn an_invalid_name_keeps_the_control_and_reports_an_error() {
     let (_, doc) = with_editor(button_doc(), |editor, ui| {
-        editor.designer.borrow().select_node("cmdOk", ui);
+        editor.designer.borrow().select_node("ok_button", ui);
         let index = row_index(editor, "name");
         editor.grid.update(PropertyGridMsg::BeginEdit(index), ui);
         // An invalid identifier is rejected; the model keeps the original.
@@ -280,7 +289,7 @@ fn an_invalid_name_keeps_the_control_and_reports_an_error() {
             .grid
             .update(PropertyGridMsg::CommitText("1bad".into()), ui);
     });
-    assert!(doc.expect("a document").node("cmdOk").is_some());
+    assert!(doc.expect("a document").node("ok_button").is_some());
 }
 
 #[test]
@@ -308,7 +317,7 @@ fn the_grid_paints_without_panicking() {
             Msg::Grid,
         )
         .expect("the grid builds");
-        designer.borrow().select_node("cmdOk", ui);
+        designer.borrow().select_node("ok_button", ui);
         let image = backend.render(ui.window()).expect("the window renders");
         assert_eq!((image.width, image.height), (560, 240));
         Editor { designer, grid }

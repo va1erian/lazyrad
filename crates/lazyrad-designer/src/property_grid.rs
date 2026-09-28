@@ -59,7 +59,7 @@
 //!
 //! # fn build(ui: &mut Ui<Msg>) -> Editor {
 //! let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
-//! let doc = FormDoc::new("frmMain");
+//! let doc = FormDoc::new("main_form");
 //! let designer = Designer::new(ui, Rect::default(), doc, Rc::clone(&catalog), Msg::Designer)
 //!     .expect("the designer builds");
 //! let designer = Rc::new(RefCell::new(designer));
@@ -1293,8 +1293,8 @@ mod tests {
     }
 
     fn doc() -> FormDoc {
-        let mut doc = FormDoc::new("frmMain");
-        let mut button = Node::new("Button", "cmdOk");
+        let mut doc = FormDoc::new("main_form");
+        let mut button = Node::new("Button", "ok_button");
         button.set_prop("text", Value::Text("Go".into()));
         button.set_prop("enabled", Value::Bool(false));
         button.set_prop("left", Value::Int(16));
@@ -1342,7 +1342,7 @@ mod tests {
         let rows = property_rows(
             &catalog(),
             &doc(),
-            &Target::Node("cmdOk".into()),
+            &Target::Node("ok_button".into()),
             View::Alphabetic,
         );
         assert_eq!(rows.first().map(|row| row.label.as_str()), Some("(Name)"));
@@ -1359,7 +1359,7 @@ mod tests {
         let rows = property_rows(
             &catalog(),
             &doc(),
-            &Target::Node("cmdOk".into()),
+            &Target::Node("ok_button".into()),
             View::Alphabetic,
         );
         let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
@@ -1373,7 +1373,7 @@ mod tests {
         let rows = property_rows(
             &catalog(),
             &doc(),
-            &Target::Node("cmdOk".into()),
+            &Target::Node("ok_button".into()),
             View::Categorized,
         );
         let ranks: Vec<u8> = rows
@@ -1397,18 +1397,18 @@ mod tests {
     #[test]
     fn the_object_list_is_the_form_then_its_controls() {
         let objects = objects_of(&doc());
-        assert_eq!(objects[0].0, "frmMain");
+        assert_eq!(objects[0].0, "main_form");
         assert_eq!(objects[0].1, Target::Form);
-        assert_eq!(objects[1].0, "cmdOk");
-        assert_eq!(objects[1].1, Target::Node("cmdOk".into()));
+        assert_eq!(objects[1].0, "ok_button");
+        assert_eq!(objects[1].1, Target::Node("ok_button".into()));
     }
 
     #[test]
     fn a_selection_maps_to_a_target() {
         assert_eq!(target_for(&crate::Selection::Form), Target::Form);
         assert_eq!(
-            target_for(&crate::Selection::Nodes(vec!["cmdOk".into()])),
-            Target::Node("cmdOk".into())
+            target_for(&crate::Selection::Nodes(vec!["ok_button".into()])),
+            Target::Node("ok_button".into())
         );
     }
 
@@ -1417,7 +1417,7 @@ mod tests {
         let rows = property_rows(
             &catalog(),
             &doc(),
-            &Target::Node("cmdOk".into()),
+            &Target::Node("ok_button".into()),
             View::Categorized,
         );
         let lines = visual_lines(&rows, View::Categorized);
@@ -1446,7 +1446,7 @@ mod tests {
         let rows = property_rows(
             &catalog,
             &doc(),
-            &Target::Node("cmdOk".into()),
+            &Target::Node("ok_button".into()),
             View::Alphabetic,
         );
         let row = rows.iter().find(|row| row.name == "shown").expect("row");
