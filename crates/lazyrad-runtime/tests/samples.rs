@@ -133,7 +133,7 @@ fn the_calculator_sample_adds_two_numbers() {
     });
 
     assert_eq!(
-        form.get("display_edit", "text"),
+        form.get("display_label", "text"),
         Some(Value::Text("15".to_owned()))
     );
 }
@@ -147,8 +147,22 @@ fn the_calculator_sample_divides_two_numbers() {
     });
 
     assert_eq!(
-        form.get("display_edit", "text"),
+        form.get("display_label", "text"),
         Some(Value::Text("4".to_owned()))
+    );
+}
+
+#[test]
+fn the_calculator_sample_keeps_the_value_on_division_by_zero() {
+    let form = run_sample("calculator", |backend, ui, form| {
+        for control in ["digit_8", "divide_button", "digit_0", "equals_button"] {
+            click(backend, ui, form, control);
+        }
+    });
+
+    assert_eq!(
+        form.get("display_label", "text"),
+        Some(Value::Text("8".to_owned()))
     );
 }
 

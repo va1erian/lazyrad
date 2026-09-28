@@ -2,7 +2,7 @@ fn form_load() {
     form.state.accumulator = 0.0;
     form.state.pending = "";
     form.state.entering = "";
-    display_edit.text = "0";
+    display_label.text = "0";
 }
 
 fn digit_0_click() { type_digit("0"); }
@@ -24,19 +24,19 @@ fn divide_button_click() { choose_operator("/"); }
 fn equals_button_click() {
     commit();
     form.state.pending = "";
-    display_edit.text = format_number(form.state.accumulator);
+    display_label.text = format_number(form.state.accumulator);
 }
 
 fn clear_button_click() {
     form.state.accumulator = 0.0;
     form.state.pending = "";
     form.state.entering = "";
-    display_edit.text = "0";
+    display_label.text = "0";
 }
 
 fn type_digit(digit) {
     form.state.entering = `${form.state.entering}${digit}`;
-    display_edit.text = form.state.entering;
+    display_label.text = form.state.entering;
 }
 
 fn choose_operator(operator) {
