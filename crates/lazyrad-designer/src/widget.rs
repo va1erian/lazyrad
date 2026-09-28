@@ -105,6 +105,16 @@ pub enum DesignerError {
     /// The form document could not be built into live widgets.
     #[error(transparent)]
     Build(#[from] BuildError),
+    /// The replacement document has errors; the designer kept its current one.
+    #[error("the form document is invalid: {}", first_message(.0))]
+    Invalid(Vec<xui_form::Diagnostic>),
+}
+
+/// The first diagnostic's message, for [`DesignerError::Invalid`]'s display.
+fn first_message(diagnostics: &[xui_form::Diagnostic]) -> &str {
+    diagnostics
+        .first()
+        .map_or("unknown error", |diagnostic| diagnostic.message.as_str())
 }
 
 /// A callback the host registers to observe selection changes.
@@ -315,9 +325,31 @@ impl<M: 'static> Designer<M> {
     }
 
     /// Replaces the document and rebuilds the preview.
+    ///
+    /// The document is validated against the catalog first. If it has errors,
+    /// [`DesignerError::Invalid`] is returned; if it validates but fails to
+    /// build, the build error is returned. Either way the current document,
+    /// preview and undo history are left exactly as they were.
     pub fn set_doc(&self, doc: FormDoc, ui: &Ui<M>) -> Result<(), DesignerError> {
+        let errors: Vec<xui_form::Diagnostic> = doc
+            .validate(&self.catalog)
+            .into_iter()
+            .filter(|diagnostic| diagnostic.severity == xui_form::Severity::Error)
+            .collect();
+        if !errors.is_empty() {
+            return Err(DesignerError::Invalid(errors));
+        }
+        // A document can pass validation and still fail to build (a missing
+        // factory, a backend error), so keep the whole previous state and put
+        // it back, preview included, if the rebuild fails.
+        let previous = self.surface.borrow().clone();
         self.surface.borrow_mut().set_doc(doc);
-        self.rebuild(ui)?;
+        if let Err(error) = self.rebuild(ui) {
+            *self.surface.borrow_mut() = previous;
+            let _ = self.rebuild(ui);
+            ui.invalidate(self.id());
+            return Err(error);
+        }
         self.notify_selection();
         ui.invalidate(self.id());
         Ok(())
@@ -540,6 +572,7 @@ impl<M: 'static> Designer<M> {
     fn rebuild(&self, ui: &Ui<M>) -> Result<(), DesignerError> {
         *self.live.borrow_mut() = None;
         *self.overlay.borrow_mut() = None;
+        self.resize_panel(ui);
         let doc = self.surface.borrow().doc().clone();
         let built = build_with(
             self.panel.ui(),
@@ -587,7 +620,6 @@ impl<M: 'static> Designer<M> {
     /// Pushes the document's geometry into the live widgets and resizes the
     /// panel/overlay when the form's client area changed.
     fn sync_geometry(&self, ui: &Ui<M>) {
-        let (form_width, form_height) = self.form_px(ui);
         {
             let surface = self.surface.borrow();
             if let Some(live) = self.live.borrow().as_ref() {
@@ -600,14 +632,7 @@ impl<M: 'static> Designer<M> {
                 }
             }
         }
-        let origin = self.panel_origin;
-        let bounds = Rect::new(
-            origin.x,
-            origin.y,
-            origin.x + form_width,
-            origin.y + form_height,
-        );
-        self.panel.set_bounds(bounds);
+        let bounds = self.resize_panel(ui);
         ui.apply_moves(&[(self.id(), bounds)]);
     }
 
@@ -626,6 +651,17 @@ impl<M: 'static> Designer<M> {
                 }
             }
         }
+    }
+
+    /// Sizes the preview panel to the document's client area and returns its
+    /// bounds. Called on geometry edits and on every rebuild, so an undo, redo
+    /// or `set_doc` that changes the form size keeps panel and overlay in step.
+    fn resize_panel(&self, ui: &Ui<M>) -> Rect {
+        let (width, height) = self.form_px(ui);
+        let origin = self.panel_origin;
+        let bounds = Rect::new(origin.x, origin.y, origin.x + width, origin.y + height);
+        self.panel.set_bounds(bounds);
+        bounds
     }
 
     /// The form's device-pixel size.
