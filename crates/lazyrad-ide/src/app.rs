@@ -350,8 +350,16 @@ impl IdeApp {
     fn set_theme(&mut self, ui: &mut Ui<Msg>, choice: ThemeChoice) {
         self.settings.theme = choice;
         self.apply_theme(ui);
-        let _ = self.settings.save();
-        self.log(ui, format!("Theme: {}", choice.label()));
+        match self.settings.save() {
+            Ok(()) => self.log(ui, format!("Theme: {}", choice.label())),
+            Err(error) => self.log(
+                ui,
+                format!(
+                    "Theme: {} (applied, but the setting could not be saved: {error})",
+                    choice.label()
+                ),
+            ),
+        }
     }
 
     /// Records a moved divider in the settings. They are written to disk on
