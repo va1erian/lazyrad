@@ -5,6 +5,7 @@
 resolver = "3"
 members = [
     "crates/xui-form",
+    "crates/xui-rhai",
     "crates/lazyrad-project",
     "crates/lazyrad-runtime",
     "crates/lazyrad-packager",
@@ -64,6 +65,7 @@ dark-light = "3"
 rfd = "0.17"
 
 xui-form = { path = "crates/xui-form" }
+xui-rhai = { path = "crates/xui-rhai" }
 lazyrad-project = { path = "crates/lazyrad-project" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime" }
 lazyrad-packager = { path = "crates/lazyrad-packager" }

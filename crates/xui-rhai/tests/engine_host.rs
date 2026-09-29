@@ -7,16 +7,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use lazyrad_project::lazyrad_catalog;
-use lazyrad_runtime::{EngineHost, FormHost, StdlibContext};
 use xui_canvas::OffscreenBackend;
 use xui_core::app::{App, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
 use xui_core::units::Dip;
 use xui_form::{
-    Binder, BuildOptions, EventHandler, EventRef, Factories, FormDoc, LiveForm, Node, Value,
-    build_with,
+    Binder, BuildOptions, Catalog, EventHandler, EventRef, Factories, FormDoc, LiveForm, Node,
+    Value, build_with,
 };
+use xui_rhai::{EngineHost, FormHost};
 
 /// A binder that wires nothing; these tests exercise the engine, not events.
 struct NullBinder;
@@ -63,7 +62,7 @@ fn greeting_doc() -> FormDoc {
 /// returns its result.
 fn run_form<R>(doc: &FormDoc, check: impl FnOnce(&EngineHost, &Rc<LiveForm<()>>) -> R) -> R {
     let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
-    let catalog = lazyrad_catalog();
+    let catalog = Catalog::xui();
     let factories: Factories<()> = Factories::xui();
     let binder = NullBinder;
     let slot: Rc<RefCell<Option<R>>> = Rc::new(RefCell::new(None));
@@ -86,7 +85,7 @@ fn run_form<R>(doc: &FormDoc, check: impl FnOnce(&EngineHost, &Rc<LiveForm<()>>)
             Rc::clone(&form) as Rc<dyn FormHost>,
             &catalog,
             "frmMain.rhai",
-            StdlibContext::headless("frmMain"),
+            (),
         );
         *slot_inner.borrow_mut() = Some(check(&host, &form));
         TestApp
@@ -276,7 +275,7 @@ fn stop_terminates_a_running_script() {
 fn a_registered_global_resolves_in_a_handler() {
     let doc = greeting_doc();
     let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
-    let catalog = lazyrad_catalog();
+    let catalog = Catalog::xui();
     let factories: Factories<()> = Factories::xui();
     let binder = NullBinder;
     let spec = PlatformSpec::new("lazyrad-runtime globals").size(Dip(320.0), Dip(200.0));
@@ -297,7 +296,7 @@ fn a_registered_global_resolves_in_a_handler() {
             Rc::clone(&form) as Rc<dyn FormHost>,
             &catalog,
             "frmMain.rhai",
-            StdlibContext::headless("frmMain"),
+            (),
         );
         host.set_global("app", rhai::Dynamic::from("LazyRAD".to_owned()));
 
@@ -316,7 +315,7 @@ fn a_registered_global_resolves_in_a_handler() {
 }
 
 /// Runs `fn bad()` with `body` and returns the located error.
-fn bad_call(body: &str) -> lazyrad_runtime::ScriptError {
+fn bad_call(body: &str) -> xui_rhai::ScriptError {
     let doc = greeting_doc();
     let source = format!(
         "fn bad() {{
@@ -407,7 +406,7 @@ fn a_string_index_reads_and_writes_a_real_property() {
 }
 
 /// Compiles and prepares `source`, calls `bad`, and returns the error.
-fn prepared_error(source: &str) -> lazyrad_runtime::ScriptError {
+fn prepared_error(source: &str) -> xui_rhai::ScriptError {
     let doc = greeting_doc();
     run_form(&doc, |host, _form| {
         let ast = host.compile(source).expect("compiles");

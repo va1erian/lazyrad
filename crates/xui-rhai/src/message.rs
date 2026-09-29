@@ -5,11 +5,11 @@
 //! A Rhai handler never touches the toolkit directly. When the standard library
 //! needs the host to do something the script cannot do itself — open a message
 //! box, close a window, quit — it pushes a [`Msg`] onto the shared pending
-//! queue. [`crate::form::FormApp`] drains that queue after the handler returns
+//! queue. The host's application drains that queue after the handler returns
 //! and performs the work, so a UI call never re-enters the Rhai engine.
 //!
 //! [`Pending`] is the queue itself: an [`Rc`] so the engine host, the standard
-//! library and every [`crate::control::FormRef`] in a form share one queue.
+//! library and every form reference in a form share one queue.
 
 use std::cell::RefCell;
 use std::rc::Rc;

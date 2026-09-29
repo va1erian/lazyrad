@@ -26,7 +26,8 @@ use std::path::Path;
 
 use lazyrad_project::{Diagnostic, DiagnosticKind};
 
-use crate::error::ScriptError;
+use xui_rhai::ScriptError;
+
 use crate::form::{FormRuntime, RuntimeError, open_project};
 
 /// Every problem that would stop a project from starting.

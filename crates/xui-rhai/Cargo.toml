@@ -1,0 +1,19 @@
+[package]
+name = "xui-rhai"
+description = "Script xui-form forms with Rhai: value conversion, control handles, the engine host and event binding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xui-core.workspace = true
+xui-form.workspace = true
+rhai.workspace = true
+
+[dev-dependencies]
+xui-canvas.workspace = true

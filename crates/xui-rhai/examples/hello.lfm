@@ -1,0 +1,33 @@
+format = 1
+
+[window]
+name = "main_form"
+title = "xui-rhai"
+width = 320
+height = 190
+
+[[node]]
+kind = "Edit"
+name = "name_edit"
+left = 16
+top = 16
+width = 200
+height = 26
+text = "World"
+
+[[node]]
+kind = "Button"
+name = "greet_button"
+left = 16
+top = 54
+width = 120
+height = 30
+text = "Greet"
+
+[[node]]
+kind = "Label"
+name = "result_label"
+left = 16
+top = 96
+width = 280
+height = 28
