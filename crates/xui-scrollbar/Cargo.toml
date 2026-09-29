@@ -1,0 +1,14 @@
+[package]
+name = "xui-scrollbar"
+description = "Scrollbar geometry and painting shared by the LazyRAD editor and property grid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xui-core.workspace = true
