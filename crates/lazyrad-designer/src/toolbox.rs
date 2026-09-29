@@ -4,8 +4,9 @@
 //!
 //! xui's [`Toolbar`](xui_core::widget::Toolbar) has text labels only (PLAN.md
 //! gap G9), so the toolbox is a small [`Custom`](xui_core::backend::NodeKind)
-//! grid that draws each entry with `Canvas` calls: a simple vector icon plus the
-//! control's kind name (`Button`, `Edit`, …).
+//! grid that draws each entry with xui's icon API: a [`Lucide`] outline from
+//! [`xui_core::icon::draw_icon`] plus the control's kind name (`Button`, `Edit`,
+//! …). No icon is hand-drawn here.
 //!
 //! The widget owns the *tool selection*, not the form. It maps a click to
 //! [`ToolboxMsg::Select`] and a double-click to [`ToolboxMsg::Activate`], each
@@ -24,11 +25,12 @@ use std::rc::Rc;
 
 use xui_core::app::Ui;
 use xui_core::backend::{BackendError, Canvas, Event, NodeKind, NodeSpec, TextStyle, WidgetId};
-use xui_core::geometry::{Point, Rect};
+use xui_core::geometry::Rect;
+use xui_core::icon::draw_icon;
 use xui_core::message::{Key, MouseButton};
 use xui_core::units::Dip;
 use xui_core::widget::Control;
-use xui_core::{Color, Theme};
+use xui_core::{Lucide, Theme};
 
 /// The Iteration 1 control kinds the toolbox offers, by xui kind name.
 pub const CONTROL_KINDS: [&str; 8] = [
@@ -88,6 +90,28 @@ impl Tool {
         match self {
             Tool::Pointer => "Pointer",
             Tool::Control(kind) => kind,
+        }
+    }
+
+    /// The Lucide outline drawn on the tile.
+    ///
+    /// The mapping is per control kind; an unknown kind falls back to
+    /// [`Lucide::Square`] so a catalog entry added without an icon still draws
+    /// something recognisable rather than nothing.
+    pub fn lucide(&self) -> Lucide {
+        match self {
+            Tool::Pointer => Lucide::MousePointer2,
+            Tool::Control(kind) => match kind.as_str() {
+                "Button" => Lucide::SquareMousePointer,
+                "Edit" => Lucide::TextCursorInput,
+                "Label" => Lucide::Type,
+                "CheckBox" => Lucide::SquareCheck,
+                "RadioGroup" => Lucide::CircleDot,
+                "GroupBox" => Lucide::Group,
+                "ListView" => Lucide::List,
+                "ComboBox" => Lucide::ChevronsUpDown,
+                _ => Lucide::Square,
+            },
         }
     }
 }
@@ -288,108 +312,11 @@ fn paint(canvas: &mut dyn Canvas, tools: &[Tool], state: &State, theme: &Theme) 
             tile.left + 4 + icon,
             tile.top + (tile.height() + icon) / 2,
         );
-        draw_icon(canvas, tool, icon_rect, theme.text);
+        draw_icon(canvas, tool.lucide(), icon_rect, theme.text, dpi);
 
         let label_rect = Rect::new(icon_rect.right + 6, tile.top, tile.right - 2, tile.bottom);
         let style = TextStyle::new(theme.text, LABEL_SIZE).middle();
         canvas.draw_text(tool.label(), label_rect, &style);
-    }
-}
-
-/// Draws a simple vector icon for `tool` in `rect`.
-fn draw_icon(canvas: &mut dyn Canvas, tool: &Tool, rect: Rect, color: Color) {
-    let stroke = 1.0;
-    let width = rect.width();
-    let height = rect.height();
-    let at = |fx: f32, fy: f32| {
-        Point::new(
-            rect.left + (fx * width as f32) as i32,
-            rect.top + (fy * height as f32) as i32,
-        )
-    };
-    match tool {
-        Tool::Pointer => {
-            let arrow = [
-                at(0.20, 0.05),
-                at(0.20, 0.85),
-                at(0.42, 0.62),
-                at(0.58, 0.95),
-                at(0.72, 0.86),
-                at(0.56, 0.55),
-                at(0.82, 0.48),
-            ];
-            canvas.fill_polygon(&arrow, color);
-        }
-        Tool::Control(kind) => match kind.as_str() {
-            "Button" => {
-                canvas.stroke_rounded_rect(rect, 3.0, color, stroke);
-                canvas.draw_line(at(0.28, 0.75), at(0.72, 0.75), color, stroke);
-            }
-            "Edit" => {
-                canvas.stroke_rect(rect, color, stroke);
-                canvas.draw_line(at(0.22, 0.18), at(0.22, 0.82), color, stroke);
-            }
-            "Label" => {
-                canvas.draw_line(at(0.10, 0.32), at(0.90, 0.32), color, stroke);
-                canvas.draw_line(at(0.10, 0.68), at(0.66, 0.68), color, stroke);
-            }
-            "CheckBox" => {
-                let box_ = Rect::new(
-                    rect.left,
-                    rect.top + height / 4,
-                    rect.left + width / 2,
-                    rect.top + 3 * height / 4,
-                );
-                canvas.stroke_rect(box_, color, stroke);
-                canvas.draw_line(
-                    Point::new(box_.left + 2, box_.top + box_.height() / 2),
-                    Point::new(box_.left + box_.width() / 2, box_.bottom - 2),
-                    color,
-                    stroke,
-                );
-                canvas.draw_line(
-                    Point::new(box_.left + box_.width() / 2, box_.bottom - 2),
-                    Point::new(box_.right - 2, box_.top + 2),
-                    color,
-                    stroke,
-                );
-                canvas.draw_line(
-                    Point::new(rect.left + 3 * width / 5, rect.top + height / 2),
-                    Point::new(rect.right, rect.top + height / 2),
-                    color,
-                    stroke,
-                );
-            }
-            "RadioGroup" => {
-                let radius = (width.min(height) / 2) as f32 - 1.0;
-                let center = Point::new(rect.left + width / 3, rect.top + height / 2);
-                canvas.stroke_ellipse(center, radius, radius, color, stroke);
-                canvas.fill_ellipse(center, radius / 2.0, radius / 2.0, color);
-                canvas.draw_line(
-                    Point::new(rect.left + 3 * width / 5, rect.top + height / 2),
-                    Point::new(rect.right, rect.top + height / 2),
-                    color,
-                    stroke,
-                );
-            }
-            "GroupBox" => {
-                canvas.stroke_rect(rect, color, stroke);
-                canvas.draw_line(at(0.10, 0.30), at(0.70, 0.30), color, stroke);
-            }
-            "ListView" => {
-                canvas.stroke_rect(rect, color, stroke);
-                for row in [0.32_f32, 0.52, 0.72] {
-                    canvas.draw_line(at(0.15, row), at(0.70, row), color, stroke);
-                }
-            }
-            "ComboBox" => {
-                canvas.stroke_rect(rect, color, stroke);
-                canvas.draw_line(at(0.15, 0.35), at(0.55, 0.35), color, stroke);
-                canvas.draw_line(at(0.68, 0.40), at(0.78, 0.55), color, stroke);
-                canvas.draw_line(at(0.78, 0.55), at(0.88, 0.40), color, stroke);
-            }
-            _ => {}
-        },
     }
 }
 
@@ -505,6 +432,30 @@ mod tests {
     fn the_pointer_has_no_kind() {
         assert_eq!(Tool::Pointer.kind(), None);
         assert_eq!(Tool::Pointer.label(), "Pointer");
+    }
+
+    #[test]
+    fn every_control_kind_has_a_lucide_icon() {
+        let expected = [
+            ("Button", Lucide::SquareMousePointer),
+            ("Edit", Lucide::TextCursorInput),
+            ("Label", Lucide::Type),
+            ("CheckBox", Lucide::SquareCheck),
+            ("RadioGroup", Lucide::CircleDot),
+            ("GroupBox", Lucide::Group),
+            ("ListView", Lucide::List),
+            ("ComboBox", Lucide::ChevronsUpDown),
+        ];
+        for (kind, icon) in expected {
+            assert!(
+                CONTROL_KINDS.contains(&kind),
+                "{kind} is in the catalog mapping but not in CONTROL_KINDS"
+            );
+            assert_eq!(Tool::control(kind).lucide(), icon, "{kind}");
+        }
+        assert_eq!(Tool::Pointer.lucide(), Lucide::MousePointer2);
+        // An unknown kind still draws a fallback rather than nothing.
+        assert_eq!(Tool::control("Unknown").lucide(), Lucide::Square);
     }
 
     #[test]

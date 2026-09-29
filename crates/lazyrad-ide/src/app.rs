@@ -15,15 +15,13 @@
 //! the title bar and prompts on exit.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
 use xui_code_editor::{Editor, Marker, MarkerKind, Query, RhaiHighlighter};
 use xui_core::app::{App, Ui};
-use xui_core::backend::{
-    Backend, BackendError, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId,
-};
+use xui_core::backend::{BackendError, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId};
 use xui_core::geometry::Point;
 use xui_core::layout::Dock;
 use xui_core::units::Px;
@@ -31,7 +29,7 @@ use xui_core::widget::{
     ComboBox, Dialog, DialogAction, HasText, Label, ListView, Menu, MenuId, Panel, Split, Tabs,
     Toolbar, TreeView,
 };
-use xui_core::{Dip, Rect, dip};
+use xui_core::{Dip, Lucide, Rect, dip};
 
 use crate::command::{Command, Dispatcher};
 use crate::compile::{self, CodeDiagnostic, CompileScheduler};
@@ -188,19 +186,84 @@ enum Pending {
 /// selection closure.
 pub type MenuCommands = Rc<Vec<(MenuId, Command)>>;
 
-/// The toolbar's items and the command each dispatches.
-const TOOLBAR: &[(&str, Command)] = &[
-    ("New", Command::NewProject),
-    ("Open", Command::OpenProject),
-    ("Save", Command::Save),
-    ("Save All", Command::SaveAll),
-    ("Undo", Command::Undo),
-    ("Redo", Command::Redo),
-    ("Cut", Command::Cut),
-    ("Copy", Command::Copy),
-    ("Paste", Command::Paste),
-    ("Run", Command::RunStart),
-    ("End", Command::RunEnd),
+/// One main-toolbar entry: the Lucide icon, the command it dispatches, and an
+/// optional visible label (`Run` and `End` keep one; the rest are icon-only).
+struct ToolbarItem {
+    /// The Lucide outline the item draws.
+    icon: Lucide,
+    /// The command a click (or Return on the focused item) dispatches.
+    command: Command,
+    /// The visible label, or `None` for an icon-only item.
+    label: Option<&'static str>,
+}
+
+impl ToolbarItem {
+    /// The hover tooltip: the command's name, plus its shortcut when it has one.
+    fn tooltip(&self) -> String {
+        match self.command.shortcut_text() {
+            Some(shortcut) => format!("{} ({shortcut})", self.command.label()),
+            None => self.command.label(),
+        }
+    }
+}
+
+/// The toolbar's items, in order, and the command each dispatches.
+const TOOLBAR: &[ToolbarItem] = &[
+    ToolbarItem {
+        icon: Lucide::FilePlus,
+        command: Command::NewProject,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::FolderOpen,
+        command: Command::OpenProject,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Save,
+        command: Command::Save,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::SaveAll,
+        command: Command::SaveAll,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Undo2,
+        command: Command::Undo,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Redo2,
+        command: Command::Redo,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Scissors,
+        command: Command::Cut,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Copy,
+        command: Command::Copy,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::ClipboardPaste,
+        command: Command::Paste,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Play,
+        command: Command::RunStart,
+        label: Some("Run"),
+    },
+    ToolbarItem {
+        icon: Lucide::Square,
+        command: Command::RunEnd,
+        label: Some("End"),
+    },
 ];
 
 /// The five context-menu entries, in id order.
@@ -281,9 +344,6 @@ struct Document {
 pub struct IdeApp {
     settings: Settings,
     dispatcher: Dispatcher,
-    /// The backend, so the window title can show the project and its dirty `*`
-    /// (xui's [`Ui`] has no retitle call).
-    backend: Rc<dyn Backend>,
     /// Every menu entry that dispatches a command, for enabling/disabling.
     menu_commands: MenuCommands,
     /// Kept alive so the menu's nodes live as long as the app; replaced when
@@ -356,12 +416,7 @@ pub struct IdeApp {
 
 impl IdeApp {
     /// Builds the whole window and returns the app the runtime drives.
-    pub fn build(
-        ui: &Ui<Msg>,
-        settings: Settings,
-        recent: Vec<PathBuf>,
-        backend: Rc<dyn Backend>,
-    ) -> UiResult<IdeApp> {
+    pub fn build(ui: &Ui<Msg>, settings: Settings, recent: Vec<PathBuf>) -> UiResult<IdeApp> {
         let dpi = ui.dpi();
         let client = ui.client_rect();
 
@@ -375,12 +430,16 @@ impl IdeApp {
         let (menu, menu_commands) = build_menu(ui, menu_rect, &recent)?;
         let menu_id = menu.id().unwrap_or(WidgetId::NONE);
 
-        let toolbar_labels: Vec<&str> = TOOLBAR.iter().map(|(label, _)| *label).collect();
-        let toolbar = Toolbar::new(ui, toolbar_rect, &toolbar_labels)?.on_click(|index| {
-            TOOLBAR
-                .get(index)
-                .map(|(_, command)| Msg::Command(*command))
-        });
+        let mut toolbar = Toolbar::empty(ui, toolbar_rect)?;
+        for entry in TOOLBAR {
+            let tooltip = entry.tooltip();
+            toolbar = match entry.label {
+                Some(label) => toolbar.item_with_text(entry.icon, &tooltip, label),
+                None => toolbar.item(entry.icon, &tooltip),
+            };
+        }
+        let toolbar =
+            toolbar.on_click(|index| TOOLBAR.get(index).map(|entry| Msg::Command(entry.command)));
         let toolbar_id = toolbar.id();
 
         // The nested splits. Each pane is a container created through the
@@ -508,7 +567,6 @@ impl IdeApp {
         let mut app = IdeApp {
             settings,
             dispatcher: Dispatcher::new(),
-            backend,
             menu_commands,
             menu,
             menu_id,
@@ -754,7 +812,7 @@ impl IdeApp {
         if self.project_dirty() {
             title.push('*');
         }
-        self.backend.set_window_title(ui.window(), &title);
+        ui.set_window_title(&title);
     }
 
     /// Whether the project or any document has unsaved changes.
@@ -908,6 +966,12 @@ impl IdeApp {
             Ok(session) => self.adopt_project(session, ui),
             Err(error) => self.log(ui, format!("The project could not be created: {error}")),
         }
+    }
+
+    /// Opens the project in `dir`, as a known path rather than through a file
+    /// dialog. Replaces the current project, saving unsaved changes first.
+    pub fn open_project(&mut self, dir: &Path, ui: &mut Ui<Msg>) {
+        self.open_replacing(dir.to_path_buf(), ui);
     }
 
     /// Opens the project in `dir` in place of the current one, asking to save
@@ -2243,7 +2307,86 @@ mod tests {
     use crate::project::SessionError;
     use xui_canvas::OffscreenBackend;
     use xui_core::Key;
+    use xui_core::backend::Backend;
     use xui_core::run_app;
+
+    #[test]
+    fn every_toolbar_entry_has_an_icon_and_a_tooltip_naming_its_shortcut() {
+        let commands: Vec<Command> = TOOLBAR.iter().map(|entry| entry.command).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::NewProject,
+                Command::OpenProject,
+                Command::Save,
+                Command::SaveAll,
+                Command::Undo,
+                Command::Redo,
+                Command::Cut,
+                Command::Copy,
+                Command::Paste,
+                Command::RunStart,
+                Command::RunEnd,
+            ],
+            "the toolbar order does not drift"
+        );
+
+        for entry in TOOLBAR {
+            let tooltip = entry.tooltip();
+            assert!(
+                tooltip.contains(&entry.command.label()),
+                "the tooltip names the command: {tooltip}"
+            );
+            match entry.command.shortcut_text() {
+                Some(shortcut) => assert!(
+                    tooltip.contains(&shortcut),
+                    "the tooltip of {} includes {shortcut}: {tooltip}",
+                    entry.command.label()
+                ),
+                None => assert!(
+                    !tooltip.contains('('),
+                    "a command without a shortcut shows no empty chord: {tooltip}"
+                ),
+            }
+        }
+
+        // Only Run and End keep a visible label.
+        let labelled: Vec<Option<&str>> = TOOLBAR.iter().map(|entry| entry.label).collect();
+        assert_eq!(
+            labelled,
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("Run"),
+                Some("End")
+            ]
+        );
+
+        let icons: Vec<Lucide> = TOOLBAR.iter().map(|entry| entry.icon).collect();
+        assert_eq!(
+            icons,
+            [
+                Lucide::FilePlus,
+                Lucide::FolderOpen,
+                Lucide::Save,
+                Lucide::SaveAll,
+                Lucide::Undo2,
+                Lucide::Redo2,
+                Lucide::Scissors,
+                Lucide::Copy,
+                Lucide::ClipboardPaste,
+                Lucide::Play,
+                Lucide::Square,
+            ]
+        );
+    }
 
     #[test]
     fn the_shortcut_mapper_maps_and_ignores_as_expected() {
@@ -2285,10 +2428,8 @@ mod tests {
     #[test]
     fn the_ide_shell_builds_and_runs_headlessly() {
         let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
-        let backend_for_app = Rc::clone(&backend);
         run_app(backend, default_platform_spec(), move |ui| {
-            IdeApp::build(ui, Settings::default(), Vec::new(), backend_for_app)
-                .expect("the IDE builds")
+            IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds")
         })
         .expect("the offscreen backend runs to completion");
     }
@@ -2342,10 +2483,9 @@ mod tests {
         let cleanup = dir.clone();
 
         let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
-        let backend_for_app = Rc::clone(&backend);
         run_app(backend, default_platform_spec(), move |ui| {
-            let mut app = IdeApp::build(ui, Settings::default(), Vec::new(), backend_for_app)
-                .expect("the IDE builds");
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
             let session = ProjectSession::create("MyApp", &dir).expect("create");
             app.session = Some(session);
             app.dispatcher.set_project_open(true);

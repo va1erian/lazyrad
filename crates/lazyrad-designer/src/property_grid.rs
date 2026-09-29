@@ -79,10 +79,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
+use xui_core::Lucide;
 use xui_core::Theme;
 use xui_core::app::Ui;
 use xui_core::backend::{BackendError, Canvas, Event, NodeKind, NodeSpec, TextStyle, WidgetId};
 use xui_core::geometry::{Point, Rect};
+use xui_core::icon::draw_icon;
 use xui_core::message::{Key, MouseButton};
 use xui_core::units::Dip;
 use xui_core::widget::{CheckBox, ComboBox, Control};
@@ -1427,36 +1429,40 @@ fn paint_object_combo<M: 'static>(
     let style = TextStyle::new(theme.text, TEXT_SIZE).middle();
     canvas.draw_text(label, text, &style);
 
-    let (cx, cy) = (
-        combo.right - pad - arrow / 2,
-        combo.top + combo.height() / 2,
+    let side = arrow.max(4);
+    let icon_rect = Rect::new(
+        combo.right - pad - side,
+        combo.top + (combo.height() - side) / 2,
+        combo.right - pad,
+        combo.top + (combo.height() + side) / 2,
     );
-    let half = (arrow / 2).max(2);
-    let color = theme.text;
-    canvas.draw_line(
-        Point::new(cx - half, cy - half / 2),
-        Point::new(cx, cy + half / 2),
-        color,
-        1.5,
-    );
-    canvas.draw_line(
-        Point::new(cx, cy + half / 2),
-        Point::new(cx + half, cy - half / 2),
-        color,
-        1.5,
-    );
+    draw_icon(canvas, Lucide::ChevronDown, icon_rect, theme.text, dpi);
 }
 
-/// Paints the Alphabetic/Categorized tabs.
+/// Paints the Alphabetic/Categorized tabs, each with its Lucide icon.
 fn paint_tabs<M: 'static>(
     canvas: &mut dyn Canvas,
     state: &GridState<M>,
     theme: &Theme,
     layout: &Layout,
 ) {
-    for (view, rect, label) in [
-        (View::Alphabetic, layout.tab_alpha, "Alphabetic"),
-        (View::Categorized, layout.tab_cat, "Categorized"),
+    let dpi = canvas.dpi();
+    let pad = PADDING.to_px(dpi).value().max(0);
+    let gap = Dip(4.0).to_px(dpi).value().max(1);
+    let icon = Dip(16.0).to_px(dpi).value().max(1);
+    for (view, rect, label, glyph) in [
+        (
+            View::Alphabetic,
+            layout.tab_alpha,
+            "Alphabetic",
+            Lucide::ArrowDownAZ,
+        ),
+        (
+            View::Categorized,
+            layout.tab_cat,
+            "Categorized",
+            Lucide::ListTree,
+        ),
     ] {
         let active = state.view == view;
         let color = if active {
@@ -1465,8 +1471,16 @@ fn paint_tabs<M: 'static>(
         } else {
             theme.text_disabled
         };
+        let icon_rect = Rect::new(
+            rect.left + pad,
+            rect.top + (rect.height() - icon) / 2,
+            rect.left + pad + icon,
+            rect.top + (rect.height() + icon) / 2,
+        );
+        draw_icon(canvas, glyph, icon_rect, color, dpi);
+        let text = Rect::new(icon_rect.right + gap, rect.top, rect.right, rect.bottom);
         let style = TextStyle::new(color, TEXT_SIZE).middle().centered();
-        canvas.draw_text(label, rect, &style);
+        canvas.draw_text(label, text, &style);
     }
 }
 
@@ -1486,8 +1500,23 @@ fn paint_rows<M: 'static>(
             Line::Header(category) => {
                 let rect = Rect::new(0, top, layout.width, top + layout.header_h);
                 canvas.fill_rect(rect, theme.background);
+                // The category is always expanded; the chevron points down.
+                let icon = Dip(14.0).to_px(dpi).value().max(1);
+                let icon_rect = Rect::new(
+                    pad,
+                    rect.top + (rect.height() - icon) / 2,
+                    pad + icon,
+                    rect.top + (rect.height() + icon) / 2,
+                );
+                draw_icon(canvas, Lucide::ChevronDown, icon_rect, theme.text, dpi);
+                let text = Rect::new(
+                    icon_rect.right + pad,
+                    rect.top,
+                    rect.right - pad,
+                    rect.bottom,
+                );
                 let style = TextStyle::new(theme.text, TEXT_SIZE).middle().bold();
-                canvas.draw_text(category, rect.shrink(pad), &style);
+                canvas.draw_text(category, text, &style);
             }
             Line::Row(index) => {
                 let Some(row) = state.rows.get(*index) else {

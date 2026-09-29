@@ -13,6 +13,7 @@
 
 use std::time::{Duration, Instant};
 
+use xui_core::Lucide;
 use xui_core::widget::{NodeId, TreeRow};
 
 use crate::project::ProjectSession;
@@ -42,6 +43,8 @@ impl Group {
 /// What a Project Explorer row stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExplorerItem {
+    /// The project root row.
+    Project,
     /// A group header.
     Group(Group),
     /// A form item.
@@ -51,11 +54,11 @@ pub enum ExplorerItem {
 }
 
 impl ExplorerItem {
-    /// The item's name, or `None` for a group header.
+    /// The item's name, or `None` for the project root and group headers.
     pub fn name(&self) -> Option<&str> {
         match self {
             ExplorerItem::Form(name) | ExplorerItem::Module(name) => Some(name),
-            ExplorerItem::Group(_) => None,
+            ExplorerItem::Project | ExplorerItem::Group(_) => None,
         }
     }
 
@@ -74,12 +77,19 @@ pub struct Explorer {
 }
 
 impl Explorer {
-    /// Builds the groups and items of `session`.
+    /// Builds the project root, the groups and their items for `session`.
     pub fn build(session: &ProjectSession) -> Explorer {
         let mut explorer = Explorer {
             rows: Vec::new(),
             entries: Vec::new(),
         };
+        explorer.push(
+            TreeRow::new(session.name(), 0)
+                .expandable(true)
+                .expanded(true)
+                .icon(Lucide::Package),
+            ExplorerItem::Project,
+        );
         explorer.group(Group::Forms, &session.form_names());
         explorer.group(Group::Modules, &session.module_names());
         explorer
@@ -96,17 +106,18 @@ impl Explorer {
     /// Appends a group header and its item rows.
     fn group(&mut self, group: Group, names: &[&str]) {
         self.push(
-            TreeRow::new(group.label(), 0)
+            TreeRow::new(group.label(), 1)
                 .expandable(true)
-                .expanded(true),
+                .expanded(true)
+                .icon(Lucide::Folder),
             ExplorerItem::Group(group),
         );
         for name in names {
-            let kind = match group {
-                Group::Forms => ExplorerItem::Form((*name).to_owned()),
-                Group::Modules => ExplorerItem::Module((*name).to_owned()),
+            let (kind, icon) = match group {
+                Group::Forms => (ExplorerItem::Form((*name).to_owned()), Lucide::AppWindow),
+                Group::Modules => (ExplorerItem::Module((*name).to_owned()), Lucide::FileCode),
             };
-            self.push(TreeRow::new(*name, 1), kind);
+            self.push(TreeRow::new(*name, 2).icon(icon), kind);
         }
     }
 
@@ -192,26 +203,51 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_has_a_group_per_item_kind() {
+    fn the_tree_has_a_project_root_and_a_group_per_item_kind() {
         let dir = scratch("build");
         let mut session = ProjectSession::create("MyApp", &dir).expect("create");
         session.add_module();
         let explorer = Explorer::build(&session);
 
         let labels: Vec<&str> = explorer.rows.iter().map(|row| row.label.as_str()).collect();
-        assert_eq!(labels, ["Forms", "Form1", "Modules", "Module1"]);
-        assert_eq!(explorer.entry(0), Some(&ExplorerItem::Group(Group::Forms)));
         assert_eq!(
-            explorer.entry(1),
+            labels,
+            ["MyApp", "Forms", "Form1", "Modules", "Module1"],
+            "the project is a root row above the groups"
+        );
+        assert_eq!(explorer.entry(0), Some(&ExplorerItem::Project));
+        assert_eq!(explorer.entry(1), Some(&ExplorerItem::Group(Group::Forms)));
+        assert_eq!(
+            explorer.entry(2),
             Some(&ExplorerItem::Form("Form1".to_owned()))
         );
         assert_eq!(
-            explorer.entry(3),
+            explorer.entry(4),
             Some(&ExplorerItem::Module("Module1".to_owned()))
         );
-        assert_eq!(explorer.node_of("Form1"), Some(1));
-        assert_eq!(explorer.node_of("Module1"), Some(3));
+        assert_eq!(explorer.node_of("Form1"), Some(2));
+        assert_eq!(explorer.node_of("Module1"), Some(4));
         assert_eq!(explorer.entry(99), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn each_row_carries_the_icon_of_its_kind() {
+        let dir = scratch("icons");
+        let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+        session.add_module();
+        let explorer = Explorer::build(&session);
+
+        let icon = |row: &TreeRow| row.icon.clone();
+        assert_eq!(icon(&explorer.rows[0]), Some(Lucide::Package.into()));
+        assert_eq!(icon(&explorer.rows[1]), Some(Lucide::Folder.into()));
+        assert_eq!(icon(&explorer.rows[2]), Some(Lucide::AppWindow.into()));
+        assert_eq!(icon(&explorer.rows[4]), Some(Lucide::FileCode.into()));
+
+        for row in &explorer.rows {
+            assert!(row.icon.is_some(), "every row has an icon: {}", row.label);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

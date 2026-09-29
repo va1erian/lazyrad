@@ -106,6 +106,11 @@ pub struct Settings {
     pub recent_projects: Vec<PathBuf>,
     /// The docked pane sizes.
     pub panes: PaneSizes,
+    /// Where [`Settings::save`] writes: the file these settings were loaded
+    /// from. Defaults have none, so a `Settings::default()` (every test) never
+    /// touches the user's real settings file.
+    #[serde(skip)]
+    store: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -115,6 +120,7 @@ impl Default for Settings {
             editor_font_size: 12.0,
             recent_projects: Vec::new(),
             panes: PaneSizes::default(),
+            store: None,
         }
     }
 }
@@ -128,6 +134,18 @@ impl Settings {
     pub fn path() -> Option<PathBuf> {
         let dirs = directories::ProjectDirs::from("", "", APP)?;
         Some(dirs.config_dir().join("settings.toml"))
+    }
+
+    /// These settings, saved to `path` from now on (the IDE uses the default
+    /// path even when the file there could not be read).
+    pub fn stored_at(mut self, path: PathBuf) -> Settings {
+        self.store = Some(path);
+        self
+    }
+
+    /// Where [`Settings::save`] writes, if anywhere.
+    pub fn store(&self) -> Option<&Path> {
+        self.store.as_deref()
     }
 
     /// Reads the settings file, or returns the defaults when it is missing.
@@ -144,17 +162,20 @@ impl Settings {
     /// Reads settings from `path`; a missing file yields the defaults, and any
     /// other I/O error is reported.
     pub fn load_from(path: &Path) -> Result<Settings, SettingsError> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => Settings::from_toml(&text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
-            Err(error) => Err(SettingsError::Io(error)),
-        }
+        let settings = match std::fs::read_to_string(path) {
+            Ok(text) => Settings::from_toml(&text)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            Err(error) => return Err(SettingsError::Io(error)),
+        };
+        Ok(settings.stored_at(path.to_path_buf()))
     }
 
-    /// Writes the settings to the default path, creating the directory.
+    /// Writes the settings back to the file they were loaded from, creating
+    /// its directory. Settings that were never loaded (the defaults, as in
+    /// tests) are not written anywhere.
     pub fn save(&self) -> Result<(), SettingsError> {
-        match Settings::path() {
-            Some(path) => self.save_to(&path),
+        match &self.store {
+            Some(path) => self.save_to(path),
             None => Ok(()),
         }
     }
@@ -286,14 +307,18 @@ mod tests {
         settings.save_to(&path).expect("settings save");
 
         let loaded = Settings::load_from(&path).expect("settings load");
-        assert_eq!(loaded, settings);
+        // Loaded settings also remember the file they came from.
+        assert_eq!(loaded, settings.clone().stored_at(path.clone()));
 
         // A second save replaces the file and leaves no temporary behind.
         settings.theme = ThemeChoice::Dark;
         settings
             .save_to(&path)
             .expect("settings save over an existing file");
-        assert_eq!(Settings::load_from(&path).expect("settings load"), settings);
+        assert_eq!(
+            Settings::load_from(&path).expect("settings load"),
+            settings.clone().stored_at(path.clone())
+        );
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .expect("settings directory is readable")
             .filter_map(Result::ok)
@@ -318,7 +343,7 @@ mod tests {
         let path = std::env::temp_dir().join("lazyrad-settings-does-not-exist.toml");
         assert_eq!(
             Settings::load_from(&path).expect("a missing file is not an error"),
-            Settings::default()
+            Settings::default().stored_at(path.clone())
         );
     }
 
@@ -341,5 +366,35 @@ mod tests {
             Settings::load_from(dir),
             Err(SettingsError::Io(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+
+    #[test]
+    fn default_settings_are_not_written_anywhere() {
+        let settings = Settings::default();
+        assert_eq!(settings.store(), None);
+        settings.save().expect("saving defaults is a no-op");
+    }
+
+    #[test]
+    fn loaded_settings_save_back_to_their_file() {
+        let dir =
+            std::env::temp_dir().join(format!("lazyrad-settings-store-{}", std::process::id()));
+        let path = dir.join("settings.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut settings = Settings::load_from(&path).expect("a missing file loads defaults");
+        assert_eq!(settings.store(), Some(path.as_path()));
+        settings.theme = ThemeChoice::Dark;
+        settings.save().expect("saved");
+        assert_eq!(
+            Settings::load_from(&path).expect("reloaded").theme,
+            ThemeChoice::Dark
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

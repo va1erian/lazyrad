@@ -336,6 +336,76 @@ fn the_grid_paints_without_panicking() {
     .expect("run_app succeeds");
 }
 
+/// Whether any pixel in `(x, y, w, h)` differs from `background`.
+fn painted(
+    image: &xui_canvas::RgbaImage,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    background: [u8; 4],
+) -> bool {
+    (y..y + h)
+        .any(|row| (x..x + w).any(|col| image.pixel(col, row).is_some_and(|px| px != background)))
+}
+
+#[test]
+fn the_tabs_and_category_headers_show_lucide_icons() {
+    let backend = Rc::new(OffscreenBackend::new());
+    let trait_backend: Rc<dyn Backend> = Rc::clone(&backend) as Rc<dyn Backend>;
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let spec = PlatformSpec::new("grid").size(Dip(560.0), Dip(240.0));
+
+    run_app(trait_backend, spec, move |ui| {
+        // The grid's painter works in its own coordinates, so this test gives
+        // it the window origin and puts the designer beside it.
+        let designer = Designer::new(
+            ui,
+            Rect::new(240, 0, 560, 200),
+            button_doc(),
+            Rc::clone(&catalog),
+            Msg::Designer,
+        )
+        .expect("the designer builds");
+        let designer = Rc::new(RefCell::new(designer));
+        let grid = PropertyGrid::new(
+            ui,
+            Rect::new(0, 0, 216, 200),
+            Rc::clone(&designer),
+            catalog,
+            Msg::Grid,
+        )
+        .expect("the grid builds");
+        designer.borrow().select_node("ok_button", ui);
+        grid.update(PropertyGridMsg::SetView(View::Categorized), ui);
+        let image = backend.render(ui.window()).expect("the window renders");
+
+        // Compare each icon with its own surface, sampled just left of it: a
+        // selected tab or a header has its own fill, which alone would differ
+        // from the grid background even with no icon drawn.
+        let alphabetic_bg = image.pixel(5, 35).expect("an Alphabetic tab sample");
+        let categorized_bg = image.pixel(109, 35).expect("a Categorized tab sample");
+        let header_bg = image.pixel(2, 62).expect("a category header sample");
+        // Tab icons: 16px, 4px in from each tab's left edge (tabs at y 32).
+        assert!(
+            painted(&image, 8, 35, 16, 16, alphabetic_bg),
+            "the Alphabetic tab shows its icon"
+        );
+        assert!(
+            painted(&image, 112, 35, 16, 16, categorized_bg),
+            "the Categorized tab shows its icon"
+        );
+        // The first category header's expander chevron (body top 58).
+        assert!(
+            painted(&image, 4, 62, 14, 14, header_bg),
+            "the category header shows its chevron"
+        );
+
+        Editor { designer, grid }
+    })
+    .expect("run_app succeeds");
+}
+
 #[test]
 fn scrolling_is_clamped_to_the_rows() {
     let ((up, down), _) = with_editor(button_doc(), |editor, ui| {
