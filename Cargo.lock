@@ -1269,6 +1269,7 @@ dependencies = [
  "xui-canvas",
  "xui-core",
  "xui-form",
+ "xui-rhai",
 ]
 
 [[package]]
@@ -3541,6 +3542,16 @@ source = "git+https://github.com/va1erian/xui?rev=54d23ea18a4e6d0c4783950f05ecfb
 dependencies = [
  "glow",
  "xui-core",
+]
+
+[[package]]
+name = "xui-rhai"
+version = "0.1.0"
+dependencies = [
+ "rhai",
+ "xui-canvas",
+ "xui-core",
+ "xui-form",
 ]
 
 [[package]]

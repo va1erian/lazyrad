@@ -18,3 +18,4 @@ time.workspace = true
 xui-canvas.workspace = true
 xui-core.workspace = true
 xui-form.workspace = true
+xui-rhai.workspace = true

@@ -25,7 +25,7 @@
 //! # Non-blocking `msg_box`
 //!
 //! `msg_box` is asynchronous in Iteration 1. It records a
-//! [`Msg::MsgBox`](crate::message::Msg::MsgBox) on the host's pending queue and
+//! [`Msg::MsgBox`] on the host's pending queue and
 //! returns immediately; the application opens the in-window dialog and later
 //! calls the optional callback with the button pressed (`"ok"`, `"cancel"`,
 //! `"yes"` or `"no"`). A blocking version needs `Ui::open_modal`, which the
@@ -38,8 +38,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Position};
 use time::OffsetDateTime;
 
-use crate::engine::EngineHost;
-use crate::message::{Msg, MsgBoxButtons, Pending};
+use xui_rhai::EngineHost;
+use xui_rhai::message::{Msg, MsgBoxButtons, Pending};
 
 /// The host state the standard library needs from the running application.
 ///
@@ -72,9 +72,11 @@ impl StdlibContext {
 
 /// Registers the whole standard library on `host`.
 ///
-/// This is the single place the stdlib is installed: [`EngineHost::new`] calls
-/// it, so every engine (the player's, the designer preview's, the syntax
-/// checker's) sees the same functions and globals.
+/// This is the single place the stdlib is installed: the [`EngineSetup`] impl
+/// for [`StdlibContext`] calls it, so every engine (the player's, the designer
+/// preview's, the syntax checker's) sees the same functions and globals.
+///
+/// [`EngineSetup`]: xui_rhai::EngineSetup
 pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     let engine = host.engine_mut();
     register_output(engine);
@@ -84,6 +86,14 @@ pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     register_app(engine);
     register_msg_box(engine, context);
     host.set_global("app", Dynamic::from(app_object(context)));
+}
+
+/// Installs the LazyRAD standard library when an [`EngineHost`] is built,
+/// so the engine setup stays out of the reusable `xui-rhai` crate.
+impl xui_rhai::EngineSetup for StdlibContext {
+    fn setup(self, host: &mut EngineHost) {
+        register(host, &self);
+    }
 }
 
 /// Registers a global native function with its Rhai parameter names and doc

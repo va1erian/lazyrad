@@ -1,25 +1,23 @@
 #![forbid(unsafe_code)]
 
-//! Loading a project's forms and wiring VB-style `Control_Event` handlers.
+//! Loading a project's forms and running them.
 //!
-//! This is the runtime side of PLAN.md §3 and §4: [`FormRuntime`] loads every
+//! This is the project side of PLAN.md §3 and §4: [`FormRuntime`] loads every
 //! form and standard module named by a [`Project`], and [`FormApp`] builds one
-//! form into a live [`xui`](xui_core) window. The mapping from a schema control
-//! type to an `xui` widget is [`xui_form`]'s job (its factories), so nothing
-//! here is written per widget kind; this module only connects the pieces.
+//! form into a live [`xui`](xui_core) window and routes its messages. The
+//! reusable "script an `xui-form` with Rhai" machinery — the Rhai engine host,
+//! the `<control>_<event>` binding, the scripted form and its window events —
+//! lives in [`xui_rhai`] and is re-exported through [`crate::engine`] and this
+//! module.
 //!
 //! # Event wiring
 //!
-//! The form's `.rhai` script is compiled once to learn the function names it
-//! defines. [`ScriptBinder`] then answers, for each widget event, whether a
-//! handler exists. It wires the event to a [`Msg::Event`] only when it does, so
-//! a missing handler means the event is simply not wired and clicking does
-//! nothing. [`FormApp::update`] runs the matching Rhai function through the
-//! form's [`EngineHost`].
-//!
 //! A handler's name is the control name and `xui`'s event name in snake_case,
 //! joined by `_` ([`handler_name`]): `hello_button_click`, `name_edit_change`,
-//! `agree_check_toggle` (PLAN.md §1.1).
+//! `agree_check_toggle` (PLAN.md §1.1). An event is wired only when the script
+//! defines the matching function, so clicking a control with no handler does
+//! nothing. [`FormInstance::run`] runs the matching Rhai function through the
+//! form's engine host.
 //!
 //! # Window events
 //!
@@ -46,26 +44,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use rhai::{AST, Dynamic, FnPtr};
+use rhai::{Dynamic, FnPtr};
 use xui_canvas::WinitBackend;
 use xui_core::app::{App, Ui, WindowHandle, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
 use xui_core::units::Dip;
 use xui_core::{Dialog, DialogAction};
-use xui_form::{
-    Binder, BuildOptions, Catalog, EventHandler, EventRef, Factories, FormDoc, LiveForm, Value,
-    build_with,
-};
+use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
-use crate::control::FormHost;
-use crate::engine::EngineHost;
-use crate::error::ScriptError;
-use crate::message::Pending;
 use crate::stdlib::StdlibContext;
+use xui_rhai::form::{FormError, ScriptForm, ScriptSource};
+use xui_rhai::message::Pending;
+use xui_rhai::{EngineHost, ScriptError};
 
-pub use crate::message::{Msg, MsgBoxButtons};
+pub use xui_rhai::form::{FORM, handler_name};
+pub use xui_rhai::message::{Msg, MsgBoxButtons};
 
 /// One form's source: its document, its code-behind and where the code lives.
 #[derive(Clone, Debug)]
@@ -342,7 +337,7 @@ impl FormRuntime {
         // does not. Intercepting the close with a message would skip that quit.
         let root_for_close = Rc::clone(&root);
         ui.on_close(move || {
-            if let Err(error) = root_for_close.run(FORM, "Close", &[]) {
+            if let Err(error) = root_for_close.close() {
                 eprintln!("lazyrad: {error}");
             }
             None
@@ -374,15 +369,12 @@ impl FormRuntime {
 
 /// A form built and wired: the live widgets plus the script host.
 ///
-/// All of its methods borrow it, so a [`FormApp`] shares one through an
-/// [`Rc`]-and-calls it from its `update`.
+/// It is a thin wrapper over [`xui_rhai::form::ScriptForm`] that registers the
+/// project's standard modules and its form references before the script is
+/// compiled. All of its methods borrow it, so a [`FormApp`] shares one through
+/// an [`Rc`]-and-calls it from its `update`.
 pub struct FormInstance {
-    name: String,
-    form: Rc<LiveForm<Msg>>,
-    host: EngineHost,
-    ast: AST,
-    /// Every function the script defines, mapped to its parameter count.
-    functions: BTreeMap<String, usize>,
+    script: ScriptForm,
 }
 
 impl FormInstance {
@@ -392,66 +384,47 @@ impl FormInstance {
         source: &FormSource,
         runtime: &Rc<FormRuntime>,
     ) -> Result<FormInstance, RuntimeError> {
-        // Compile once to learn the handler names the binder must consult.
-        let handler_names = script_functions(&source.code, &source.code_file)?;
-        let binder = ScriptBinder {
-            form: source.name.clone(),
-            functions: Rc::new(handler_names),
-        };
-
-        let factories: Factories<Msg> = Factories::xui();
-        let live = Rc::new(build_with(
-            ui,
-            &source.doc,
-            &runtime.catalog,
-            &factories,
-            &binder,
-            BuildOptions::default(),
-        )?);
-
         let stdlib = StdlibContext {
             form: source.name.clone(),
             pending: Rc::clone(&runtime.pending),
             app_title: runtime.project().name.clone(),
             app_path: runtime.path().display().to_string(),
         };
-        let mut host = EngineHost::new(
-            Rc::clone(&live) as Rc<dyn FormHost>,
+        let runtime_for_setup = Rc::clone(runtime);
+        let script = ScriptForm::build(
+            ui,
+            &source.doc,
             &runtime.catalog,
-            &source.code_file,
+            ScriptSource {
+                name: &source.name,
+                code: &source.code,
+                file: &source.code_file,
+            },
             stdlib,
-        );
-        for module in &runtime.modules {
-            host.register_module(&module.name, &module.file, &module.source)?;
-        }
-        let ast = host.compile(&source.code)?;
-        let functions = ast
-            .iter_functions()
-            .map(|function| (function.name.to_owned(), function.params.len()))
-            .collect();
-        register_form_refs(&mut host, runtime);
-        // Top-level code runs once, here; handlers run on the imports-only AST.
-        let ast = host.prepare(&ast)?;
+            move |host| {
+                for module in &runtime_for_setup.modules {
+                    host.register_module(&module.name, &module.file, &module.source)?;
+                }
+                register_form_refs(host, &runtime_for_setup);
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            FormError::Build(error) => RuntimeError::Build(error),
+            FormError::Script(error) => RuntimeError::Script(error),
+        })?;
 
-        let instance = FormInstance {
-            name: source.name.clone(),
-            form: live,
-            host,
-            ast,
-            functions,
-        };
-        instance.run(FORM, "Load", &[])?;
-        Ok(instance)
+        Ok(FormInstance { script })
     }
 
     /// The form's name.
     pub fn name(&self) -> &str {
-        &self.name
+        self.script.name()
     }
 
     /// The live widgets.
     pub fn live_form(&self) -> &Rc<LiveForm<Msg>> {
-        &self.form
+        self.script.live_form()
     }
 
     /// Runs the handler for `control`'s `event`, if the script defines one.
@@ -459,33 +432,22 @@ impl FormInstance {
     /// A missing handler is not an error: the event is simply ignored. Window
     /// events pass [`FORM`] as the control, so `Load` maps to `form_load`.
     pub fn run(&self, control: &str, event: &str, args: &[Value]) -> Result<(), ScriptError> {
-        let function = handler_name(control, event);
-        let Some(&arity) = self.functions.get(&function) else {
-            return Ok(());
-        };
-        // Rhai matches a function by name *and* arity, so a handler declaring
-        // more parameters than the event carries gets `()` for the rest.
-        let mut arguments: Vec<Dynamic> = args
-            .iter()
-            .take(arity)
-            .map(crate::value::to_dynamic)
-            .collect();
-        arguments.resize(arity, Dynamic::UNIT);
-        let _ = self.host.call_with(&self.ast, &function, arguments)?;
-        Ok(())
+        self.script.run(control, event, args)
+    }
+
+    /// Runs the `form_close` handler, if the script defines one.
+    pub fn close(&self) -> Result<(), ScriptError> {
+        self.script.close()
     }
 
     /// Calls a Rhai function pointer the form's script handed to the runtime.
     ///
     /// This is how a non-blocking [`Msg::MsgBox`] still reports its result: the
     /// application stores the callback, then calls it here once the dialog
-    /// closes. The callback is looked up in the form's compiled [`AST`], so a
+    /// closes. The callback is looked up in the form's compiled AST, so a
     /// script-defined function or a closure both work.
     pub fn call_callback(&self, callback: &FnPtr, result: &str) -> Result<(), ScriptError> {
-        callback
-            .call::<Dynamic>(self.host.engine(), &self.ast, (result.to_owned(),))
-            .map(|_| ())
-            .map_err(|error| ScriptError::from_eval(self.host.file(), &error))
+        self.script.call_callback(callback, result)
     }
 }
 
@@ -746,77 +708,6 @@ fn register_form_refs(host: &mut EngineHost, runtime: &Rc<FormRuntime>) {
     }
 }
 
-/// Decides which widget events become [`Msg::Event`]s.
-///
-/// An event is wired only when the form's script defines the matching function,
-/// so a missing handler is a silent no-op (the `xui-form` binder contract).
-struct ScriptBinder {
-    form: String,
-    functions: Rc<BTreeSet<String>>,
-}
-
-impl Binder<Msg> for ScriptBinder {
-    fn bind(&self, event: EventRef<'_>) -> Option<EventHandler<Msg>> {
-        if !self
-            .functions
-            .contains(&handler_name(event.node, event.event))
-        {
-            return None;
-        }
-        let event_name = event.event.to_owned();
-
-        let form = self.form.clone();
-        let control = event.node.to_owned();
-        Some(Rc::new(move |args| {
-            Some(Msg::Event {
-                form: form.clone(),
-                control: control.clone(),
-                event: event_name.clone(),
-                args: args.to_vec(),
-            })
-        }))
-    }
-}
-
-/// The control name window events are raised for: `form_load`, `form_close`.
-pub const FORM: &str = "form";
-
-/// The script function that handles `control`'s `event`: the control name and
-/// the event name in snake_case, joined by `_` (PLAN.md §1.1). `xui`'s events
-/// are PascalCase (`Click`, `Toggle`), so `hello_button` + `Click` becomes
-/// `hello_button_click`.
-pub fn handler_name(control: &str, event: &str) -> String {
-    format!("{control}_{}", snake_case(event))
-}
-
-/// `PascalCase` or `camelCase` to `snake_case`.
-fn snake_case(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 4);
-    for (index, character) in name.chars().enumerate() {
-        if character.is_uppercase() {
-            if index > 0 {
-                out.push('_');
-            }
-            out.extend(character.to_lowercase());
-        } else {
-            out.push(character);
-        }
-    }
-    out
-}
-
-/// The function names `source` defines, or a located parse error.
-fn script_functions(source: &str, file: &str) -> Result<BTreeSet<String>, ScriptError> {
-    let engine = crate::new_engine();
-    let ast = engine
-        .compile(source)
-        .map_err(|error| ScriptError::from_parse(file, &error))?;
-    Ok(ast
-        .iter_functions()
-        .map(|function| function.name.to_owned())
-        .collect())
-}
-
 /// The toolkit window spec for a form document.
 fn window_spec(doc: &FormDoc) -> PlatformSpec {
     let title = doc
@@ -933,61 +824,6 @@ mod tests {
     /// The offscreen window spec the tests use.
     fn spec() -> PlatformSpec {
         PlatformSpec::new("lazyrad-runtime form tests").size(Dip(320.0), Dip(200.0))
-    }
-
-    #[test]
-    fn handler_names_are_snake_case() {
-        assert_eq!(handler_name("hello_button", "Click"), "hello_button_click");
-        assert_eq!(handler_name("agree_check", "Toggle"), "agree_check_toggle");
-        assert_eq!(
-            handler_name("items_list", "Activate"),
-            "items_list_activate"
-        );
-        assert_eq!(handler_name(FORM, "Load"), "form_load");
-        assert_eq!(handler_name(FORM, "Close"), "form_close");
-        assert_eq!(
-            handler_name("grid", "SelectionChanged"),
-            "grid_selection_changed"
-        );
-    }
-
-    #[test]
-    fn a_missing_handler_is_not_bound() {
-        let binder = ScriptBinder {
-            form: "main_form".to_owned(),
-            functions: Rc::new(BTreeSet::from(["go_button_click".to_owned()])),
-        };
-        let spec = Catalog::xui()
-            .get("Button")
-            .and_then(|widget| widget.event("Click"))
-            .cloned()
-            .expect("Button has a Click event");
-
-        let bound = binder.bind(EventRef {
-            node: "go_button",
-            event: "Click",
-            spec: &spec,
-        });
-        assert!(bound.is_some(), "go_button_click is defined");
-
-        let missing = binder.bind(EventRef {
-            node: "other_button",
-            event: "Click",
-            spec: &spec,
-        });
-        assert!(missing.is_none(), "other_button_click is not defined");
-    }
-
-    #[test]
-    fn script_functions_collects_every_definition() {
-        let names = script_functions(
-            "fn form_load() {}\nfn go_button_click(x) {}\nfn helper() {}",
-            "main_form.rhai",
-        )
-        .expect("the script compiles");
-        assert_eq!(names.len(), 3);
-        assert!(names.contains("form_load"));
-        assert!(names.contains("go_button_click"));
     }
 
     #[test]

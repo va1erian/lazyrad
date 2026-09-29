@@ -2,7 +2,7 @@
 
 //! A script error located in its source file.
 //!
-//! Rhai reports a [`Position`](rhai::Position) as a line and column but does not
+//! Rhai reports a [`Position`] as a line and column but does not
 //! know which file the script came from, because an [`AST`](rhai::AST) carries
 //! no file name. The runtime pairs the position with the file it compiled, so
 //! the IDE can jump straight to the failing line.
