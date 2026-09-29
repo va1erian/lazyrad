@@ -211,16 +211,16 @@ impl EngineHost {
         self.engine
             .run_ast_with_scope(&mut Scope::new(), ast)
             .map_err(|error| ScriptError::from_eval(&self.file, &error))?;
-        self.top_level_vars
-            .borrow_mut()
-            .extend(
-                ast.statements()
-                    .iter()
-                    .filter_map(|statement| match statement {
-                        rhai::Stmt::Var(binding, ..) => Some(binding.0.name.to_string()),
-                        _ => None,
-                    }),
-            );
+        // Replace, not extend: a host can prepare several scripts in turn, and
+        // the hint must only name the current script's top-level `let`s.
+        *self.top_level_vars.borrow_mut() = ast
+            .statements()
+            .iter()
+            .filter_map(|statement| match statement {
+                rhai::Stmt::Var(binding, ..) => Some(binding.0.name.to_string()),
+                _ => None,
+            })
+            .collect();
         let imports = ast
             .statements()
             .iter()
