@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
-use crate::lexer::LineLexer;
+use crate::lexer::{HighlightCache, Highlighter, PlainText};
 use crate::markers::Marker;
 use crate::options::Options;
 use crate::platform::Clipboard;
@@ -91,7 +91,7 @@ pub(crate) struct EditorState {
     /// The text buffer.
     pub(crate) buffer: Buffer,
     /// The incremental line-highlight cache.
-    pub(crate) highlight: LineLexer,
+    pub(crate) highlight: HighlightCache,
     /// The caret, selection and scroll position.
     pub(crate) view: View,
     /// The display options.
@@ -125,10 +125,21 @@ pub(crate) struct EditorState {
 }
 
 impl EditorState {
-    /// A state over `text` with `options` and a `clipboard`.
+    /// A state over `text` with `options` and a `clipboard`, using the
+    /// [`PlainText`] highlighter.
     pub(crate) fn new(text: &str, options: Options, clipboard: Box<dyn Clipboard>) -> EditorState {
+        EditorState::with_highlighter(text, options, clipboard, Box::new(PlainText))
+    }
+
+    /// A state over `text` with `options`, a `clipboard` and a highlighter.
+    pub(crate) fn with_highlighter(
+        text: &str,
+        options: Options,
+        clipboard: Box<dyn Clipboard>,
+        highlighter: Box<dyn Highlighter>,
+    ) -> EditorState {
         let buffer = Buffer::new(text);
-        let highlight = LineLexer::new(&buffer);
+        let highlight = HighlightCache::with_boxed(&buffer, highlighter);
         EditorState {
             buffer,
             highlight,
@@ -174,6 +185,12 @@ impl EditorState {
     /// Rebuilds the highlight cache from scratch, after replacing the text.
     pub(crate) fn reset_highlight(&mut self) {
         self.highlight.reset(&self.buffer);
+    }
+
+    /// Replaces the highlighter, re-lexing the whole buffer with it.
+    pub(crate) fn set_highlighter(&mut self, highlighter: Box<dyn Highlighter>) {
+        self.highlight
+            .set_boxed_highlighter(&self.buffer, highlighter);
     }
 }
 

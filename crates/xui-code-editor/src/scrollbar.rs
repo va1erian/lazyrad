@@ -2,12 +2,9 @@
 //! A tiny scrollbar: track/thumb geometry for the vertical and horizontal
 //! bars.
 //!
-//! xui's scrollbar widget and its painter are private (PLAN.md §10, gap G1:
-//! `xui_core::widget::scrollbar` and `widget::painter` are `pub(crate)`), so
-//! the editor carries this reimplementation until xui exports `ScrollBar` as a
-//! widget. The upstream request is tracked at
-//! <https://github.com/va1erian/xui/issues> (see the `ScrollBar`/`Popup`
-//! export proposal). The geometry mirrors xui's own so the two look alike.
+//! xui's scrollbar widget and its painter are private (`pub(crate)`), so the
+//! editor carries this reimplementation until xui exports `ScrollBar` as a
+//! widget. The geometry mirrors xui's own so the two look alike.
 
 use xui_core::backend::Canvas;
 use xui_core::geometry::Rect;

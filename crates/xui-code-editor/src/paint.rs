@@ -4,8 +4,8 @@
 //!
 //! One character cell's advance and one line's height are measured once per
 //! paint; every other position is `col * advance`. Only the visible lines are
-//! drawn, so a 5,000-line file costs the same as a short one (PLAN.md §5,
-//! gap G7: xui has no caret-from-offset query, so the grid does its own).
+//! drawn, so a 5,000-line file costs the same as a short one. xui has no
+//! caret-from-offset query, so the grid does its own arithmetic.
 
 use xui_core::Color;
 use xui_core::backend::{Canvas, TextAlign, TextVAlign};
@@ -460,6 +460,19 @@ mod tests {
         state
     }
 
+    /// An editor state that highlights Rhai, for the token-colour tests.
+    #[cfg(feature = "rhai-syntax")]
+    fn rhai_editor_state(text: &str) -> EditorState {
+        let mut state = EditorState::with_highlighter(
+            text,
+            Options::default(),
+            Box::new(InProcessClipboard),
+            Box::new(crate::lexer::RhaiHighlighter),
+        );
+        state.focused = true;
+        state
+    }
+
     fn count_color(image: &RgbaImage, color: Color) -> usize {
         let mut count = 0;
         for y in 0..image.height {
@@ -473,6 +486,7 @@ mod tests {
     }
 
     /// How close the nearest painted pixel gets to `color`, in RGB distance.
+    #[cfg(feature = "rhai-syntax")]
     fn nearest_distance(image: &RgbaImage, color: Color) -> f32 {
         let mut best = f32::MAX;
         for y in 0..image.height {
@@ -520,9 +534,10 @@ mod tests {
         assert_ne!(shown.pixels, hidden.pixels, "the blink hides the caret");
     }
 
+    #[cfg(feature = "rhai-syntax")]
     #[test]
     fn syntax_classes_are_painted_in_their_theme_colours() {
-        let state = editor_state("let total = 42;");
+        let state = rhai_editor_state("let total = 42;");
         let theme = EditorTheme::from_theme(Theme::light());
         let image = render(&state);
         let keyword = nearest_distance(&image, theme.keyword);

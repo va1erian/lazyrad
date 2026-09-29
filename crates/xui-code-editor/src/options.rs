@@ -2,8 +2,8 @@
 
 //! Editor options: the tab width, gutter visibility and font.
 //!
-//! The font is a single monospace face at a fixed size; PLAN.md §5 keeps v1 to
-//! a monospace grid, with no wrapping and no proportional fonts.
+//! The font is a single monospace face at a fixed size: the editor is a
+//! monospace grid, with no wrapping and no proportional fonts.
 
 use xui_core::Color;
 use xui_core::backend::TextStyle;
