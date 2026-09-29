@@ -109,6 +109,10 @@ pub struct Settings {
     pub recent_projects: Vec<PathBuf>,
     /// The docked pane sizes.
     pub panes: PaneSizes,
+    /// An explicit `lazyrad-player` path for development, overriding the
+    /// `lazyrad-player[.exe]` next to the IDE executable (issue #16). Absent
+    /// in older settings files, which then look next to the IDE.
+    pub player_path: Option<PathBuf>,
     /// Where [`Settings::save`] writes: the file these settings were loaded
     /// from. Defaults have none, so a `Settings::default()` (every test) never
     /// touches the user's real settings file.
@@ -124,6 +128,7 @@ impl Default for Settings {
             editor_font_family: default_editor_font_family().to_owned(),
             recent_projects: Vec::new(),
             panes: PaneSizes::default(),
+            player_path: None,
             store: None,
         }
     }
@@ -289,6 +294,27 @@ mod tests {
             Settings::default().editor_font_size
         );
         assert_eq!(parsed.panes, PaneSizes::default());
+    }
+
+    #[test]
+    fn an_old_settings_file_without_a_player_path_still_loads() {
+        let parsed = Settings::from_toml("editor_font_size = 14.0\n").expect("old settings load");
+        assert_eq!(
+            parsed.player_path, None,
+            "the player is found next to the IDE"
+        );
+        assert_eq!(parsed.editor_font_size, 14.0);
+    }
+
+    #[test]
+    fn a_player_path_override_round_trips() {
+        let settings = Settings {
+            player_path: Some(PathBuf::from("/opt/lazyrad/lazyrad-player")),
+            ..Settings::default()
+        };
+        let text = settings.to_toml().expect("settings serialise");
+        let parsed = Settings::from_toml(&text).expect("settings parse");
+        assert_eq!(parsed.player_path, settings.player_path);
     }
 
     #[test]
