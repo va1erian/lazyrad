@@ -27,7 +27,7 @@ use std::path::Path;
 use lazyrad_project::{Diagnostic, DiagnosticKind};
 
 use crate::error::ScriptError;
-use crate::form::{RuntimeError, open_project};
+use crate::form::{FormRuntime, RuntimeError, open_project};
 
 /// Every problem that would stop a project from starting.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -95,6 +95,63 @@ pub fn check_project(path: impl AsRef<Path>) -> Result<CheckReport, RuntimeError
     }
 
     Ok(report)
+}
+
+/// Checks a runtime that is already loaded, without reading any files.
+///
+/// This is [`check_project`] for a project held in memory (an exported
+/// executable's payload): the startup item must be a form, every form must
+/// validate against the catalog and every script must compile. Files are named
+/// by their project-relative names, since there is no folder.
+pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
+    let project = runtime.project();
+    let mut report = CheckReport::default();
+    let project_file = project.file_name();
+
+    match project.startup_item() {
+        None => report.diagnostics.push(Diagnostic::new(
+            DiagnosticKind::UnknownStartup,
+            &project_file,
+            format!("startup item `{}` is not in the project", project.startup),
+        )),
+        Some(item) if !item.is_form() => report.diagnostics.push(Diagnostic::new(
+            DiagnosticKind::UnknownStartup,
+            &project_file,
+            format!("startup item `{}` is not a form", project.startup),
+        )),
+        Some(_) => {}
+    }
+
+    for item in &project.items {
+        if let (Some(layout), Some(form)) = (item.layout(), runtime.forms.get(item.name())) {
+            report.diagnostics.extend(
+                form.doc
+                    .validate(runtime.catalog())
+                    .iter()
+                    .map(|problem| Diagnostic::from_form(layout, problem)),
+            );
+        }
+    }
+
+    let engine = crate::new_engine();
+    let sources = runtime
+        .forms
+        .values()
+        .map(|form| (form.code_file.as_str(), form.code.as_str()))
+        .chain(
+            runtime
+                .modules
+                .iter()
+                .map(|module| (module.file.as_str(), module.source.as_str())),
+        );
+    for (file, source) in sources {
+        if let Err(error) = engine.compile(source) {
+            report
+                .scripts
+                .push(ScriptError::from_parse(file.to_owned(), &error));
+        }
+    }
+    report
 }
 
 #[cfg(test)]

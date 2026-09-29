@@ -82,6 +82,17 @@ impl Project {
             }
         }
 
+        if let Some(icon) = &self.icon
+            && !dir.join(icon).is_file()
+        {
+            diagnostics.push(referenced_file_missing(
+                &project_path,
+                &project_text,
+                "icon",
+                icon.to_string_lossy().as_ref(),
+            ));
+        }
+
         diagnostics
     }
 }

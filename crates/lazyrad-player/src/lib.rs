@@ -23,8 +23,17 @@
 //! fatal: the runtime shows it in a `msg_box` and the program keeps running, so
 //! it does not change the exit code.
 //!
+//! # Exported apps
+//!
+//! When the executable carries an appended project ([`embedded`]), the player
+//! runs it from memory and ignores the command line. Failures then also appear
+//! in a message box, since export gives the copy the Windows GUI subsystem and
+//! so no console.
+//!
 //! `Debug.print` (Rhai's `print`/`debug`) goes to stdout, one flushed line per
 //! call, so an IDE reading the player's stdout sees each line as it happens.
+
+pub mod embedded;
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -45,6 +54,18 @@ pub const EXIT_RUNTIME: i32 = 2;
 /// player opens an empty window, which is the shell M0 used to prove the
 /// windowed path works.
 pub fn run_cli() -> i32 {
+    // An exported app carries its project; it ignores the command line.
+    if let Ok(exe) = std::env::current_exe() {
+        match embedded::load_from_exe(&exe) {
+            Ok(Some(runtime)) => return run_embedded(runtime),
+            Ok(None) => {}
+            Err(reports) => {
+                emit(&reports);
+                embedded::show_failure(&reports);
+                return EXIT_COMPILE;
+            }
+        }
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [] => run_empty_window(),
@@ -52,6 +73,20 @@ pub fn run_cli() -> i32 {
         _ => {
             eprintln!("usage: lazyrad-player <project dir | .lrp>");
             EXIT_COMPILE
+        }
+    }
+}
+
+/// Runs the project an exported executable carries. A failure is shown in a
+/// message box too, since the exported app usually has no console.
+fn run_embedded(runtime: std::rc::Rc<FormRuntime>) -> i32 {
+    match run_runtime(runtime) {
+        Ok(()) => EXIT_OK,
+        Err(error) => {
+            let reports = [Report::from_runtime_error(&error)];
+            emit(&reports);
+            embedded::show_failure(&reports);
+            EXIT_RUNTIME
         }
     }
 }

@@ -568,6 +568,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "debug-ignore"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffe7ed1d93f4553003e20b629abe9085e1e81b1429520f897f8f8860bc6dfc21"
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +647,20 @@ name = "dtor"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
+
+[[package]]
+name = "editpe"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de488f8727e67269a918bcb5b35b1b9ee59b2ae2859743ffdd6288de9701c5e6"
+dependencies = [
+ "debug-ignore",
+ "foldhash",
+ "indexmap",
+ "log",
+ "thiserror 2.0.21",
+ "zerocopy",
+]
 
 [[package]]
 name = "embed-resource"
@@ -762,6 +782,12 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "font-types"
@@ -1182,6 +1208,7 @@ dependencies = [
  "directories",
  "embed-resource",
  "lazyrad-designer",
+ "lazyrad-packager",
  "lazyrad-player",
  "lazyrad-project",
  "lazyrad-runtime",
@@ -1197,12 +1224,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazyrad-packager"
+version = "0.1.0"
+dependencies = [
+ "editpe",
+ "lazyrad-project",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "lazyrad-player"
 version = "0.1.0"
 dependencies = [
+ "editpe",
+ "embed-resource",
+ "lazyrad-packager",
  "lazyrad-project",
  "lazyrad-runtime",
+ "rfd",
  "serde_json",
+ "xui-canvas",
+ "xui-core",
 ]
 
 [[package]]

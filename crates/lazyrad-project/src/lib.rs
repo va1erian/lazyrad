@@ -20,8 +20,8 @@ pub mod validate;
 
 pub use error::{Diagnostic, DiagnosticKind, Error};
 pub use io::{
-    CODE_EXTENSION, FORM_EXTENSION, PROJECT_EXTENSION, SaveReport, load_form, save_form,
-    write_if_changed,
+    CODE_EXTENSION, FORM_EXTENSION, PROJECT_EXTENSION, SaveReport, load_form, parse_form,
+    save_form, write_if_changed,
 };
 pub use model::{Project, ProjectItem, is_plain_file_name};
 pub use schema::lazyrad_catalog;

@@ -332,7 +332,16 @@ IDE  ──spawn── lazyrad-player --debug <project dir>
 4. **Windows details:**
    - Set the icon and version info by patching resources in the copied stub (the
      `editpe` crate or similar).
-   - Build the stub with the GUI subsystem so no console appears.
+   - No console window: the player is built once, as a console program (the IDE reads
+     a running project's output through pipes). Export flips the *copy's* PE subsystem
+     to GUI (`editpe`), so there is no second binary. An exported app reports startup
+     failures in a native message box. The player embeds LazyRAD's icon as the default;
+     the optional `icon` field of the `.lrp` (a plain `.ico` file name in the project
+     folder) replaces it, and the version resource comes from `name` and `version`.
+   - The payload is `stub | uncompressed archive | 40-byte footer` (magic, version,
+     entry count, offset, length, FNV-1a checksum); see `lazyrad-packager`. It holds
+     only plain-named `.lrp`, `.lfm` and `.rhai` files. Export writes through a
+     temporary file and renames it into place.
    - Code signing is out of scope, but note in the docs that an appended overlay
      invalidates any existing signature.
 5. **Where stubs live:** the IDE ships with its stubs in `stubs/<target>/`. Picking

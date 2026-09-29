@@ -1,0 +1,16 @@
+[package]
+name = "lazyrad-packager"
+description = "Exports a LazyRAD project as a self-contained executable: payload archive, stub patching, atomic write"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+editpe = { version = "0.2", default-features = false, features = ["std"] }
+lazyrad-project.workspace = true
+thiserror.workspace = true

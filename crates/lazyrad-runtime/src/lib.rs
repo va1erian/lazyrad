@@ -28,7 +28,7 @@ pub mod shell;
 pub mod stdlib;
 pub mod value;
 
-pub use check::{CheckReport, check_project};
+pub use check::{CheckReport, check_project, check_runtime};
 pub use control::FormHost;
 pub use engine::{EngineHost, new_engine};
 pub use error::ScriptError;

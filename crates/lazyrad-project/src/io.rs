@@ -129,8 +129,13 @@ fn read_text(path: &Path) -> Result<String, Error> {
 
 /// Loads a form document from `path` against `catalog`.
 pub fn load_form(path: &Path, catalog: &Catalog) -> Result<FormDoc, Error> {
-    let text = read_text(path)?;
-    FormDoc::from_toml(&text, catalog).map_err(|error| {
+    parse_form(path, &read_text(path)?, catalog)
+}
+
+/// Parses form text attributed to `path` against `catalog`, without touching
+/// the disk (the exported-executable path).
+pub fn parse_form(path: &Path, text: &str, catalog: &Catalog) -> Result<FormDoc, Error> {
+    FormDoc::from_toml(text, catalog).map_err(|error| {
         let diagnostic = match error.line() {
             Some(line) => Diagnostic::at(DiagnosticKind::Syntax, path, line, error.message()),
             None => Diagnostic::new(DiagnosticKind::Syntax, path, error.message()),
@@ -167,8 +172,39 @@ impl Project {
     /// is reported against the given path.
     pub fn load_file(path: &Path) -> Result<Self, Error> {
         let text = read_text(path)?;
+        let project = Self::parse(path, &text)?;
+        // A plain name can still be a symlink pointing elsewhere; following it
+        // would read (and later write) outside the project folder.
+        let dir = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for relative in project.referenced_files() {
+            let linked = fs::symlink_metadata(dir.join(relative))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink());
+            if linked {
+                return Err(Error::Diagnostic(Diagnostic::new(
+                    DiagnosticKind::ProjectFile,
+                    path,
+                    format!(
+                        "item file `{}` is a symbolic link; project files must be regular files in the project folder",
+                        relative.display()
+                    ),
+                )));
+            }
+        }
+        Ok(project)
+    }
+
+    /// Parses `.lrp` text that was read from (or will be attributed to) `path`
+    /// and checks it without touching the disk: the file name must be
+    /// `<name>.lrp` and every item (and icon) path must be a plain file name.
+    ///
+    /// [`Project::load_file`] is this plus the symbolic-link check; an exported
+    /// executable, which has no folder, uses this directly.
+    pub fn parse(path: &Path, text: &str) -> Result<Self, Error> {
         let project: Self =
-            toml::from_str(&text).map_err(|source| parse_error(path, &text, source))?;
+            toml::from_str(text).map_err(|source| parse_error(path, text, source))?;
         let expected = project.file_name();
         if path.file_name().and_then(|name| name.to_str()) != Some(expected.as_str()) {
             return Err(Error::Diagnostic(Diagnostic::new(
@@ -190,28 +226,6 @@ impl Project {
                     bad.display()
                 ),
             )));
-        }
-        // A plain name can still be a symlink pointing elsewhere; following it
-        // would read (and later write) outside the project folder.
-        let dir = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        for item in &project.items {
-            for relative in std::iter::once(item.code()).chain(item.layout()) {
-                let linked = fs::symlink_metadata(dir.join(relative))
-                    .is_ok_and(|metadata| metadata.file_type().is_symlink());
-                if linked {
-                    return Err(Error::Diagnostic(Diagnostic::new(
-                        DiagnosticKind::ProjectFile,
-                        path,
-                        format!(
-                            "item file `{}` is a symbolic link; project files must be regular files in the project folder",
-                            relative.display()
-                        ),
-                    )));
-                }
-            }
         }
         Ok(project)
     }
