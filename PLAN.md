@@ -46,8 +46,6 @@ lazyrad/
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
 │  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (JSON lines over stdio)
 │  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir, a payload, or --debug
-│  ├─ xui-scrollbar/          scrollbar geometry and painting shared by the editor and property grid
-│  ├─ xui-code-editor/        xui code-editor widget (buffer, view, highlight, completion)
 │  ├─ lazyrad-designer/       xui form-designer surface, toolbox, property grid
 │  ├─ lazyrad-packager/       exe export: stub + payload, icon/metadata where possible
 │  └─ lazyrad-ide/     (bin)  the IDE shell: windows, menus, project explorer, wiring
@@ -378,7 +376,7 @@ contributed to xui.
 
 | # | Gap | Impact on LazyRAD | Proposal |
 |---|---|---|---|
-| G1 | **No first-class custom widget story.** `Control` + `NodeKind::Custom` + `set_painter` + `on_events` are public, but popup and scrollbar painters (`widget::popup`, `widget::scrollbar`) are private | The editor, designer overlay and property grid need scrollbars and popups that match the theme | Upstream: export `ScrollBar` as a widget and a `Popup` helper. Until then, copy the logic |
+| G1 | **No first-class custom widget story.** `Control` + `NodeKind::Custom` + `set_painter` + `on_events` are public, but popup and scrollbar painters (`widget::popup`, `widget::scrollbar`) are private | The editor, designer overlay and property grid need scrollbars and popups that match the theme | Upstream: export `ScrollBar` as a widget and a `Popup` helper. `ScrollBar` is now exported from `xui_core::widget::scrollbar` (xui#231); the `Popup` helper is still open |
 | G2 | **No portable clipboard.** It exists only in `xui-win32`, not in `xui-core` or `xui-canvas` | Copy and paste in the code editor and the designer, plus the stdlib `Clipboard` | Upstream: add `Backend::clipboard_get_text`/`set_text` with a default of `Unsupported`. Implement it with `arboard` in canvas and with `clipboardd` on LazyOS. Workaround: an in-process clipboard |
 | G3 | **No IME or composition events.** `Event` has `Char` and `KeyDown` only | Painted text editors can't enter CJK text. Low priority for v1 | Upstream: add `Event::Ime{Preedit,Commit}` (winit already provides it) and `set_ime_cursor_area` |
 | G4 | **No file, folder or colour dialogs** | Open/save project, Make EXE, `CommonDialog` | Workaround: use `rfd` on desktop. LazyOS needs a painted xui file dialog, which can be shared upstream |

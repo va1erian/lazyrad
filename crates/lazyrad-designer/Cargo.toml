@@ -19,7 +19,6 @@ thiserror.workspace = true
 xui-code-editor.workspace = true
 xui-core.workspace = true
 xui-form.workspace = true
-xui-scrollbar.workspace = true
 
 [dev-dependencies]
 xui-canvas.workspace = true

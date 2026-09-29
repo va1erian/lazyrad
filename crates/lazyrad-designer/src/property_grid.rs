@@ -88,9 +88,9 @@ use xui_core::geometry::{Point, Rect};
 use xui_core::icon::draw_icon;
 use xui_core::message::{Key, MouseButton};
 use xui_core::units::Dip;
+use xui_core::widget::scrollbar::{self, Orientation, Scroll, ThumbState, TrackHit};
 use xui_core::widget::{CheckBox, ComboBox, Control};
 use xui_form::{Access, Catalog, FormDoc, Value, ValueType};
-use xui_scrollbar::{Orientation, Scroll, ThumbState, TrackHit};
 
 use crate::grid_nav::{ObjectDropdown, RowMove, move_row};
 use crate::local_paint::paint_local;
@@ -848,7 +848,7 @@ impl<M: 'static> PropertyGrid<M> {
             catalog: Rc::clone(&catalog),
             state: Rc::clone(&state),
             wrap: Rc::clone(&wrap),
-            clipboard: Rc::from(xui_code_editor::platform::clipboard()),
+            clipboard: Rc::from(xui_code_editor::platform::clipboard(ui)),
         };
         grid.sync(ui);
 
@@ -889,7 +889,7 @@ impl<M: 'static> PropertyGrid<M> {
     }
 
     /// Replaces the clipboard the inline text editor copies, cuts and pastes
-    /// through (the OS clipboard by default).
+    /// through (the window's portable clipboard by default).
     pub fn with_clipboard(mut self, clipboard: impl Clipboard + 'static) -> PropertyGrid<M> {
         self.clipboard = Rc::new(clipboard);
         self
@@ -1006,7 +1006,7 @@ impl<M: 'static> PropertyGrid<M> {
         let state = self.state.borrow();
         let lines = visual_lines(&state.rows, state.view);
         let scroll = layout.scroll_state(&lines, state.scroll);
-        xui_scrollbar::thumb(layout.bar?, scroll, Orientation::Vertical, ui.dpi())
+        scrollbar::thumb(layout.bar?, scroll, Orientation::Vertical, ui.dpi())
     }
 
     /// The grid's layout at its current bounds.
@@ -1480,7 +1480,7 @@ fn paint<M: 'static>(canvas: &mut dyn Canvas, area: Rect, state: &GridState<M>, 
             ThumbState::Normal
         };
         let scroll = layout.scroll_state(&lines, state.scroll);
-        xui_scrollbar::paint_state(canvas, bar, scroll, Orientation::Vertical, *theme, thumb);
+        scrollbar::paint_state(canvas, bar, scroll, Orientation::Vertical, *theme, thumb);
     }
 
     if state.objects_open {
@@ -1766,7 +1766,7 @@ fn grid_message<M: 'static>(
                 // The thumb follows the pointer, even outside the grid.
                 let scroll = layout.scroll_state(&lines, drag.start_offset);
                 let bar = layout.bar?;
-                let offset = xui_scrollbar::offset_from_drag(
+                let offset = scrollbar::offset_from_drag(
                     bar,
                     scroll,
                     Orientation::Vertical,
@@ -1859,7 +1859,7 @@ fn grid_message<M: 'static>(
                 let offset = shared.borrow().scroll;
                 let scroll = layout.scroll_state(&lines, offset);
                 let dpi = ui.dpi();
-                let hit = xui_scrollbar::hit(bar, scroll, Orientation::Vertical, *y, dpi)?;
+                let hit = scrollbar::hit(bar, scroll, Orientation::Vertical, *y, dpi)?;
                 let direction = match hit {
                     TrackHit::Thumb => {
                         shared.borrow_mut().bar_drag = Some(BarDrag {
@@ -1875,7 +1875,7 @@ fn grid_message<M: 'static>(
                     TrackHit::After => 1,
                 };
                 let page = layout.page_pixels();
-                let target = xui_scrollbar::paged_offset(scroll, direction, page);
+                let target = scrollbar::paged_offset(scroll, direction, page);
                 return Some(wrap(PropertyGridMsg::ScrollTo(target)));
             }
             let row = layout.row_at(&shared.borrow(), *x, *y)?;
