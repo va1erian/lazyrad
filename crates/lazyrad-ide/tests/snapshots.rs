@@ -397,3 +397,60 @@ fn the_start_page_paints_the_logo_in_both_themes() {
         );
     }
 }
+
+/// How many pixels in `rect` (x, y, w, h) differ from `background`.
+fn differing(image: &Image, rect: (i32, i32, i32, i32), background: [u8; 4]) -> usize {
+    let (x, y, w, h) = rect;
+    let mut count = 0;
+    for row in y..y + h {
+        for column in x..x + w {
+            let index = ((row as u32 * image.width() + column as u32) * 4) as usize;
+            if image.pixels()[index..index + 4] != background {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn the_start_page_paints_the_tutorial_in_both_themes() {
+    // The document area sits right of the toolbox and left of the explorer; the
+    // tutorial starts below the logo and welcome text, about 200px into the page.
+    for (theme, choice, name) in [
+        (Theme::light(), ThemeChoice::Light, "ide-start-light.png"),
+        (Theme::dark(), ThemeChoice::Dark, "ide-start-dark.png"),
+    ] {
+        let image = render_start_page(settings_with(choice), theme);
+        let page = image.width() as i32 / 2;
+        // The page background is the pixel just inside the document area's top
+        // left, clear of the logo and text.
+        let background = {
+            let index = ((300u32 * image.width() + 300) * 4) as usize;
+            let pixel = &image.pixels()[index..index + 4];
+            [pixel[0], pixel[1], pixel[2], pixel[3]]
+        };
+        // A band across the middle of the column holds tutorial text and a code
+        // block: many pixels that are not the page background.
+        let band = differing(&image, (page - 300, 330, 600, 300), background);
+        assert!(
+            band > 4000,
+            "the tutorial painted only {band} pixels in {name}"
+        );
+        // Code blocks paint a distinct fill: two colours beyond the background
+        // and text must be present in the band, so highlighting ran.
+        let mut colours = std::collections::BTreeSet::new();
+        for row in 330..630u32 {
+            for column in (page as u32 - 300)..(page as u32 + 300) {
+                let index = ((row * image.width() + column) * 4) as usize;
+                colours.insert([
+                    image.pixels()[index],
+                    image.pixels()[index + 1],
+                    image.pixels()[index + 2],
+                ]);
+            }
+        }
+        assert!(colours.len() > 40, "{} colours in {name}", colours.len());
+        save(&image, name);
+    }
+}

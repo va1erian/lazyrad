@@ -384,3 +384,51 @@ fn top_level_code_runs_once_and_extra_handler_parameters_are_unit() {
         Some(Value::Text("xcc".to_owned()))
     );
 }
+
+/// The tutorial's "Remember values between events" example, verbatim: a
+/// counter kept in `form.state`, bumped by two clicks.
+pub const FORM_STATE_COUNTER: &str = r#"fn form_load() { form.state.count = 0; }
+fn button1_click() {
+    form.state.count += 1;
+    edit1.text = `Clicked ${form.state.count} times`;
+}"#;
+
+#[test]
+fn form_state_keeps_a_counter_between_two_clicks() {
+    let mut doc = FormDoc::new("main_form");
+    let mut button = Node::new("Button", "button1");
+    button.set_prop("left", Value::Int(10));
+    button.set_prop("top", Value::Int(10));
+    button.set_prop("width", Value::Int(100));
+    button.set_prop("height", Value::Int(28));
+    doc.insert(button);
+    let mut edit = Node::new("Edit", "edit1");
+    edit.set_prop("left", Value::Int(10));
+    edit.set_prop("top", Value::Int(50));
+    edit.set_prop("width", Value::Int(200));
+    doc.insert(edit);
+
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new("main_form", doc, FORM_STATE_COUNTER)],
+        Vec::new(),
+    );
+    let backend = Rc::new(OffscreenBackend::new());
+    let backend_for_click = Rc::clone(&backend);
+    let capture: Rc<RefCell<Option<Rc<LiveForm<Msg>>>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&capture);
+    run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+        let app = runtime.build_app(ui, "main_form").expect("the form builds");
+        let form = app.root_form().expect("the form is live").clone();
+        click(&backend_for_click, ui, &form, "button1");
+        click(&backend_for_click, ui, &form, "button1");
+        *slot.borrow_mut() = Some(form);
+        app
+    })
+    .expect("the event loop runs");
+
+    let form = capture.borrow_mut().take().expect("the form was captured");
+    assert_eq!(
+        form.get("edit1", "text"),
+        Some(Value::Text("Clicked 2 times".to_owned()))
+    );
+}

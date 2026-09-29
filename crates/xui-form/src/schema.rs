@@ -357,6 +357,19 @@ impl Catalog {
             .cloned()
     }
 
+    /// The names of every property a node of `kind` accepts: the widget's own
+    /// first, then the common ones, in declaration order.
+    pub fn property_names(&self, kind: &str) -> Vec<String> {
+        let own = self.get(kind).map(|spec| spec.properties.as_slice());
+        let mut names: Vec<String> = Vec::new();
+        for property in own.unwrap_or_default().iter().chain(&self.common) {
+            if !names.contains(&property.name) {
+                names.push(property.name.clone());
+            }
+        }
+        names
+    }
+
     /// Whether `kind` (or an alias) is a container.
     pub fn is_container(&self, kind: &str) -> bool {
         self.get(kind).is_some_and(|spec| !spec.children.is_none())

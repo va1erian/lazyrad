@@ -2900,7 +2900,7 @@ impl IdeApp {
 
         let tabs = Tabs::new(&self.docs_ui, Rect::default())?
             .on_change(|index| Some(Msg::TabChanged(index)));
-        let start_page = StartPage::new(tabs.ui(), WELCOME)?;
+        let start_page = StartPage::new(tabs.ui(), WELCOME, &self.editor_options().font)?;
         let start_id = start_page.id();
         self.start_page = Some(start_page);
         self.docs = Some(tabs.page("Start Page", &[start_id]));

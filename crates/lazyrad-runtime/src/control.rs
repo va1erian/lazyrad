@@ -37,6 +37,13 @@ pub trait FormHost {
 
     /// The control names in the form.
     fn names(&self) -> Vec<String>;
+
+    /// The canonical widget kind of the control named `control` (`Edit`).
+    fn kind(&self, control: &str) -> Option<String>;
+
+    /// The property names the control named `control` accepts, in catalog
+    /// order.
+    fn property_names(&self, control: &str) -> Vec<String>;
 }
 
 impl<M: 'static> FormHost for LiveForm<M> {
@@ -54,6 +61,16 @@ impl<M: 'static> FormHost for LiveForm<M> {
 
     fn names(&self) -> Vec<String> {
         LiveForm::names(self).map(str::to_owned).collect()
+    }
+
+    fn kind(&self, control: &str) -> Option<String> {
+        LiveForm::kind(self, control).map(str::to_owned)
+    }
+
+    fn property_names(&self, control: &str) -> Vec<String> {
+        LiveForm::kind(self, control)
+            .map(|kind| self.catalog().property_names(kind))
+            .unwrap_or_default()
     }
 }
 
@@ -99,20 +116,37 @@ impl Control {
     fn get(&self, property: &str) -> Result<Dynamic, Box<EvalAltResult>> {
         match self.host.get(&self.name, property) {
             Some(value) => Ok(crate::value::to_dynamic(&value)),
-            None => Err(runtime_error(format!(
-                "`{}` has no property `{property}`",
-                self.name
-            ))),
+            None => Err(self.unknown_property(property)),
         }
+    }
+
+    /// The error for a property this control's kind does not have.
+    ///
+    /// It suggests the script name when `property` differs from a real one only
+    /// by case or by CamelCase (`Text`, `TabIndex`); otherwise it lists the
+    /// names the kind accepts.
+    fn unknown_property(&self, property: &str) -> Box<EvalAltResult> {
+        let kind = self.host.kind(&self.name).unwrap_or_default();
+        let names = self.host.property_names(&self.name);
+        let wanted = snake_case(property);
+        let message = match names.iter().find(|name| **name == wanted) {
+            Some(suggestion) => format!(
+                "unknown property '{property}' on {} ({kind}); did you mean '{suggestion}'?",
+                self.name
+            ),
+            None => format!(
+                "unknown property '{property}' on {} ({kind}); properties: {}",
+                self.name,
+                names.join(", ")
+            ),
+        };
+        runtime_error(message)
     }
 
     /// Writes a property, decoding the script value against the schema.
     fn set(&self, property: &str, value: Dynamic) -> Result<(), Box<EvalAltResult>> {
         let Some(ty) = self.host.property_type(&self.name, property) else {
-            return Err(runtime_error(format!(
-                "`{}` has no property `{property}`",
-                self.name
-            )));
+            return Err(self.unknown_property(property));
         };
         let value = crate::value::to_value(value, &ty).map_err(runtime_error)?;
         self.host
@@ -124,6 +158,26 @@ impl Control {
                 ))
             })
     }
+}
+
+/// `name` in snake_case: `TabIndex` becomes `tab_index`, `TEXT` becomes `text`.
+fn snake_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::new();
+    for (index, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let after_lower = index > 0 && chars[index - 1].is_lowercase();
+            let before_lower = chars.get(index + 1).is_some_and(|n| n.is_lowercase());
+            let after_upper = index > 0 && chars[index - 1].is_uppercase();
+            if after_lower || (after_upper && before_lower) {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// The form object a script calls `form`.
@@ -162,8 +216,24 @@ impl Form {
 /// The property names are enumerated from the catalog and each one becomes a
 /// `get$name`/`set$name` pair that routes through [`FormHost`], so a new widget
 /// kind needs no new binding code here.
+///
+/// A string indexer is registered too. Rhai falls back to an indexer with the
+/// property name as the key when no getter or setter exists for `obj.name`
+/// (`ErrorDotExpr`, see `eval/chaining.rs`), so `edit1.Text = ...` lands in the
+/// indexer instead of Rhai's generic "No writable property" error, and the
+/// indexer can answer with a message that names the control and suggests the
+/// right property. Rhai reports that error at the property's position. The
+/// indexer also makes `edit1["text"]` work as a dynamic property access.
 pub fn register_control(engine: &mut Engine, catalog: &Catalog) {
     engine.register_type_with_name::<Control>("Control");
+    engine.register_indexer_get(|control: &mut Control, property: ImmutableString| {
+        control.get(&property)
+    });
+    engine.register_indexer_set(
+        |control: &mut Control, property: ImmutableString, value: Dynamic| {
+            control.set(&property, value)
+        },
+    );
     for name in control_property_names(catalog) {
         let getter = name.clone();
         engine.register_fn(format!("get${name}"), move |control: &mut Control| {
@@ -196,8 +266,37 @@ pub fn register_form(engine: &mut Engine) {
             Ok(())
         },
     );
+    // Rhai's fallback for a property without a getter/setter (see
+    // `register_control`): a helpful error instead of the generic one.
+    engine.register_indexer_get(
+        |_form: &mut Form, property: ImmutableString| -> Result<Dynamic, Box<EvalAltResult>> {
+            Err(unknown_form_property(&property))
+        },
+    );
+    engine.register_indexer_set(
+        |_form: &mut Form,
+         property: ImmutableString,
+         _value: Dynamic|
+         -> Result<(), Box<EvalAltResult>> { Err(unknown_form_property(&property)) },
+    );
     engine.register_fn("show", |form: &mut Form| form.set_visible(true));
     engine.register_fn("hide", |form: &mut Form| form.set_visible(false));
+}
+
+/// The properties `form` has, for the unknown-property message.
+const FORM_PROPERTIES: [&str; 2] = ["title", "state"];
+
+fn unknown_form_property(property: &str) -> Box<EvalAltResult> {
+    let wanted = snake_case(property);
+    runtime_error(match FORM_PROPERTIES.iter().find(|name| **name == wanted) {
+        Some(suggestion) => {
+            format!("unknown property '{property}' on form; did you mean '{suggestion}'?")
+        }
+        None => format!(
+            "unknown property '{property}' on form; properties: {}",
+            FORM_PROPERTIES.join(", ")
+        ),
+    })
 }
 
 /// Builds a Rhai runtime error with no position; the VM fills it in.
@@ -267,6 +366,14 @@ mod tests {
 
         fn names(&self) -> Vec<String> {
             vec!["lbl".to_owned(), "cmd".to_owned()]
+        }
+
+        fn kind(&self, _control: &str) -> Option<String> {
+            Some("Label".to_owned())
+        }
+
+        fn property_names(&self, _control: &str) -> Vec<String> {
+            vec!["text".to_owned(), "left".to_owned(), "tab_index".to_owned()]
         }
     }
 

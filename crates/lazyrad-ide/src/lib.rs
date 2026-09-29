@@ -28,6 +28,7 @@ pub mod settings;
 pub mod shortcut_backend;
 pub mod start_page;
 pub mod theme;
+pub mod tutorial;
 
 use std::error::Error;
 use std::rc::Rc;
