@@ -52,6 +52,9 @@ const TILE_WIDTH: Dip = Dip(96.0);
 const TILE_HEIGHT: Dip = Dip(28.0);
 /// The gap between tiles, on both axes.
 const TILE_GAP: Dip = Dip(2.0);
+/// The space between the pane's edge and the tiles, so a selected tile does not
+/// touch the pane's border.
+const TILE_INSET: Dip = Dip(4.0);
 /// The design size of a tile's icon.
 const ICON_SIZE: Dip = Dip(20.0);
 /// The design size of a tile's label.
@@ -150,6 +153,7 @@ struct Layout {
     width: i32,
     height: i32,
     gap: i32,
+    inset: i32,
     columns: i32,
 }
 
@@ -159,11 +163,13 @@ impl Layout {
         let width = TILE_WIDTH.to_px(dpi).value().max(1);
         let height = TILE_HEIGHT.to_px(dpi).value().max(1);
         let gap = TILE_GAP.to_px(dpi).value().max(0);
-        let columns = ((area.width() + gap) / (width + gap)).max(1);
+        let inset = TILE_INSET.to_px(dpi).value().max(0);
+        let columns = ((area.width() - inset * 2 + gap) / (width + gap)).max(1);
         Layout {
             width,
             height,
             gap,
+            inset,
             columns,
         }
     }
@@ -172,14 +178,15 @@ impl Layout {
     fn tile_rect(&self, index: usize) -> Rect {
         let column = (index as i32) % self.columns;
         let row = (index as i32) / self.columns;
-        let left = column * (self.width + self.gap);
-        let top = row * (self.height + self.gap);
+        let left = self.inset + column * (self.width + self.gap);
+        let top = self.inset + row * (self.height + self.gap);
         Rect::new(left, top, left + self.width, top + self.height)
     }
 
     /// The tile index under local `(x, y)`, or `None` over a gap or past the
     /// end.
     fn index_at(&self, x: i32, y: i32, len: usize) -> Option<usize> {
+        let (x, y) = (x - self.inset, y - self.inset);
         if x < 0 || y < 0 {
             return None;
         }
@@ -463,23 +470,26 @@ mod tests {
 
     #[test]
     fn the_layout_wraps_tiles_into_columns() {
-        // At 96dpi a tile is 96x28 with a 2px gap, so a 196px-wide box holds two
-        // columns.
-        let layout = Layout::new(Rect::new(0, 0, 196, 200), 96);
+        // At 96dpi a tile is 96x28 with a 2px gap and a 4px inset from the pane's
+        // edge, so a 202px-wide box holds two columns and a 201px one only one.
+        let layout = Layout::new(Rect::new(0, 0, 202, 200), 96);
         assert_eq!(layout.columns, 2);
-        assert_eq!(layout.tile_rect(0), Rect::new(0, 0, 96, 28));
-        assert_eq!(layout.tile_rect(1), Rect::new(98, 0, 194, 28));
-        assert_eq!(layout.tile_rect(2), Rect::new(0, 30, 96, 58));
+        assert_eq!(Layout::new(Rect::new(0, 0, 201, 200), 96).columns, 1);
+        assert_eq!(layout.tile_rect(0), Rect::new(4, 4, 100, 32));
+        assert_eq!(layout.tile_rect(1), Rect::new(102, 4, 198, 32));
+        assert_eq!(layout.tile_rect(2), Rect::new(4, 34, 100, 62));
     }
 
     #[test]
     fn hit_testing_finds_tiles_and_skips_gaps() {
         let tools = tools();
-        let layout = Layout::new(Rect::new(0, 0, 196, 200), 96);
-        assert_eq!(layout.index_at(4, 4, tools.len()), Some(0));
-        assert_eq!(layout.index_at(100, 4, tools.len()), Some(1));
-        // The 2px gap between the columns is dead space.
-        assert_eq!(layout.index_at(97, 4, tools.len()), None);
+        let layout = Layout::new(Rect::new(0, 0, 202, 200), 96);
+        assert_eq!(layout.index_at(8, 8, tools.len()), Some(0));
+        assert_eq!(layout.index_at(104, 8, tools.len()), Some(1));
+        // The inset along the pane's edge and the 2px gap between the columns
+        // are dead space.
+        assert_eq!(layout.index_at(2, 8, tools.len()), None);
+        assert_eq!(layout.index_at(101, 8, tools.len()), None);
         // Past the last tile.
         assert_eq!(layout.index_at(0, 500, tools.len()), None);
     }
