@@ -572,8 +572,14 @@ mod tests {
             fn update(&mut self, _msg: (), _ui: &mut xui_core::Ui<()>) {}
         }
 
-        let text: String = (0..12).map(|n| format!("line {n:02} xxxxxxxxxxxxxxxx
-")).collect();
+        let text: String = (0..12)
+            .map(|n| {
+                format!(
+                    "line {n:02} xxxxxxxxxxxxxxxx
+"
+                )
+            })
+            .collect();
         let (line, col) = (4, 7);
         // The editor sits at (60, 50) inside a panel that sits at (30, 20).
         let panel_origin = (30, 20);
@@ -591,10 +597,8 @@ mod tests {
                 let expected = Rc::clone(&expected);
                 let text = text.clone();
                 move |ui| {
-                    let panel = Panel::new(
-                        ui,
-                        Rect::new(panel_origin.0, panel_origin.1, 480, 380),
-                    )?;
+                    let panel =
+                        Panel::new(ui, Rect::new(panel_origin.0, panel_origin.1, 480, 380))?;
                     let scoped = ui.with_parent(panel.id());
                     let widget = crate::Editor::new(
                         &scoped,
