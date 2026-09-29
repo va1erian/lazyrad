@@ -133,11 +133,24 @@ fn the_designer_overlay_paints_inside_its_bounds() {
         let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
         let designer =
             Designer::new(ui, bounds, button_doc(), catalog, |_| ()).expect("the designer builds");
+        designer.select_node("ok_button", ui);
         vec![Box::new(designer)]
     });
     let theme = Theme::light();
     assert!(
         !painted(&image, CORNER, rgba(theme.background)),
         "the overlay painted its grid or outlines into the window corner"
+    );
+    // The selected button's outline is the overlay's accent colour, drawn
+    // around the button at (16, 16) in the form, so it lands inside the
+    // designer's bounds rather than near the window origin.
+    let accent = rgba(theme.accent);
+    let outline = (bounds.top as u32..bounds.bottom as u32)
+        .flat_map(|y| (bounds.left as u32..bounds.right as u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| image.pixel(x, y) == Some(accent))
+        .count();
+    assert!(
+        outline > 0,
+        "the selection outline is not painted inside the designer"
     );
 }
