@@ -154,7 +154,7 @@ fn draw_a_form_write_a_handler_press_f5_and_see_it_work() {
 
     assert_eq!(
         *launcher.launched.borrow(),
-        [dir.clone()],
+        std::slice::from_ref(&dir),
         "F5 launched the player on the project folder"
     );
 
