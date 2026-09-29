@@ -17,6 +17,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use lazyrad_designer::{
@@ -43,12 +44,15 @@ use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
 use crate::platform::dialogs;
 use crate::procedures::{self, ObjectEntry};
 use crate::project::{DEFAULT_PROJECT, ProjectSession};
+use crate::run::{self, RunEvent, RunId, RunState};
 use crate::settings::{Settings, ThemeChoice};
 
 /// The menu bar's height.
 const MENU_HEIGHT: Dip = dip(24.0);
 /// The toolbar's height.
 const TOOLBAR_HEIGHT: Dip = dip(32.0);
+/// The status bar's height.
+const STATUS_HEIGHT: Dip = dip(22.0);
 /// The divider thickness xui's [`Split`] draws, so computed pane sizes are
 /// exact.
 const DIVIDER: f32 = 5.0;
@@ -141,6 +145,8 @@ pub enum Msg {
         /// The object that was double-clicked.
         target: Target,
     },
+    /// A running program reported output, a diagnostic or its exit.
+    Run(RunId, RunEvent),
 }
 
 /// One diagnostic shown in the Error List, tagged with the document it belongs
@@ -484,6 +490,12 @@ pub struct IdeApp {
     last_replace: String,
     /// The query of an in-progress replace-all, between its two prompts.
     replace_query: Option<Query>,
+    /// The status bar, showing the IDE's Design/Run state.
+    status: Label<Msg>,
+    /// Launches the player for Run; injectable so tests drive a fake child.
+    launcher: Rc<dyn run::Launcher>,
+    /// The one running child, if any (issue #16).
+    run: RunState,
     /// Set when saving the settings on exit failed; the next Exit quits
     /// without saving, so a read-only config directory cannot trap the user.
     exit_save_failed: bool,
@@ -500,7 +512,12 @@ impl IdeApp {
         let menu_rect = menu_band.top.unwrap_or(client);
         let toolbar_band = Dock::new().top(TOOLBAR_HEIGHT).split(menu_band.fill, dpi);
         let toolbar_rect = toolbar_band.top.unwrap_or(client);
-        let main_rect = toolbar_band.fill;
+        // A status bar along the bottom shows Design/Run (issue #16).
+        let status_band = Dock::new()
+            .bottom(STATUS_HEIGHT)
+            .split(toolbar_band.fill, dpi);
+        let status_rect = status_band.bottom.unwrap_or_default();
+        let main_rect = status_band.fill;
 
         let (menu, menu_commands) = build_menu(ui, menu_rect, &recent)?;
         let menu_id = menu.id().unwrap_or(WidgetId::NONE);
@@ -575,6 +592,8 @@ impl IdeApp {
             "Properties",
         )?);
         let output = Label::new(output_panel.ui(), Rect::new(8, 8, 480, 24), "Output")?;
+        // The status bar label; `update_status` rewrites it as runs start and end.
+        let status = Label::new(ui, status_rect, "Design")?;
         // The Error List: one row per compile diagnostic. Activating a row
         // (double-click or Return) jumps to its position.
         let error_list = ListView::new(output_panel.ui(), Rect::default(), &[])?
@@ -680,6 +699,9 @@ impl IdeApp {
             last_find: String::new(),
             last_replace: String::new(),
             replace_query: None,
+            status,
+            launcher: Rc::new(run::PlayerLauncher),
+            run: RunState::new(),
             exit_save_failed: false,
         };
 
@@ -718,9 +740,17 @@ impl IdeApp {
         let menu_rect = menu_band.top.unwrap_or(client);
         let toolbar_band = Dock::new().top(TOOLBAR_HEIGHT).split(menu_band.fill, dpi);
         let toolbar_rect = toolbar_band.top.unwrap_or(client);
-        let main_rect = toolbar_band.fill;
+        let status_band = Dock::new()
+            .bottom(STATUS_HEIGHT)
+            .split(toolbar_band.fill, dpi);
+        let status_rect = status_band.bottom.unwrap_or_default();
+        let main_rect = status_band.fill;
 
-        ui.apply_moves(&[(self.menu_id, menu_rect), (self.toolbar_id, toolbar_rect)]);
+        ui.apply_moves(&[
+            (self.menu_id, menu_rect),
+            (self.toolbar_id, toolbar_rect),
+            (self.status.id(), status_rect),
+        ]);
 
         // The outer split's first pane is the toolbox, so its stored size maps
         // straight through. The others store their second pane's size, so the
@@ -901,8 +931,8 @@ impl IdeApp {
         }
     }
 
-    /// Updates the window title, which carries the project name and a `*` when
-    /// anything is unsaved.
+    /// Updates the window title, which carries the project name, a `*` when
+    /// anything is unsaved and `[run]` while a program is running.
     fn update_title(&self, ui: &Ui<Msg>) {
         let mut title = match &self.session {
             Some(session) => format!("LazyRAD - {}", session.name()),
@@ -911,7 +941,27 @@ impl IdeApp {
         if self.project_dirty() {
             title.push('*');
         }
+        if self.run.is_running() {
+            title.push_str(" [run]");
+        }
         ui.set_window_title(&title);
+    }
+
+    /// Updates the status bar's Design/Run text.
+    fn update_status(&self, ui: &Ui<Msg>) {
+        let state = if self.run.is_running() {
+            "Run"
+        } else {
+            "Design"
+        };
+        self.status.set_text(state);
+        ui.invalidate(self.status.id());
+    }
+
+    /// Whether a program is running; design-time editing is refused while it is
+    /// (issue #16, and the designer's hook once it lands).
+    pub fn is_running(&self) -> bool {
+        self.run.is_running()
     }
 
     /// Whether the project or any document has unsaved changes.
@@ -947,6 +997,18 @@ impl IdeApp {
 
     /// Runs a command.
     fn run_command(&mut self, command: Command, ui: &mut Ui<Msg>) {
+        // Design-time editing is refused while a program runs, as VB did
+        // (issue #16). Run → End and the view commands stay available.
+        if self.run.is_running() && command.is_editing() {
+            self.log(
+                ui,
+                format!(
+                    "{} is not available while the program is running.",
+                    command.label()
+                ),
+            );
+            return;
+        }
         match command {
             Command::Exit => self.request_exit(ui),
             Command::CloseProject => self.request_close(ui),
@@ -1017,6 +1079,8 @@ impl IdeApp {
             | Command::Paste
             | Command::Delete
             | Command::SelectAll => self.dispatch_edit(command, ui),
+            Command::RunStart => self.start_run(ui),
+            Command::RunEnd => self.end_run(ui),
             Command::ThemeLight => self.set_theme(ui, ThemeChoice::Light),
             Command::ThemeDark => self.set_theme(ui, ThemeChoice::Dark),
             Command::ThemeSystem => self.set_theme(ui, ThemeChoice::System),
@@ -1062,6 +1126,221 @@ impl IdeApp {
         // Re-flow so the pane contents (tree, toolbox, grid, output) follow the
         // panels the split just resized.
         self.layout_frame(ui);
+    }
+
+    // ---- Running the program (issue #16) ----------------------------------
+
+    /// Starts the open project: saves dirty documents, compile-checks it and
+    /// launches the player on the project directory.
+    ///
+    /// A failure at any step cancels the run: a save that fails leaves the
+    /// previous state intact, a compile check that finds problems fills the
+    /// Error List, and a failed spawn logs and stays in Design.
+    fn start_run(&mut self, ui: &mut Ui<Msg>) {
+        if self.run.is_running() {
+            self.log(ui, "A program is already running.");
+            return;
+        }
+        let Some(dir) = self
+            .session
+            .as_ref()
+            .map(|session| session.dir().to_path_buf())
+        else {
+            self.log(ui, "Open a project before running it.");
+            return;
+        };
+        let name = self
+            .session
+            .as_ref()
+            .map(|session| session.name().to_owned())
+            .unwrap_or_default();
+
+        // 1. Save every dirty document through the existing save path, so the
+        //    player reads exactly what the user sees.
+        if let Err(error) = self.save_for_run(ui) {
+            self.log(
+                ui,
+                format!("Run cancelled: the project could not be saved ({error})."),
+            );
+            return;
+        }
+
+        // 2. Compile-check; problems go to the Error List and nothing spawns.
+        if !self.check_for_run(&dir, ui) {
+            return;
+        }
+
+        // 3. Locate the player and spawn it.
+        let player = match run::resolve_player(self.settings.player_path.as_deref()) {
+            Ok(player) => player,
+            Err(error) => {
+                self.log(ui, error.to_string());
+                return;
+            }
+        };
+        let proxy = ui.proxy();
+        let sink: run::EventSink = Arc::new(move |run, event| {
+            let _ = proxy.send(Msg::Run(run, event));
+        });
+        match self.run.start(self.launcher.as_ref(), &player, &dir, sink) {
+            Ok(_) => {
+                self.dispatcher.set_running(true);
+                self.refresh_menu();
+                self.update_title(ui);
+                self.update_status(ui);
+                self.log(ui, format!("Running {name}..."));
+            }
+            Err(error) => self.log(ui, format!("The program could not start: {error}")),
+        }
+    }
+
+    /// Saves the project and every open document for a run, marking them clean.
+    fn save_for_run(&mut self, ui: &mut Ui<Msg>) -> Result<(), String> {
+        self.sync_documents();
+        let Some(result) = self.session.as_mut().map(ProjectSession::save) else {
+            return Ok(());
+        };
+        match result {
+            Ok(_) => {
+                for document in &mut self.documents {
+                    document.dirty = false;
+                }
+                self.update_title(ui);
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Compile-checks the saved project, filling the Error List with any
+    /// problems. Returns whether the project may start.
+    fn check_for_run(&mut self, dir: &Path, ui: &mut Ui<Msg>) -> bool {
+        let problems = match run::check(dir) {
+            Ok(problems) => problems,
+            Err(error) => {
+                self.log(ui, format!("Compile check failed: {error}"));
+                return false;
+            }
+        };
+        if problems.is_empty() {
+            // A clean check clears diagnostics an earlier compile left behind.
+            self.errors.clear();
+            self.refresh_error_list();
+            return true;
+        }
+        let entries: Vec<ErrorEntry> = problems
+            .iter()
+            .map(|problem| ErrorEntry {
+                name: self.item_for_diagnostic_file(&problem.file),
+                diagnostic: CodeDiagnostic::new(problem.line, problem.col, problem.message.clone()),
+            })
+            .collect();
+        self.errors = entries;
+        self.refresh_error_list();
+        for problem in &problems {
+            self.log(
+                ui,
+                format!(
+                    "{}:{}:{}: {}",
+                    problem.file, problem.line, problem.col, problem.message
+                ),
+            );
+        }
+        self.log(
+            ui,
+            format!("{} error(s): the program was not started.", problems.len()),
+        );
+        false
+    }
+
+    /// Ends the running program (Run → End).
+    fn end_run(&mut self, ui: &mut Ui<Msg>) {
+        if !self.run.is_running() {
+            self.log(ui, "No program is running.");
+            return;
+        }
+        self.run.end();
+        self.after_run_stopped(ui);
+        self.log(ui, "Program ended.");
+    }
+
+    /// Ends the running program because the project is changing or the IDE is
+    /// exiting, so a child never outlives the project it was started for.
+    fn stop_run(&mut self, ui: &mut Ui<Msg>) {
+        if self.run.is_running() {
+            self.run.end();
+            self.after_run_stopped(ui);
+            self.log(ui, "The running program was ended.");
+        }
+    }
+
+    /// Restores the Design state after a run stops.
+    fn after_run_stopped(&mut self, ui: &Ui<Msg>) {
+        self.dispatcher.set_running(false);
+        self.refresh_menu();
+        self.update_title(ui);
+        self.update_status(ui);
+    }
+
+    /// Handles one event from the active child. A stale run id is dropped, so a
+    /// late message cannot act on the run that replaced it (checklist 1).
+    fn on_run_event(&mut self, run: RunId, event: RunEvent, ui: &mut Ui<Msg>) {
+        if !self.run.accepts(run) {
+            return;
+        }
+        match event {
+            RunEvent::Output(line) => self.log(ui, line),
+            RunEvent::Diagnostic(report) => self.on_run_diagnostic(report, ui),
+            RunEvent::Exited(code) => {
+                self.run.finished(run);
+                self.after_run_stopped(ui);
+                match code {
+                    Some(0) | None => self.log(ui, "The program ended."),
+                    Some(code) => self.log(ui, format!("The program ended with exit code {code}.")),
+                }
+            }
+        }
+    }
+
+    /// Adds a diagnostic the player reported to the Error List and, for a
+    /// runtime error, opens the failing file and places the caret on its line.
+    fn on_run_diagnostic(&mut self, report: lazyrad_player::Report, ui: &mut Ui<Msg>) {
+        let name = self.item_for_diagnostic_file(&report.file);
+        let diagnostic = CodeDiagnostic::new(report.line, report.col, report.message.clone());
+        self.errors.push(ErrorEntry {
+            name: name.clone(),
+            diagnostic,
+        });
+        self.refresh_error_list();
+        if report.file.is_empty() {
+            self.log(ui, report.message.clone());
+        } else {
+            self.log(
+                ui,
+                format!("{}:{}: {}", report.file, report.line, report.message),
+            );
+        }
+        if report.kind == lazyrad_player::Kind::Runtime {
+            self.open_code(&name, ui);
+            if let Some(editor) = self.code_editor(&name) {
+                editor.goto(report.line.saturating_sub(1), report.col.saturating_sub(1));
+                editor.focus();
+            }
+        }
+    }
+
+    /// The project item a diagnostic's file belongs to, so activating the row
+    /// can open its code tab. Falls back to the raw path for an unknown file.
+    fn item_for_diagnostic_file(&self, file: &str) -> String {
+        let stem = Path::new(file)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.to_owned());
+        let known = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.code(&stem).is_some() || session.form(&stem).is_some());
+        if known { stem } else { file.to_owned() }
     }
 
     // ---- Project lifecycle -------------------------------------------------
@@ -1114,6 +1393,8 @@ impl IdeApp {
     /// Makes `session` the open project: resets the document tabs, refreshes
     /// the explorer and menus, records it as recent and opens its startup item.
     fn adopt_project(&mut self, session: ProjectSession, ui: &mut Ui<Msg>) {
+        // A running program belongs to the old project, so it is ended first.
+        self.stop_run(ui);
         let name = session.name().to_owned();
         let dir = session.dir().to_path_buf();
         let startup = session.startup().to_owned();
@@ -1246,6 +1527,7 @@ impl IdeApp {
     /// Saves the settings and quits, with the second-chance behaviour for a
     /// read-only config directory.
     fn finish_exit(&mut self, ui: &mut Ui<Msg>) {
+        self.stop_run(ui);
         match self.settings.save() {
             Ok(()) => ui.quit(),
             Err(_) if self.exit_save_failed => ui.quit(),
@@ -1263,6 +1545,7 @@ impl IdeApp {
 
     /// Drops the project, closes its documents and disables project commands.
     fn close_project(&mut self, ui: &mut Ui<Msg>) {
+        self.stop_run(ui);
         self.session = None;
         self.prompt = None;
         self.context_target = None;
@@ -2555,6 +2838,10 @@ impl App for IdeApp {
             Msg::ErrorActivated(row) => self.activate_error(row, ui),
             Msg::ObjectChanged(name, index) => self.change_object(&name, index, ui),
             Msg::ProcedureChanged(name, index) => self.insert_procedure(&name, index, ui),
+            // Design-time editing is off while a program runs, as VB did: the
+            // designer, toolbox and property grid ignore their input.
+            Msg::Designer { .. } | Msg::Toolbox(_) | Msg::PropertyGrid { .. }
+                if self.run.is_running() => {}
             Msg::Designer { document, msg } => {
                 if let Some((_, designer, designer_ui)) = self
                     .active_designer()
@@ -2572,6 +2859,7 @@ impl App for IdeApp {
             Msg::OpenDefaultHandler { form, target } => {
                 self.open_default_handler(&form, &target, ui);
             }
+            Msg::Run(run, event) => self.on_run_event(run, event, ui),
         }
     }
 }
@@ -2790,6 +3078,7 @@ mod tests {
     use super::*;
     use crate::project::SessionError;
     use lazyrad_designer::Tool;
+    use std::cell::Cell;
     use xui_canvas::OffscreenBackend;
     use xui_core::Key;
     use xui_core::backend::Backend;
@@ -2941,6 +3230,270 @@ mod tests {
     fn session_errors_read_well() {
         let error = SessionError::InvalidName("`bad` is not valid".to_owned());
         assert_eq!(error.to_string(), "`bad` is not valid");
+    }
+
+    /// A launcher that records calls and hands back a no-op child.
+    struct StubLauncher {
+        fail: bool,
+        launches: Cell<usize>,
+    }
+
+    impl StubLauncher {
+        fn ok() -> StubLauncher {
+            StubLauncher {
+                fail: false,
+                launches: Cell::new(0),
+            }
+        }
+
+        fn failing() -> StubLauncher {
+            StubLauncher {
+                fail: true,
+                launches: Cell::new(0),
+            }
+        }
+    }
+
+    impl run::Launcher for StubLauncher {
+        fn launch(
+            &self,
+            player: &Path,
+            _project_dir: &Path,
+            _run: RunId,
+            _sink: run::EventSink,
+        ) -> Result<Box<dyn run::ChildProcess>, run::LaunchError> {
+            self.launches.set(self.launches.get() + 1);
+            if self.fail {
+                return Err(run::LaunchError::new(
+                    player,
+                    std::io::Error::other("stub launch failure"),
+                ));
+            }
+            Ok(Box::new(StubChild))
+        }
+    }
+
+    struct StubChild;
+
+    impl run::ChildProcess for StubChild {
+        fn kill(&mut self) {}
+        fn is_running(&mut self) -> bool {
+            false
+        }
+    }
+
+    /// A fresh project directory for one run test, emptied first.
+    fn run_scratch(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lazyrad-ide-run-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Writes a stub player file the launcher never really runs.
+    fn player_stub(dir: &Path) -> PathBuf {
+        let player = dir.join("lazyrad-player-stub");
+        std::fs::write(&player, b"stub").expect("write the stub");
+        player
+    }
+
+    #[test]
+    fn starting_a_run_marks_running_and_routes_events() {
+        let dir = run_scratch("start");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::ok());
+
+            app.start_run(ui);
+            assert!(app.is_running());
+            assert!(app.dispatcher.is_running());
+            assert_eq!(app.status.text(), "Run");
+            let id = app.run.run_id().expect("a run id");
+            assert!(app.run.accepts(id));
+
+            // A stdout line becomes an Output pane entry.
+            app.on_run_event(
+                id,
+                RunEvent::Output("hello from the program".to_owned()),
+                ui,
+            );
+            assert!(
+                app.output_lines
+                    .iter()
+                    .any(|line| line == "hello from the program")
+            );
+
+            // A runtime diagnostic lists the error and opens the failing code.
+            let file = format!("{}.rhai", crate::project::DEFAULT_FORM);
+            app.on_run_event(
+                id,
+                RunEvent::Diagnostic(lazyrad_player::Report {
+                    kind: lazyrad_player::Kind::Runtime,
+                    file,
+                    line: 2,
+                    col: 5,
+                    message: "boom".to_owned(),
+                }),
+                ui,
+            );
+            assert_eq!(app.errors.len(), 1);
+            assert!(
+                app.code_editor(crate::project::DEFAULT_FORM).is_some(),
+                "a runtime error opens the failing file"
+            );
+
+            // The exit notice returns the IDE to Design.
+            app.on_run_event(id, RunEvent::Exited(Some(0)), ui);
+            assert!(!app.is_running());
+            assert_eq!(app.status.text(), "Design");
+
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_compile_error_stops_the_run_before_spawning() {
+        let dir = run_scratch("compile");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+            session.set_code(
+                crate::project::DEFAULT_FORM,
+                "fn broken() {\n    let x = ;\n}\n".to_owned(),
+            );
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.settings.player_path = Some(player_stub(&dir));
+            let launcher = Rc::new(StubLauncher::ok());
+            app.launcher = launcher.clone();
+
+            app.start_run(ui);
+
+            assert!(!app.is_running(), "a compile error does not start");
+            assert!(!app.errors.is_empty(), "the Error List shows the problem");
+            assert_eq!(launcher.launches.get(), 0, "no process was spawned");
+
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_failed_save_stops_the_run() {
+        let dir = run_scratch("save");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+            session.set_code(crate::project::DEFAULT_FORM, "// edited".to_owned());
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            // A file where the project folder should be makes every save fail.
+            std::fs::remove_dir_all(&dir).expect("remove the folder");
+            std::fs::write(&dir, b"in the way").expect("block the path");
+            let launcher = Rc::new(StubLauncher::ok());
+            app.launcher = launcher.clone();
+
+            app.start_run(ui);
+
+            assert!(!app.is_running(), "a failed save does not start");
+            assert_eq!(launcher.launches.get(), 0, "no process was spawned");
+            assert!(
+                app.output_lines
+                    .iter()
+                    .any(|line| line.contains("could not be saved"))
+            );
+
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_file(&cleanup);
+    }
+
+    #[test]
+    fn a_failed_spawn_leaves_the_ide_in_design() {
+        let dir = run_scratch("spawn");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::failing());
+
+            app.start_run(ui);
+
+            assert!(!app.is_running());
+            assert_eq!(app.status.text(), "Design");
+            assert!(
+                app.output_lines
+                    .iter()
+                    .any(|line| line.contains("could not start"))
+            );
+
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_stale_run_event_is_dropped() {
+        let dir = run_scratch("stale");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::ok());
+
+            app.start_run(ui);
+            let first = app.run.run_id().expect("a run id");
+            app.end_run(ui);
+            app.start_run(ui);
+            let second = app.run.run_id().expect("a run id");
+            assert_ne!(first, second, "a run id is never reused");
+
+            let before = app.output_lines.len();
+            app.on_run_event(first, RunEvent::Output("stale".to_owned()), ui);
+            assert_eq!(
+                app.output_lines.len(),
+                before,
+                "output from the ended run is dropped"
+            );
+            assert!(!app.run.finished(first), "a stale exit is dropped");
+            assert!(app.is_running(), "the new run is untouched");
+
+            app.on_run_event(second, RunEvent::Output("fresh".to_owned()), ui);
+            assert_eq!(app.output_lines.last().map(String::as_str), Some("fresh"));
+
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
     }
 
     #[test]

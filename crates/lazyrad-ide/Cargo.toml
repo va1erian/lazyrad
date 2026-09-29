@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 directories.workspace = true
 lazyrad-designer.workspace = true
+lazyrad-player.workspace = true
 lazyrad-project.workspace = true
 lazyrad-runtime.workspace = true
 rfd.workspace = true
