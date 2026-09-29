@@ -43,6 +43,8 @@ const TREE_PAD: i32 = 4;
 const TOOLBAR_ICON: i32 = 20;
 /// The leading gap of a labelled toolbar item.
 const TOOLBAR_GAP: i32 = 6;
+/// The split divider thickness, matching the app.
+const DIVIDER: i32 = 5;
 /// The explorer's row depths: the project, a group, an item.
 const ROW_DEPTHS: [u16; 5] = [0, 1, 2, 1, 2];
 
@@ -180,6 +182,49 @@ fn every_explorer_row_paints_its_icon_in_both_themes() {
                 "explorer row {row} (depth {depth}) painted no icon"
             );
         }
+    }
+}
+
+/// Whether the text label at `rect` (in the pane's own coordinates) painted
+/// inside the pane at `(pane_left, pane_top)`. A missing label leaves the pane's
+/// uniform surface there, so the rectangle's first pixel stands for it.
+fn label_painted(image: &Image, pane_left: i32, pane_top: i32, rect: (i32, i32, i32, i32)) -> bool {
+    let (left, top, right, bottom) = rect;
+    let (x, y) = (pane_left + left, pane_top + top);
+    let bg = image
+        .pixel(x as u32, y as u32)
+        .expect("the label is inside the window");
+    painted(image, x, y, right - left, bottom - top, bg)
+}
+
+#[test]
+fn every_pane_shows_its_title() {
+    let settings = Settings {
+        theme: ThemeChoice::Light,
+        ..Settings::default()
+    };
+    let panes = settings.panes;
+    let image = render_ide(settings, Theme::light());
+
+    let width = i32::try_from(image.width()).unwrap();
+    let height = i32::try_from(image.height()).unwrap();
+    let main_top = MENU_HEIGHT + TOOLBAR_HEIGHT;
+    let right_left = width - RIGHT_COLUMN;
+    // The centre row ends above the Output pane and its divider; the
+    // Properties pane is the bottom of the right column within it.
+    let centre_bottom = height - panes.output as i32 - DIVIDER;
+    let properties_top = centre_bottom - panes.project as i32;
+
+    for (name, left, top, rect) in [
+        ("Toolbox", 0, main_top, (8, 8, 132, 28)),
+        ("the toolbox's first entry", 0, main_top, (8, 36, 132, 56)),
+        ("Project", right_left, main_top, (8, 6, 220, 26)),
+        ("Properties", right_left, properties_top, (8, 8, 220, 28)),
+    ] {
+        assert!(
+            label_painted(&image, left, top, rect),
+            "{name} is not painted inside its pane"
+        );
     }
 }
 
