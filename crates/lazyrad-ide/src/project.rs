@@ -7,8 +7,8 @@
 //! [`ProjectSession`] wraps [`lazyrad_project::Project`] with the loaded form
 //! layouts and code-behind text, so the IDE can add, remove, rename and save
 //! items without touching the file model directly. The "Standard EXE" template
-//! lives here too: one `Form1` with a `.lfm` layout, a `.rhai` code-behind and
-//! an `.lrp` project file naming `Form1` as the startup.
+//! lives here too: one `main_form` with a `.lfm` layout, a `.rhai` code-behind and
+//! an `.lrp` project file naming `main_form` as the startup.
 //!
 //! Everything in this module is pure [`std`] plus [`lazyrad_project`]: it has
 //! no xui types, so the project rules are unit-testable headlessly.
@@ -23,7 +23,7 @@ use lazyrad_project::{
 };
 
 /// The form a "Standard EXE" project starts with.
-pub const DEFAULT_FORM: &str = "Form1";
+pub const DEFAULT_FORM: &str = "main_form";
 
 /// The name the New Project dialog offers.
 pub const DEFAULT_PROJECT: &str = "MyApp";
@@ -74,8 +74,8 @@ pub struct ProjectSession {
 impl ProjectSession {
     /// Creates a "Standard EXE" project named `name` in `dir` and writes it.
     ///
-    /// The project contains one form, [`DEFAULT_FORM`], with `Form1.lfm` and
-    /// `Form1.rhai`, and an `<name>.lrp` naming it as startup.
+    /// The project contains one form, [`DEFAULT_FORM`], with `main_form.lfm` and
+    /// `main_form.rhai`, and an `<name>.lrp` naming it as startup.
     pub fn create(name: &str, dir: &Path) -> Result<ProjectSession, SessionError> {
         if !is_identifier(name) {
             return Err(SessionError::InvalidName(format!(
@@ -246,9 +246,9 @@ impl ProjectSession {
 
     /// Adds a new form from the form template, returning its name.
     ///
-    /// The name is the first unused `Form<n>`.
+    /// The name is the first unused `form<n>`.
     pub fn add_form(&mut self) -> String {
-        let name = self.unique_name("Form");
+        let name = self.unique_name("form");
         self.project.items.push(ProjectItem::Form {
             name: name.clone(),
             layout: PathBuf::from(format!("{name}.lfm")),
@@ -262,9 +262,9 @@ impl ProjectSession {
 
     /// Adds a new standard module from the template, returning its name.
     ///
-    /// The name is the first unused `Module<n>`.
+    /// The name is the first unused `module<n>`.
     pub fn add_module(&mut self) -> String {
-        let name = self.unique_name("Module");
+        let name = self.unique_name("module");
         self.project.items.push(ProjectItem::Module {
             name: name.clone(),
             code: PathBuf::from(format!("{name}.rhai")),
@@ -610,8 +610,8 @@ mod tests {
         assert_eq!(session.name(), "MyApp");
         assert_eq!(session.startup(), DEFAULT_FORM);
         assert!(dir.join("MyApp.lrp").is_file());
-        assert!(dir.join("Form1.lfm").is_file());
-        assert!(dir.join("Form1.rhai").is_file());
+        assert!(dir.join("main_form.lfm").is_file());
+        assert!(dir.join("main_form.rhai").is_file());
         assert!(!session.is_dirty(), "create writes the files");
 
         let reopened = ProjectSession::open(&dir).expect("the project opens");
@@ -619,7 +619,7 @@ mod tests {
         assert_eq!(reopened.startup(), DEFAULT_FORM);
         assert_eq!(
             reopened.form(DEFAULT_FORM).map(|f| f.window.name.as_str()),
-            Some("Form1")
+            Some("main_form")
         );
         assert!(reopened.code(DEFAULT_FORM).is_some());
 
@@ -646,19 +646,19 @@ mod tests {
         let dir = scratch("add");
         let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
 
-        assert_eq!(session.add_form(), "Form2");
-        assert_eq!(session.add_module(), "Module1");
-        assert_eq!(session.add_module(), "Module2");
+        assert_eq!(session.add_form(), "form1");
+        assert_eq!(session.add_module(), "module1");
+        assert_eq!(session.add_module(), "module2");
         assert!(session.is_dirty());
-        assert_eq!(session.form_names(), ["Form1", "Form2"]);
-        assert_eq!(session.module_names(), ["Module1", "Module2"]);
+        assert_eq!(session.form_names(), ["main_form", "form1"]);
+        assert_eq!(session.module_names(), ["module1", "module2"]);
 
         let report = session.save().expect("save succeeds");
         assert!(!report.is_empty());
         assert!(!session.is_dirty());
-        assert!(dir.join("Form2.lfm").is_file());
-        assert!(dir.join("Form2.rhai").is_file());
-        assert!(dir.join("Module1.rhai").is_file());
+        assert!(dir.join("form1.lfm").is_file());
+        assert!(dir.join("form1.rhai").is_file());
+        assert!(dir.join("module1.rhai").is_file());
         assert!(
             session.diagnostics().is_empty(),
             "new items validate: {:?}",
@@ -675,26 +675,30 @@ mod tests {
         session.save().expect("initial save");
 
         session
-            .rename(DEFAULT_FORM, "frmMain")
+            .rename(DEFAULT_FORM, "start_form")
             .expect("rename succeeds");
 
         // Nothing moves on disk until the project is saved.
-        assert!(dir.join("Form1.lfm").is_file());
-        assert!(!dir.join("frmMain.lfm").exists());
-        assert_eq!(session.startup(), "frmMain", "startup follows the rename");
+        assert!(dir.join("main_form.lfm").is_file());
+        assert!(!dir.join("start_form.lfm").exists());
+        assert_eq!(
+            session.startup(),
+            "start_form",
+            "startup follows the rename"
+        );
         assert_eq!(
             session
-                .form("frmMain")
+                .form("start_form")
                 .map(|form| form.window.name.as_str()),
-            Some("frmMain"),
+            Some("start_form"),
             "the form's own name follows"
         );
 
         session.save().expect("save after rename");
-        assert!(!dir.join("Form1.lfm").exists());
-        assert!(!dir.join("Form1.rhai").exists());
-        assert!(dir.join("frmMain.lfm").is_file());
-        assert!(dir.join("frmMain.rhai").is_file());
+        assert!(!dir.join("main_form.lfm").exists());
+        assert!(!dir.join("main_form.rhai").exists());
+        assert!(dir.join("start_form.lfm").is_file());
+        assert!(dir.join("start_form.rhai").is_file());
         assert!(
             session.diagnostics().is_empty(),
             "the renamed project validates: {:?}",
@@ -702,8 +706,8 @@ mod tests {
         );
 
         let reopened = ProjectSession::open(&dir).expect("reopen");
-        assert_eq!(reopened.startup(), "frmMain");
-        assert!(reopened.form("frmMain").is_some());
+        assert_eq!(reopened.startup(), "start_form");
+        assert!(reopened.form("start_form").is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -713,7 +717,7 @@ mod tests {
         let dir = scratch("rename-discard");
         let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
         session
-            .rename(DEFAULT_FORM, "frmMain")
+            .rename(DEFAULT_FORM, "start_form")
             .expect("rename succeeds");
         drop(session); // Discard: the IDE closes without saving.
 
@@ -750,7 +754,7 @@ mod tests {
         let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
         // Renamed but not saved: the old names are pending deletion in `dir`.
         session
-            .rename(DEFAULT_FORM, "main_form")
+            .rename(DEFAULT_FORM, "renamed_form")
             .expect("rename succeeds");
 
         // The target holds an unrelated file with the old form's name.
@@ -765,7 +769,7 @@ mod tests {
             fs::read_to_string(&unrelated).expect("still there"),
             "// someone else's code"
         );
-        assert!(target.join("main_form.rhai").is_file());
+        assert!(target.join("renamed_form.rhai").is_file());
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&target);
@@ -828,11 +832,11 @@ mod tests {
         session.add_form();
 
         assert!(matches!(
-            session.rename("Form1", "Form2"),
+            session.rename("main_form", "form1"),
             Err(SessionError::InvalidName(_))
         ));
         assert!(matches!(
-            session.rename("Form1", "2bad"),
+            session.rename("main_form", "2bad"),
             Err(SessionError::InvalidName(_))
         ));
         assert!(matches!(
@@ -849,11 +853,15 @@ mod tests {
         let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
         let module = session.add_module();
         session.set_startup(&module);
-        assert_eq!(session.startup(), "Module1");
+        assert_eq!(session.startup(), "module1");
 
-        assert!(session.remove("Module1"));
-        assert_eq!(session.startup(), "Form1", "startup falls back to Form1");
-        assert!(!session.remove("Module1"), "a second remove is a no-op");
+        assert!(session.remove("module1"));
+        assert_eq!(
+            session.startup(),
+            "main_form",
+            "startup falls back to main_form"
+        );
+        assert!(!session.remove("module1"), "a second remove is a no-op");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -871,7 +879,7 @@ mod tests {
         assert_eq!(session.name(), "Renamed");
         assert_eq!(session.dir(), target.as_path());
         assert!(target.join("Renamed.lrp").is_file());
-        assert!(target.join("Form1.lfm").is_file());
+        assert!(target.join("main_form.lfm").is_file());
 
         let reopened = ProjectSession::open(&target).expect("reopen");
         assert_eq!(reopened.name(), "Renamed");
@@ -884,16 +892,16 @@ mod tests {
     fn the_done_when_flow_round_trips() {
         let dir = scratch("done-when");
         let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
-        assert_eq!(session.add_form(), "Form2");
-        assert_eq!(session.add_module(), "Module1");
+        assert_eq!(session.add_form(), "form1");
+        assert_eq!(session.add_module(), "module1");
         session
-            .rename("Form2", "frmSecond")
+            .rename("form1", "second_form")
             .expect("rename succeeds");
         session.save().expect("save succeeds");
 
         let reopened = ProjectSession::open(&dir).expect("reopen succeeds");
-        assert_eq!(reopened.form_names(), ["Form1", "frmSecond"]);
-        assert_eq!(reopened.module_names(), ["Module1"]);
+        assert_eq!(reopened.form_names(), ["main_form", "second_form"]);
+        assert_eq!(reopened.module_names(), ["module1"]);
         assert!(
             reopened.diagnostics().is_empty(),
             "the round trip validates: {:?}",

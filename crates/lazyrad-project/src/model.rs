@@ -61,7 +61,7 @@ impl Project {
     }
 }
 
-/// Whether `path` is a single plain file name, such as `frmMain.lfm`.
+/// Whether `path` is a single plain file name, such as `main_form.lfm`.
 ///
 /// Project item paths are relative to the project folder and must stay inside
 /// it: an absolute path, a `..`, a drive prefix or a subfolder is rejected, so
