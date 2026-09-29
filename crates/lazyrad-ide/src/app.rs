@@ -48,6 +48,7 @@ use crate::procedures::{self, ObjectEntry};
 use crate::project::{DEFAULT_PROJECT, ProjectSession};
 use crate::run::{self, RunEvent, RunId, RunState};
 use crate::settings::{Settings, ThemeChoice};
+use crate::start_page::StartPage;
 
 /// The menu bar's height.
 const MENU_HEIGHT: Dip = dip(24.0);
@@ -479,8 +480,8 @@ pub struct IdeApp {
     docs_ui: Ui<Msg>,
     /// The document tab container; `None` only while it is being rebuilt.
     docs: Option<Tabs<Msg>>,
-    /// The Start Page's welcome label, kept alive across tab rebuilds.
-    start_label: Option<Label<Msg>>,
+    /// The Start Page, kept alive across tab rebuilds.
+    start_page: Option<StartPage<Msg>>,
     documents: Vec<Document>,
     /// The live editors, so the window's timer tick can reach them.
     editors: Rc<RefCell<Vec<Rc<Editor<Msg>>>>>,
@@ -711,7 +712,7 @@ impl IdeApp {
             grid_form: None,
             docs_ui,
             docs: None,
-            start_label: None,
+            start_page: None,
             documents: Vec::new(),
             editors,
             explorer: Explorer::empty(),
@@ -2895,18 +2896,14 @@ impl IdeApp {
         self.grid_form = None;
         self.documents.clear();
         self.docs = None;
-        self.start_label = None;
+        self.start_page = None;
 
         let tabs = Tabs::new(&self.docs_ui, Rect::default())?
             .on_change(|index| Some(Msg::TabChanged(index)));
-        let welcome = Label::new(tabs.ui(), Rect::new(16, 16, 560, 48), WELCOME)?;
-        self.start_label = Some(welcome);
-        let welcome_id = self
-            .start_label
-            .as_ref()
-            .expect("the welcome label was just created")
-            .id();
-        self.docs = Some(tabs.page("Start Page", &[welcome_id]));
+        let start_page = StartPage::new(tabs.ui(), WELCOME)?;
+        let start_id = start_page.id();
+        self.start_page = Some(start_page);
+        self.docs = Some(tabs.page("Start Page", &[start_id]));
 
         for (name, kind) in open {
             self.open_document(&name, kind)?;
