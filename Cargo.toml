@@ -10,8 +10,6 @@ members = [
     "crates/lazyrad-runtime",
     "crates/lazyrad-packager",
     "crates/lazyrad-player",
-    "crates/xui-scrollbar",
-    "crates/xui-code-editor",
     "crates/lazyrad-designer",
     "crates/lazyrad-ide",
 ]
@@ -26,19 +24,15 @@ repository = "https://github.com/va1erian/lazyrad"
 [workspace.dependencies]
 # The UI toolkit, pinned to the revision LazyOS builds against (PLAN.md §1).
 # A `[patch]` for local xui fixes is kept at the bottom of this file.
-xui-core = { git = "https://github.com/va1erian/xui", rev = "54d23ea18a4e6d0c4783950f05ecfbbcbc1bd48e" }
-xui-canvas = { git = "https://github.com/va1erian/xui", rev = "54d23ea18a4e6d0c4783950f05ecfbbcbc1bd48e" }
+xui-core = { git = "https://github.com/va1erian/xui", rev = "1c666f34556c1b49f4233df7c3d8a68ff6ccb622" }
+xui-code-editor = { git = "https://github.com/va1erian/xui", rev = "1c666f34556c1b49f4233df7c3d8a68ff6ccb622" }
+xui-canvas = { git = "https://github.com/va1erian/xui", rev = "1c666f34556c1b49f4233df7c3d8a68ff6ccb622" }
 
 # The scripting language. `debugging` gives breakpoints and call stacks,
 # `metadata` feeds completion and signature help, and `internals` exposes the
 # tokenizer. `sync` is deliberately left off so the engine keeps `Rc`, matching
 # xui's single-threaded widgets (PLAN.md §1).
 rhai = { version = "1", features = ["debugging", "metadata", "internals"] }
-
-# The editor's find/replace supports an optional regular expression (PLAN.md
-# §5): `regex` is the same engine Rhai uses, so the syntax matches the language
-# the user is editing.
-regex = "1"
 
 # Project and form files are plain TOML (PLAN.md §1, §3): serde derives the
 # model, `toml` does the (de)serialisation, and `thiserror` types the errors
@@ -70,8 +64,6 @@ lazyrad-project = { path = "crates/lazyrad-project" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime" }
 lazyrad-packager = { path = "crates/lazyrad-packager" }
 lazyrad-player = { path = "crates/lazyrad-player" }
-xui-scrollbar = { path = "crates/xui-scrollbar" }
-xui-code-editor = { path = "crates/xui-code-editor" }
 lazyrad-designer = { path = "crates/lazyrad-designer" }
 
 # `#![forbid(unsafe_code)]` is also written at the top of every crate, so a
@@ -85,3 +77,4 @@ unsafe_code = "forbid"
 # [patch."https://github.com/va1erian/xui"]
 # xui-core = { path = "../xui/crates/xui-core" }
 # xui-canvas = { path = "../xui/crates/xui-canvas" }
+# xui-code-editor = { path = "../xui/crates/xui-code-editor" }
