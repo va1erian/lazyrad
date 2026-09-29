@@ -19,6 +19,7 @@ pub mod app;
 pub mod command;
 pub mod compile;
 pub mod dialog;
+pub mod edit_state;
 pub mod explorer;
 pub mod platform;
 pub mod procedures;
@@ -42,6 +43,7 @@ pub use app::{
     shortcut_message,
 };
 pub use command::{Command, Dispatcher, Shortcut};
+pub use edit_state::EditAvailability;
 pub use explorer::Explorer;
 pub use project::{ProjectSession, SessionError};
 pub use settings::{PaneSizes, Settings, SettingsError, ThemeChoice};

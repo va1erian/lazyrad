@@ -170,6 +170,9 @@ pub struct Buffer {
     /// The char range, in the current text, that edits have changed since the
     /// last [`Buffer::take_dirty`], used to re-lex only the affected lines.
     dirty: Option<Range<usize>>,
+    /// Counts every text change, so a caller can tell whether a command
+    /// changed the text without comparing it.
+    revision: u64,
 }
 
 impl Buffer {
@@ -185,7 +188,24 @@ impl Buffer {
             redo: Vec::new(),
             pending: None,
             dirty: None,
+            revision: 0,
         }
+    }
+
+    /// A counter that moves whenever the text changes (an edit, an undo or a
+    /// redo) and stays put otherwise.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Whether [`Buffer::undo`] has something to undo.
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Whether [`Buffer::redo`] has something to redo.
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     /// Widens the dirty range for a change at `start` that replaced `removed`
@@ -194,6 +214,7 @@ impl Buffer {
         if removed == 0 && inserted == 0 {
             return;
         }
+        self.revision = self.revision.wrapping_add(1);
         let new_end = start + inserted;
         self.dirty = Some(match self.dirty.take() {
             None => start..new_end,
@@ -330,6 +351,11 @@ impl Buffer {
     /// Inserts `text` at `at`. When `coalesce` is set and the previous edit was
     /// an adjacent typing run, the two share one undo group.
     pub fn insert(&mut self, at: usize, text: &str, coalesce: bool) {
+        // An empty insert changes nothing, so it must not leave an undo step
+        // (or a revision bump) behind.
+        if text.is_empty() {
+            return;
+        }
         let at = at.min(self.rope.len_chars());
         self.note_change(at, 0, text.chars().count());
         let edit = Edit {
@@ -363,6 +389,9 @@ impl Buffer {
     pub fn replace(&mut self, range: Range<usize>, text: &str, coalesce: bool) {
         let start = range.start.min(self.rope.len_chars());
         let end = range.end.min(self.rope.len_chars()).max(start);
+        if start == end && text.is_empty() {
+            return;
+        }
         self.note_change(start, end - start, text.chars().count());
         let before = self.rope.slice(start..end).to_string();
         let edit = Edit {
@@ -614,6 +643,31 @@ mod tests {
         buffer.insert(5, " world", true);
         assert_eq!(buffer.undo(), Some(5));
         assert_eq!(buffer.redo(), Some(11));
+    }
+
+    #[test]
+    fn the_revision_moves_only_when_the_text_changes() {
+        let mut buffer = Buffer::new("hello");
+        assert!(!buffer.can_undo() && !buffer.can_redo());
+        let start = buffer.revision();
+        buffer.insert(5, "", false);
+        buffer.remove(2..2, false);
+        assert_eq!(buffer.revision(), start, "empty edits change nothing");
+        assert_eq!(buffer.undo(), None);
+        assert_eq!(buffer.revision(), start, "an empty undo changes nothing");
+
+        buffer.insert(5, "!", false);
+        assert_ne!(buffer.revision(), start);
+        assert!(buffer.can_undo() && !buffer.can_redo());
+
+        let edited = buffer.revision();
+        buffer.undo();
+        assert_ne!(buffer.revision(), edited, "undo changes the text");
+        assert!(!buffer.can_undo() && buffer.can_redo());
+        let undone = buffer.revision();
+        buffer.redo();
+        assert_ne!(buffer.revision(), undone, "redo changes the text");
+        assert_eq!(buffer.redo(), None);
     }
 
     #[test]

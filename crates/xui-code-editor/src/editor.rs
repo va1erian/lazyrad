@@ -149,8 +149,14 @@ impl<M: 'static> Editor<M> {
     /// in-process one. A platform with its own clipboard implements
     /// [`Clipboard`](crate::Clipboard) and passes it here.
     pub fn with_clipboard(self, clipboard: impl Clipboard + 'static) -> Editor<M> {
-        self.state.borrow_mut().clipboard = Box::new(clipboard);
+        self.set_clipboard(clipboard);
         self
+    }
+
+    /// Replaces the clipboard on a live editor, like
+    /// [`Editor::with_clipboard`] for an editor that is already built.
+    pub fn set_clipboard(&self, clipboard: impl Clipboard + 'static) {
+        self.state.borrow_mut().clipboard = Box::new(clipboard);
     }
 
     /// Replaces the highlighter on a live editor, re-lexing the whole buffer.
@@ -432,6 +438,30 @@ impl<M: 'static> Editor<M> {
     pub fn set_options(&self, options: Options) {
         self.state.borrow_mut().options = options;
         self.control.invalidate();
+    }
+
+    /// Whether Undo has an edit to undo.
+    pub fn can_undo(&self) -> bool {
+        self.state.borrow().buffer.can_undo()
+    }
+
+    /// Whether Redo has an edit to redo.
+    pub fn can_redo(&self) -> bool {
+        self.state.borrow().buffer.can_redo()
+    }
+
+    /// Whether the clipboard holds text a paste would insert.
+    pub fn can_paste(&self) -> bool {
+        self.state
+            .borrow()
+            .clipboard
+            .text()
+            .is_some_and(|text| !text.is_empty())
+    }
+
+    /// Whether the buffer holds no text.
+    pub fn is_empty(&self) -> bool {
+        self.state.borrow().buffer.len_chars() == 0
     }
 
     /// The selected char range, ordered, or `None` when nothing is selected.

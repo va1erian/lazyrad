@@ -87,6 +87,7 @@ pub mod history;
 mod local_paint;
 pub mod property_grid;
 pub mod surface;
+mod text_field;
 pub mod toolbox;
 pub mod widget;
 

@@ -320,7 +320,10 @@ fn key_down<M: 'static>(
     let tab = state.options.tab_width;
     let layout = viewport(ui, id, state);
     let page = layout.visible_lines as i64;
-    let mut changed = false;
+    // Whether the text changed is read off the buffer afterwards, not assumed
+    // per key: Backspace at the top or Delete at the end changes nothing, and
+    // Tab indents without being an "edit key".
+    let revision = state.buffer.revision();
     if key != Key::BACK && key != Key::DELETE {
         state.buffer.break_coalescing();
     }
@@ -339,15 +342,12 @@ fn key_down<M: 'static>(
         Key::PAGE_DOWN => state.view.page(&state.buffer, tab, page, shift),
         Key::BACK => {
             edit::backspace(&mut state.buffer, &mut state.view);
-            changed = true;
         }
         Key::DELETE => {
             edit::delete_forward(&mut state.buffer, &mut state.view);
-            changed = true;
         }
         Key::RETURN => {
             edit::enter(&mut state.buffer, &mut state.view);
-            changed = true;
         }
         Key::TAB if shift => edit::outdent(&mut state.buffer, &mut state.view, &state.options),
         Key::TAB => edit::indent(&mut state.buffer, &mut state.view, &state.options),
@@ -356,20 +356,27 @@ fn key_down<M: 'static>(
             edit::copy(&state.buffer, &state.view, state.clipboard.as_ref());
         }
         Key::X if ctrl => {
-            changed = edit::cut(&mut state.buffer, &mut state.view, state.clipboard.as_ref())
+            edit::cut(&mut state.buffer, &mut state.view, state.clipboard.as_ref());
         }
         Key::V if ctrl => {
-            changed = edit::paste(&mut state.buffer, &mut state.view, state.clipboard.as_ref())
+            edit::paste(&mut state.buffer, &mut state.view, state.clipboard.as_ref());
         }
-        Key::Z if ctrl && shift => changed = edit::redo(&mut state.buffer, &mut state.view),
-        Key::Z if ctrl => changed = edit::undo(&mut state.buffer, &mut state.view),
-        Key::Y if ctrl => changed = edit::redo(&mut state.buffer, &mut state.view),
+        Key::Z if ctrl && shift => {
+            edit::redo(&mut state.buffer, &mut state.view);
+        }
+        Key::Z if ctrl => {
+            edit::undo(&mut state.buffer, &mut state.view);
+        }
+        Key::Y if ctrl => {
+            edit::redo(&mut state.buffer, &mut state.view);
+        }
         Key::ESCAPE => {
             state.view.collapse();
             state.view.dragging = false;
         }
         _ => return None,
     }
+    let changed = state.buffer.revision() != revision;
     finish_edit(state, ui, id);
     Some(Outcome { changed })
 }
@@ -681,6 +688,58 @@ mod tests {
             repeat: 1,
             system: false,
         }
+    }
+
+    fn key_down(key: xui_core::message::Key) -> Event {
+        Event::KeyDown {
+            key,
+            modifiers: xui_core::message::Modifiers::NONE,
+            repeat: 1,
+            system: false,
+        }
+    }
+
+    #[test]
+    fn keys_that_change_nothing_do_not_report_a_change() {
+        use xui_core::message::Key;
+
+        with_ui(|ui, id| {
+            let mut state = state("hello");
+            handle(&mut state, ui, id, &Event::SetFocus);
+            // Home, then Backspace at the top: the text is untouched.
+            handle(&mut state, ui, id, &key_down(Key::HOME));
+            let outcome = handle(&mut state, ui, id, &key_down(Key::BACK)).expect("handled");
+            assert!(!outcome.changed, "Backspace at the start deletes nothing");
+            handle(&mut state, ui, id, &key_down(Key::END));
+            let outcome = handle(&mut state, ui, id, &key_down(Key::DELETE)).expect("handled");
+            assert!(!outcome.changed, "Delete at the end deletes nothing");
+            // Undo with no history is not a change either.
+            let outcome = handle(&mut state, ui, id, &ctrl(Key::Z)).expect("handled");
+            assert!(!outcome.changed);
+            // A copy with the selection empty leaves the text alone.
+            let outcome = handle(&mut state, ui, id, &ctrl(Key::C)).expect("handled");
+            assert!(!outcome.changed);
+        });
+    }
+
+    #[test]
+    fn edits_undo_and_redo_report_a_change() {
+        use xui_core::message::Key;
+
+        with_ui(|ui, id| {
+            let mut state = state("hello");
+            handle(&mut state, ui, id, &Event::SetFocus);
+            handle(&mut state, ui, id, &key_down(Key::END));
+            let outcome = handle(&mut state, ui, id, &key_down(Key::BACK)).expect("handled");
+            assert!(outcome.changed);
+            assert_eq!(state.buffer.text(), "hell");
+            let outcome = handle(&mut state, ui, id, &ctrl(Key::Z)).expect("handled");
+            assert!(outcome.changed);
+            assert_eq!(state.buffer.text(), "hello");
+            let outcome = handle(&mut state, ui, id, &ctrl(Key::Y)).expect("handled");
+            assert!(outcome.changed);
+            assert_eq!(state.buffer.text(), "hell");
+        });
     }
 
     #[test]

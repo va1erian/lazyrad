@@ -79,6 +79,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
+use xui_code_editor::Clipboard;
 use xui_core::Lucide;
 use xui_core::Theme;
 use xui_core::app::Ui;
@@ -94,6 +95,7 @@ use xui_scrollbar::{Orientation, Scroll, ThumbState, TrackHit};
 use crate::grid_nav::{ObjectDropdown, RowMove, move_row};
 use crate::local_paint::paint_local;
 use crate::surface::Target;
+use crate::text_field::TextField;
 use crate::widget::Designer;
 
 /// The padding around the grid, in design units.
@@ -694,23 +696,23 @@ struct TextEditor<M: 'static> {
 }
 
 impl<M: 'static> TextEditor<M> {
-    /// Creates an editor showing `initial`, committed through `wrap`.
+    /// Creates an editor showing `initial`, committed through `wrap`, whose
+    /// Ctrl+C/X/V use `clipboard`.
     fn new(
         ui: &Ui<M>,
         bounds: Rect,
         initial: &str,
         wrap: Rc<dyn Fn(PropertyGridMsg) -> M>,
+        clipboard: Rc<dyn Clipboard>,
     ) -> Result<TextEditor<M>, BackendError> {
         let control = Control::new(ui, &NodeSpec::new(NodeKind::Custom, bounds).tab_stop())?;
         ui.set_cursor(control.id(), xui_core::backend::Cursor::Text);
-        let text = Rc::new(RefCell::new(initial.to_owned()));
-        let caret = Rc::new(Cell::new(initial.chars().count()));
+        let field = Rc::new(RefCell::new(TextField::new(initial)));
         let focused = Rc::new(Cell::new(true));
         let id = control.id();
 
         {
-            let text = Rc::clone(&text);
-            let caret = Rc::clone(&caret);
+            let field = Rc::clone(&field);
             let focused = Rc::clone(&focused);
             let theme = ui.theme_handle();
             let ui = ui.clone();
@@ -722,12 +724,22 @@ impl<M: 'static> TextEditor<M> {
                 let pad = PADDING.to_px(canvas.dpi()).value().max(0);
                 let inner = bounds.shrink(pad);
                 let style = TextStyle::new(theme.text, TEXT_SIZE).middle();
-                let value = text.borrow();
+                let field = field.borrow();
+                let value = field.text();
+                let dpi = canvas.dpi();
+                let advance_to = |chars: usize| {
+                    let prefix: String = value.chars().take(chars).collect();
+                    let advance = ui.measure_text(&prefix, &style, dpi).width;
+                    (inner.left + advance).min(inner.right)
+                };
+                if let Some((start, end)) = field.selection() {
+                    let rect =
+                        Rect::new(advance_to(start), inner.top, advance_to(end), inner.bottom);
+                    canvas.fill_rect(rect, theme.selection);
+                }
                 canvas.draw_text(&value, inner, &style);
                 if focused.get() {
-                    let prefix: String = value.chars().take(caret.get()).collect();
-                    let advance = ui.measure_text(&prefix, &style, canvas.dpi()).width;
-                    let x = (inner.left + advance).min(inner.right);
+                    let x = advance_to(field.caret());
                     canvas.draw_line(
                         Point::new(x, inner.top),
                         Point::new(x, inner.bottom),
@@ -739,8 +751,7 @@ impl<M: 'static> TextEditor<M> {
         }
 
         {
-            let text = Rc::clone(&text);
-            let caret = Rc::clone(&caret);
+            let field = Rc::clone(&field);
             let focused = Rc::clone(&focused);
             let ui = ui.clone();
             control.on_events(move |event| {
@@ -748,7 +759,7 @@ impl<M: 'static> TextEditor<M> {
                     Event::SetFocus => focused.set(true),
                     Event::KillFocus => {
                         focused.set(false);
-                        return Some(wrap(PropertyGridMsg::CommitText(text.borrow().clone())));
+                        return Some(wrap(PropertyGridMsg::CommitText(field.borrow().text())));
                     }
                     Event::MouseDown {
                         button: MouseButton::Left,
@@ -757,55 +768,36 @@ impl<M: 'static> TextEditor<M> {
                         focused.set(true);
                         ui.focus(id);
                     }
-                    Event::Char(character) if focused.get() && !character.is_control() => {
-                        let mut chars: Vec<char> = text.borrow().chars().collect();
-                        let at = caret.get().min(chars.len());
-                        chars.insert(at, *character);
-                        caret.set(at + 1);
-                        *text.borrow_mut() = chars.into_iter().collect();
-                        ui.invalidate(id);
+                    Event::Char(character) if focused.get() => {
+                        if field.borrow_mut().insert_char(*character) {
+                            ui.invalidate(id);
+                        }
                     }
                     Event::KeyDown {
                         key,
+                        modifiers,
                         repeat,
                         system,
-                        ..
-                    } if focused.get() && *repeat <= 1 && !*system => match *key {
-                        Key::RETURN => {
-                            return Some(wrap(PropertyGridMsg::CommitText(text.borrow().clone())));
+                    } if focused.get() && !*system => match *key {
+                        Key::RETURN if *repeat <= 1 => {
+                            return Some(wrap(PropertyGridMsg::CommitText(field.borrow().text())));
                         }
-                        Key::ESCAPE => return Some(wrap(PropertyGridMsg::Cancel)),
-                        Key::BACK => {
-                            let mut chars: Vec<char> = text.borrow().chars().collect();
-                            let at = caret.get().min(chars.len());
-                            if at > 0 {
-                                chars.remove(at - 1);
-                                caret.set(at - 1);
-                                *text.borrow_mut() = chars.into_iter().collect();
+                        Key::ESCAPE if *repeat <= 1 => {
+                            return Some(wrap(PropertyGridMsg::Cancel));
+                        }
+                        // Held keys repeat, so Backspace, Delete and the arrows
+                        // must run on repeats too; the chords do not.
+                        key => {
+                            let chord = modifiers.ctrl || modifiers.alt || modifiers.win;
+                            if (!chord || *repeat <= 1)
+                                && field.borrow_mut().key(key, *modifiers, clipboard.as_ref())
+                            {
                                 ui.invalidate(id);
                             }
                         }
-                        Key::DELETE => {
-                            let mut chars: Vec<char> = text.borrow().chars().collect();
-                            let at = caret.get().min(chars.len());
-                            if at < chars.len() {
-                                chars.remove(at);
-                                *text.borrow_mut() = chars.into_iter().collect();
-                                ui.invalidate(id);
-                            }
-                        }
-                        Key::LEFT => caret.set(caret.get().saturating_sub(1)),
-                        Key::RIGHT => {
-                            let len = text.borrow().chars().count();
-                            caret.set((caret.get() + 1).min(len));
-                        }
-                        Key::HOME => caret.set(0),
-                        Key::END => caret.set(text.borrow().chars().count()),
-                        _ => {}
                     },
                     _ => {}
                 }
-                let _ = &focused;
                 None
             });
         }
@@ -831,6 +823,8 @@ pub struct PropertyGrid<M: 'static> {
     catalog: Rc<Catalog>,
     state: Rc<RefCell<GridState<M>>>,
     wrap: Rc<dyn Fn(PropertyGridMsg) -> M>,
+    /// What the inline text editor's Ctrl+C/X/V read and write.
+    clipboard: Rc<dyn Clipboard>,
 }
 
 impl<M: 'static> PropertyGrid<M> {
@@ -854,6 +848,7 @@ impl<M: 'static> PropertyGrid<M> {
             catalog: Rc::clone(&catalog),
             state: Rc::clone(&state),
             wrap: Rc::clone(&wrap),
+            clipboard: Rc::from(xui_code_editor::platform::clipboard()),
         };
         grid.sync(ui);
 
@@ -891,6 +886,13 @@ impl<M: 'static> PropertyGrid<M> {
         }
 
         Ok(grid)
+    }
+
+    /// Replaces the clipboard the inline text editor copies, cuts and pastes
+    /// through (the OS clipboard by default).
+    pub fn with_clipboard(mut self, clipboard: impl Clipboard + 'static) -> PropertyGrid<M> {
+        self.clipboard = Rc::new(clipboard);
+        self
     }
 
     /// The grid's node identity.
@@ -1304,9 +1306,15 @@ impl<M: 'static> PropertyGrid<M> {
             }
             ValueType::Text { .. } | ValueType::Int { .. } | ValueType::Float { .. } => {
                 let wrap = Rc::clone(&self.wrap);
-                TextEditor::new(ui, cell, &format_value(&row.value), wrap)
-                    .map(Editor::Text)
-                    .map(Some)
+                TextEditor::new(
+                    ui,
+                    cell,
+                    &format_value(&row.value),
+                    wrap,
+                    Rc::clone(&self.clipboard),
+                )
+                .map(Editor::Text)
+                .map(Some)
             }
             _ => Ok(None),
         };

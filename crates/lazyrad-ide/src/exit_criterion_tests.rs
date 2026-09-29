@@ -30,8 +30,8 @@ use crate::settings::Settings;
 
 /// Records the one launch Start asks for, instead of opening a window.
 #[derive(Default)]
-struct RecordingLauncher {
-    launched: RefCell<Vec<PathBuf>>,
+pub(super) struct RecordingLauncher {
+    pub(super) launched: RefCell<Vec<PathBuf>>,
 }
 
 impl Launcher for RecordingLauncher {
@@ -166,7 +166,7 @@ fn draw_a_form_write_a_handler_press_f5_and_see_it_work() {
 }
 
 /// A file standing in for the player binary, so Start finds one to launch.
-fn player_placeholder(dir: &Path) -> PathBuf {
+pub(super) fn player_placeholder(dir: &Path) -> PathBuf {
     let player = dir.join("lazyrad-player-placeholder");
     std::fs::write(&player, b"placeholder").expect("write the placeholder");
     player
