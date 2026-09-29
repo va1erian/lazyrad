@@ -25,6 +25,9 @@ pub struct Metrics {
 const GUTTER_PADDING: Dip = Dip(6.0);
 /// The design width of a scrollbar.
 pub const SCROLLBAR: Dip = Dip(12.0);
+/// The design gap between the gutter and the text, so the first column does not
+/// touch the line numbers.
+const TEXT_PADDING: Dip = Dip(4.0);
 
 impl Metrics {
     /// The metrics for a measured glyph cell and a line count.
@@ -121,13 +124,13 @@ impl Viewport {
         dpi: u32,
     ) -> Viewport {
         let bar = SCROLLBAR.to_px(dpi).value();
+        let lead = metrics.gutter + TEXT_PADDING.to_px(dpi).value();
         let content_height = line_count.max(1) as i32 * metrics.line_height;
         let content_width = max_cols.max(1) as i32 * metrics.advance;
         // Each bar takes room from the other axis, so decide them together:
         // the vertical check is redone once the horizontal bar is known.
         let mut v_needed = content_height > bounds.height();
-        let h_needed =
-            content_width > bounds.width() - metrics.gutter - if v_needed { bar } else { 0 };
+        let h_needed = content_width > bounds.width() - lead - if v_needed { bar } else { 0 };
         if h_needed && !v_needed {
             v_needed = content_height > bounds.height() - bar;
         }
@@ -141,7 +144,7 @@ impl Viewport {
             bounds.bottom - hbar_h,
         );
         let text = Rect::new(
-            bounds.left + metrics.gutter,
+            bounds.left + lead,
             bounds.top,
             bounds.right - vbar_w,
             bounds.bottom - hbar_h,
@@ -222,6 +225,18 @@ mod tests {
         assert_eq!(metrics.col_at(text, 24, 2), 5);
         assert_eq!(metrics.y_of_line(text, 3, 1), 32);
         assert_eq!(metrics.line_at(text, 32, 1, 100), 3);
+    }
+
+    #[test]
+    fn the_text_starts_a_little_after_the_gutter() {
+        let metrics = Metrics::new(measured(80, 16), 5, true, 96);
+        let viewport = Viewport::split(Rect::new(0, 0, 400, 200), metrics, 5, 20, 96);
+        assert_eq!(viewport.gutter.right, metrics.gutter);
+        assert_eq!(
+            viewport.text.left,
+            metrics.gutter + 4,
+            "a 4px gap at 96dpi keeps the first column off the line numbers"
+        );
     }
 
     #[test]

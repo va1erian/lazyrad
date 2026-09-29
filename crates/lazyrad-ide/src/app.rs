@@ -65,6 +65,9 @@ const TABS_STRIP: Dip = dip(32.0);
 const CODE_HEADER: Dip = dip(26.0);
 /// The device-pixel height of a pane title, so a pane's widget starts below it.
 const PANE_TITLE: i32 = 28;
+/// The margin between a pane's edge and its title, and between the window's
+/// left edge and the status text.
+const PANE_MARGIN: Dip = dip(8.0);
 /// How often the compile scheduler is polled, in milliseconds.
 const COMPILE_POLL_MS: u32 = 100;
 /// How many output lines the pane keeps.
@@ -456,7 +459,7 @@ pub struct IdeApp {
     properties_panel: Panel<Msg>,
     /// The pane titles. A dropped widget destroys its node, so they live as
     /// long as the app.
-    _pane_labels: Vec<Label<Msg>>,
+    pane_labels: Vec<Label<Msg>>,
     /// The control catalog shared by every designer and the property grid.
     catalog: Rc<Catalog>,
     /// The toolbox tiles: one for the whole IDE, routed to the active designer.
@@ -693,7 +696,7 @@ impl IdeApp {
             output_panel,
             project_panel,
             properties_panel,
-            _pane_labels: labels,
+            pane_labels: labels,
             catalog: Rc::new(lazyrad_project::lazyrad_catalog()),
             toolbox,
             properties_grid: None,
@@ -766,10 +769,18 @@ impl IdeApp {
         let status_rect = status_band.bottom.unwrap_or_default();
         let main_rect = status_band.fill;
 
+        // The status text sits a little in from the window's left edge.
+        let margin = PANE_MARGIN.to_px(dpi).value();
+        let status_text = Rect::new(
+            status_rect.left + margin,
+            status_rect.top,
+            status_rect.right,
+            status_rect.bottom,
+        );
         ui.apply_moves(&[
             (self.menu_id, menu_rect),
             (self.toolbar_id, toolbar_rect),
-            (self.status.id(), status_rect),
+            (self.status.id(), status_text),
         ]);
 
         // The outer split's first pane is the toolbox, so its stored size maps
@@ -800,6 +811,25 @@ impl IdeApp {
         ));
 
         ui.relayout();
+
+        // Each pane's title strip spans its pane, less a margin either side, so
+        // it reads as a header rather than a box cut off partway.
+        let panes = [
+            self.toolbox_panel.id(),
+            self.project_panel.id(),
+            self.properties_panel.id(),
+        ];
+        let titles: Vec<(WidgetId, Rect)> = self
+            .pane_labels
+            .iter()
+            .zip(panes)
+            .map(|(label, pane)| {
+                let width = ui.bounds(pane).width();
+                let title = Rect::new(margin, 4, (width - margin).max(margin), 24);
+                (label.id(), title)
+            })
+            .collect();
+        ui.apply_moves(&titles);
 
         // The Project Explorer fills its panel below the title label.
         let panel = ui.bounds(self.project_panel.id());
