@@ -45,6 +45,10 @@ const TOOLBAR_ICON: i32 = 20;
 const TOOLBAR_GAP: i32 = 6;
 /// The split divider thickness, matching the app.
 const DIVIDER: i32 = 5;
+/// The device-pixel height of a pane title, matching the app's `PANE_TITLE`.
+const PANE_TITLE: i32 = 28;
+/// The design width of a toolbox tile at 96dpi, matching the widget.
+const TOOLBOX_TILE: i32 = 96;
 /// The explorer's row depths: the project, a group, an item.
 const ROW_DEPTHS: [u16; 5] = [0, 1, 2, 1, 2];
 
@@ -215,14 +219,66 @@ fn every_pane_shows_its_title() {
     let properties_top = centre_bottom - panes.project as i32;
 
     for (name, left, top, rect) in [
-        ("Toolbox", 0, main_top, (8, 8, 132, 28)),
-        ("the toolbox's first entry", 0, main_top, (8, 36, 132, 56)),
+        ("Toolbox", 0, main_top, (8, 6, 220, 26)),
         ("Project", right_left, main_top, (8, 6, 220, 26)),
-        ("Properties", right_left, properties_top, (8, 8, 220, 28)),
+        ("Properties", right_left, properties_top, (8, 6, 220, 26)),
     ] {
         assert!(
             label_painted(&image, left, top, rect),
             "{name} is not painted inside its pane"
+        );
+    }
+}
+
+#[test]
+fn the_toolbox_tiles_and_property_grid_paint_in_their_panes() {
+    for (theme, choice) in [
+        (Theme::light(), ThemeChoice::Light),
+        (Theme::dark(), ThemeChoice::Dark),
+    ] {
+        let settings = settings_with(choice);
+        let panes = settings.panes;
+        let image = render_ide(settings, theme);
+
+        let width = i32::try_from(image.width()).unwrap();
+        let height = i32::try_from(image.height()).unwrap();
+        let main_top = MENU_HEIGHT + TOOLBAR_HEIGHT;
+        let right_left = width - RIGHT_COLUMN;
+
+        // The toolbox tiles start below the pane title; sample the empty
+        // surface to the right of the one-column 96px tiles.
+        let tile_top = main_top + PANE_TITLE;
+        let surface = image
+            .pixel(
+                u32::try_from(120).unwrap(),
+                u32::try_from(tile_top + 4).unwrap(),
+            )
+            .expect("the toolbox surface is inside the window");
+        assert!(
+            painted(&image, 2, tile_top + 4, TOOLBOX_TILE - 4, 20, surface),
+            "the toolbox painted no tiles in {choice:?}"
+        );
+
+        // The property grid fills the Properties pane below its title.
+        let centre_bottom = height - panes.output as i32 - DIVIDER;
+        let properties_top = centre_bottom - panes.project as i32;
+        let grid_top = properties_top + PANE_TITLE;
+        let grid_bg = image
+            .pixel(
+                u32::try_from(right_left + 2).unwrap(),
+                u32::try_from(grid_top + 2).unwrap(),
+            )
+            .expect("the property grid surface is inside the window");
+        assert!(
+            painted(
+                &image,
+                right_left + 4,
+                grid_top + 6,
+                RIGHT_COLUMN - 8,
+                60,
+                grid_bg
+            ),
+            "the property grid painted nothing in {choice:?}"
         );
     }
 }

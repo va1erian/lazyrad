@@ -471,6 +471,29 @@ impl ProjectSession {
         self.forms.get(name)
     }
 
+    /// Replaces a form's layout with `doc`, marking the project dirty.
+    ///
+    /// Returns whether anything changed: an unknown name, a module, or a
+    /// document equal to the one already loaded is a no-op, so the designer
+    /// pushing the same document on every message does not dirty the project
+    /// spuriously. The new layout is written by the next [`save`](Self::save).
+    pub fn set_form(&mut self, name: &str, doc: FormDoc) -> bool {
+        if !self
+            .project
+            .items
+            .iter()
+            .any(|item| item.is_form() && item.name() == name)
+        {
+            return false;
+        }
+        if self.forms.get(name) == Some(&doc) {
+            return false;
+        }
+        self.forms.insert(name.to_owned(), doc);
+        self.dirty = true;
+        true
+    }
+
     /// The code-behind or module source `name`, if the item exists.
     pub fn code(&self, name: &str) -> Option<&str> {
         self.code.get(name).map(String::as_str)
@@ -889,6 +912,48 @@ mod tests {
 
         let second = session.save().expect("second save");
         assert!(second.is_empty(), "nothing changed since the first save");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_form_marks_dirty_only_when_the_layout_changes() {
+        let dir = scratch("set-form");
+        let mut session = ProjectSession::create("MyApp", &dir).expect("create succeeds");
+        let unchanged = session.form(DEFAULT_FORM).cloned().expect("a form");
+        assert!(
+            !session.set_form(DEFAULT_FORM, unchanged.clone()),
+            "pushing the same layout is a no-op"
+        );
+        assert!(!session.is_dirty());
+
+        let mut changed = unchanged;
+        changed.insert(lazyrad_project::Node::new("Button", "ok_button"));
+        assert!(
+            session.set_form(DEFAULT_FORM, changed),
+            "a new control dirties"
+        );
+        assert!(session.is_dirty());
+        assert!(
+            !session.set_form("NoSuchForm", FormDoc::new("NoSuchForm")),
+            "an unknown name is refused"
+        );
+        assert_eq!(
+            session
+                .form(DEFAULT_FORM)
+                .and_then(|form| form.node("ok_button"))
+                .map(|node| node.kind.as_str()),
+            Some("Button")
+        );
+
+        session.save().expect("save succeeds");
+        let reopened = ProjectSession::open(&dir).expect("reopen");
+        assert!(!reopened.is_dirty(), "a save clears the dirty flag");
+        assert!(
+            reopened
+                .form(DEFAULT_FORM)
+                .is_some_and(|form| form.node("ok_button").is_some())
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

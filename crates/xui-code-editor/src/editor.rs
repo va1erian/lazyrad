@@ -300,6 +300,81 @@ impl<M: 'static> Editor<M> {
         true
     }
 
+    /// Undoes the last edit, returning whether the text changed.
+    ///
+    /// The menu Edit → Undo action calls this; it does not raise
+    /// [`Editor::on_change`], so the caller owns dirty tracking.
+    pub fn undo(&self) -> bool {
+        self.edit(|state| edit::undo(&mut state.buffer, &mut state.view))
+    }
+
+    /// Redoes the last undone edit, returning whether the text changed.
+    pub fn redo(&self) -> bool {
+        self.edit(|state| edit::redo(&mut state.buffer, &mut state.view))
+    }
+
+    /// Copies the selection (or the caret's line) to the clipboard, returning
+    /// whether anything was copied. The text does not change.
+    pub fn copy(&self) -> bool {
+        let state = self.state.borrow();
+        edit::copy(&state.buffer, &state.view, state.clipboard.as_ref())
+    }
+
+    /// Cuts the selection (or the caret's line) to the clipboard, returning
+    /// whether the text changed.
+    pub fn cut(&self) -> bool {
+        self.edit(|state| edit::cut(&mut state.buffer, &mut state.view, state.clipboard.as_ref()))
+    }
+
+    /// Pastes the clipboard at the caret, replacing the selection. Returns
+    /// whether the text changed.
+    pub fn paste(&self) -> bool {
+        self.edit(|state| edit::paste(&mut state.buffer, &mut state.view, state.clipboard.as_ref()))
+    }
+
+    /// Deletes the selection, returning whether the text changed. With no
+    /// selection nothing is deleted, matching the Edit → Delete menu action.
+    pub fn delete_selection(&self) -> bool {
+        self.edit(|state| {
+            let Some((start, end)) = state.view.selection() else {
+                return false;
+            };
+            state.buffer.remove(start..end, false);
+            state.view.caret = start;
+            state.view.anchor = start;
+            state.view.goal_col = None;
+            true
+        })
+    }
+
+    /// Selects the whole buffer.
+    pub fn select_all(&self) {
+        {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            state.view.select_all(&state.buffer);
+        }
+        self.control.invalidate();
+    }
+
+    /// Runs a text-changing command: re-lexes the affected lines, repaints and
+    /// reports whether anything changed.
+    fn edit(&self, command: impl FnOnce(&mut EditorState) -> bool) -> bool {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            let changed = command(state);
+            if changed {
+                state.sync_highlight();
+            }
+            changed
+        };
+        if changed {
+            self.control.invalidate();
+        }
+        changed
+    }
+
     /// Finds `query` relative to the caret, returning the matched char range.
     ///
     /// A forward search starts at the caret and wraps to the top; a backward
@@ -505,6 +580,58 @@ mod tests {
 
                 editor.set_caret(0);
                 assert_eq!(editor.caret(), 0);
+                *sink.borrow_mut() = Some(());
+                Empty
+            },
+        )
+        .expect("run_app");
+        assert!(check.borrow().is_some());
+    }
+
+    #[test]
+    fn the_edit_menu_commands_change_and_restore_the_buffer() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use xui_canvas::OffscreenBackend;
+        use xui_core::backend::PlatformSpec;
+        use xui_core::geometry::Rect;
+        use xui_core::units::Dip;
+        use xui_core::{App, run_app};
+
+        struct Empty;
+        impl App for Empty {
+            type Msg = ();
+            fn update(&mut self, _msg: (), _ui: &mut xui_core::Ui<()>) {}
+        }
+
+        let check = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&check);
+        run_app(
+            Rc::new(OffscreenBackend::new()),
+            PlatformSpec::new("edit-menu").size(Dip(300.0), Dip(200.0)),
+            move |ui| {
+                let editor = crate::Editor::new(ui, Rect::new(0, 0, 300, 200))
+                    .expect("editor")
+                    // The thread-local clipboard, so the test neither needs an OS
+                    // clipboard (headless CI) nor clobbers the developer's.
+                    .with_clipboard(crate::platform::InProcessClipboard);
+                editor.set_text("hello world");
+                editor.select_all();
+                assert!(editor.cut(), "cut removed the selection");
+                assert_eq!(editor.text(), "");
+                assert!(editor.paste(), "paste restored it");
+                assert_eq!(editor.text(), "hello world");
+                assert!(editor.undo(), "undo removed the paste");
+                assert_eq!(editor.text(), "");
+                assert!(editor.redo(), "redo re-applied the paste");
+                assert_eq!(editor.text(), "hello world");
+
+                // Copy keeps the text; delete_selection clears it.
+                editor.select(0, 5);
+                assert!(editor.copy(), "copy found a selection");
+                assert!(editor.delete_selection(), "delete cleared the selection");
+                assert_eq!(editor.text(), " world");
                 *sink.borrow_mut() = Some(());
                 Empty
             },
