@@ -2479,9 +2479,31 @@ impl IdeApp {
             return;
         };
         self.context_target = entry.name().map(str::to_owned);
-        let bounds = ui.bounds(self.tree.id());
-        self.context_menu
-            .show_context(bounds.left + at.x, bounds.top + at.y);
+        // `at` is node-local, and `ui.bounds` is relative to the parent, so
+        // walk up the split nest to the window, which `show_context` expects.
+        let point = self.tree_point_in_window(at, ui);
+        self.context_menu.show_context(point.x, point.y);
+    }
+
+    /// The node-local point `at` in the tree, in window (client) coordinates.
+    ///
+    /// Every node's bounds are relative to its parent, so the window origin of
+    /// the tree is the sum of the bounds' origins up the chain: the tree's
+    /// panel, then the three splits that nest it (its own column, the centre
+    /// row, the rest column) and the outer row, which sits at the window.
+    fn tree_point_in_window(&self, at: Point, ui: &Ui<Msg>) -> Point {
+        let chain = [
+            self.tree.id(),
+            self.project_panel.id(),
+            self.right.id(),
+            self.centre.id(),
+            self.rest.id(),
+            self.outer.id(),
+        ];
+        chain.iter().fold(at, |point, id| {
+            let bounds = ui.bounds(*id);
+            Point::new(point.x + bounds.left, point.y + bounds.top)
+        })
     }
 
     /// Applies a context-menu action to the remembered item.
@@ -4118,6 +4140,85 @@ mod tests {
         .expect("the offscreen backend runs to completion");
 
         let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    /// Right-clicks the Project Explorer's first row, 10px in from the tree's
+    /// left edge, in a 1280x800 window with the given pane sizes. Returns the
+    /// click and the context popup's bounds, both in window coordinates.
+    fn right_click_explorer(
+        width: f32,
+        panes: crate::settings::PaneSizes,
+    ) -> (Point, xui_core::Rect) {
+        use xui_canvas::snapshot::{Snapshot, render_with};
+        use xui_core::backend::Event;
+        use xui_core::{Modifiers, MouseButton};
+
+        let hello = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("examples")
+            .join("hello");
+        let result = Rc::new(std::cell::RefCell::new(None));
+        let sink = Rc::clone(&result);
+        let popup = Rc::new(Cell::new(WidgetId::NONE));
+        let popup_out = Rc::clone(&popup);
+        let ids = Rc::new(Cell::new([WidgetId::NONE; 6]));
+        let ids_out = Rc::clone(&ids);
+        let tree_left = Rc::new(Cell::new(0));
+        let tree_left_out = Rc::clone(&tree_left);
+        render_with(
+            Snapshot::new(Dip(width), Dip(800.0)),
+            move |ui| {
+                let mut settings = Settings::default();
+                settings.panes = panes;
+                let mut app = IdeApp::build(ui, settings, Vec::new())?;
+                app.open_project(&hello, ui);
+                popup_out.set(app.context_menu.popup_id(0).unwrap_or(WidgetId::NONE));
+                // The tree's window origin, summed independently of the fix:
+                // the right column starts `right` design units from the edge.
+                tree_left_out
+                    .set(ui.client_rect().right - Dip(panes.right).to_px(ui.dpi()).value());
+                ids_out.set([
+                    app.tree.id(),
+                    app.project_panel.id(),
+                    app.right.id(),
+                    app.centre.id(),
+                    app.rest.id(),
+                    app.outer.id(),
+                ]);
+                Ok(app)
+            },
+            move |stage| {
+                // The first row, 28px below the pane top (menu 24, toolbar 32).
+                let click = Point::new(tree_left.get() + 10, 24 + 32 + 28 + 11);
+                stage.inject(Event::MouseDown {
+                    x: click.x,
+                    y: click.y,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::NONE,
+                });
+                *sink.borrow_mut() = Some((click, stage.ui().bounds(popup.get())));
+            },
+        )
+        .expect("the IDE renders");
+        let out = result.borrow_mut().take();
+        out.expect("the step ran")
+    }
+
+    #[test]
+    fn the_explorer_context_menu_opens_at_the_click_in_the_default_layout() {
+        let (click, popup) = right_click_explorer(1280.0, crate::settings::PaneSizes::default());
+        assert!((popup.left - click.x).abs() <= 3, "{popup:?} vs {click:?}");
+        assert!((popup.top - click.y).abs() <= 3, "{popup:?} vs {click:?}");
+    }
+
+    #[test]
+    fn the_explorer_context_menu_opens_at_the_click_in_a_narrow_window() {
+        // The narrower window puts the tree column much nearer the origin.
+        let (click, popup) = right_click_explorer(800.0, crate::settings::PaneSizes::default());
+        assert!(click.x < 700, "the tree is nearer the origin: {click:?}");
+        assert!((popup.left - click.x).abs() <= 3, "{popup:?} vs {click:?}");
+        assert!((popup.top - click.y).abs() <= 3, "{popup:?} vs {click:?}");
     }
 
     #[test]
