@@ -43,9 +43,18 @@ const TREE_ROW: i32 = 22;
 const TREE_INDENT: i32 = 16;
 const TREE_PAD: i32 = 4;
 /// The xui toolbar icon side at 96dpi.
-const TOOLBAR_ICON: i32 = 20;
-/// The leading gap of a labelled toolbar item.
-const TOOLBAR_GAP: i32 = 6;
+const TOOLBAR_ICON: i32 = 16;
+/// xui's compact toolbar: the padding before an item's icon, in pixels.
+const TOOLBAR_PADDING: i32 = 8;
+/// xui's compact toolbar: a separator slot (a 1px line and a 4px margin either
+/// side), in pixels.
+const TOOLBAR_SEPARATOR: i32 = 9;
+/// The toolbar item indices that start a new group (a separator before them),
+/// as in the app's `TOOLBAR_GROUP_STARTS`.
+const TOOLBAR_GROUP_STARTS: &[usize] = &[4, 6, 9];
+/// Past this x the toolbar strip must be empty: the packed buttons end well
+/// before it.
+const TOOLBAR_EMPTY_FROM: i32 = 640;
 /// The split divider thickness, matching the app.
 const DIVIDER: i32 = 5;
 /// The device-pixel height of a pane title, matching the app's `PANE_TITLE`.
@@ -141,24 +150,55 @@ fn every_toolbar_cell_paints_its_icon_in_both_themes() {
         assert_eq!((image.width(), image.height()), (1280, 800));
 
         let bg = toolbar_background(&image);
-        let width = i32::try_from(image.width()).unwrap();
-        let toolbar_top = MENU_HEIGHT;
-        for index in 0..TOOLBAR_ITEMS {
-            let start = width * index as i32 / TOOLBAR_ITEMS as i32;
-            let end = width * (index + 1) as i32 / TOOLBAR_ITEMS as i32;
-            let cell = end - start;
-            // Icon-only items centre the icon; Run and End lead with it.
-            let left = if index + 2 >= TOOLBAR_ITEMS {
-                start + TOOLBAR_GAP
-            } else {
-                start + (cell - TOOLBAR_ICON) / 2
-            };
-            let top = toolbar_top + (TOOLBAR_HEIGHT - TOOLBAR_ICON) / 2;
+        let top = MENU_HEIGHT + (TOOLBAR_HEIGHT - TOOLBAR_ICON) / 2;
+        // xui's compact layout at 96 dpi: icon-only buttons are squares as
+        // wide as the strip is tall, a separator slot is a line plus a margin
+        // either side, and every icon starts one padding in from its button.
+        let mut start = 0;
+        for index in 0..TOOLBAR_ITEMS - 1 {
+            if TOOLBAR_GROUP_STARTS.contains(&index) {
+                start += TOOLBAR_SEPARATOR;
+            }
             assert!(
-                painted(&image, left, top, TOOLBAR_ICON, TOOLBAR_ICON, bg),
-                "toolbar item {index} painted no icon in {name}"
+                painted(
+                    &image,
+                    start + TOOLBAR_PADDING,
+                    top,
+                    TOOLBAR_ICON,
+                    TOOLBAR_ICON,
+                    bg
+                ),
+                "toolbar item {index} painted no icon at x {} in {name}",
+                start + TOOLBAR_PADDING
             );
+            start += TOOLBAR_HEIGHT;
         }
+        // The last item, End, follows the labelled Run: it is somewhere past
+        // Run's icon, and the strip to the right of the packed buttons is empty.
+        let run_icon_end = start - TOOLBAR_HEIGHT + TOOLBAR_PADDING + TOOLBAR_ICON;
+        assert!(
+            painted(
+                &image,
+                run_icon_end,
+                top,
+                TOOLBAR_EMPTY_FROM - run_icon_end,
+                TOOLBAR_ICON,
+                bg
+            ),
+            "Run's label and End are drawn in {name}"
+        );
+        let width = i32::try_from(image.width()).unwrap();
+        assert!(
+            !painted(
+                &image,
+                TOOLBAR_EMPTY_FROM,
+                MENU_HEIGHT + 2,
+                width - TOOLBAR_EMPTY_FROM,
+                TOOLBAR_HEIGHT - 4,
+                bg
+            ),
+            "the buttons are packed from the left, so the rest of the strip is empty in {name}"
+        );
     }
 }
 

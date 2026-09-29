@@ -23,8 +23,8 @@ repository = "https://github.com/va1erian/lazyrad"
 [workspace.dependencies]
 # The UI toolkit, pinned to the revision LazyOS builds against (PLAN.md §1).
 # A `[patch]` for local xui fixes is kept at the bottom of this file.
-xui-core = { git = "https://github.com/va1erian/xui", rev = "b2a0a13c027df7dcf10ff70dde33cd1266c40869" }
-xui-canvas = { git = "https://github.com/va1erian/xui", rev = "b2a0a13c027df7dcf10ff70dde33cd1266c40869" }
+xui-core = { git = "https://github.com/va1erian/xui", rev = "ba4b2c91f6d0bb1757ba66f17939a347ff78386e" }
+xui-canvas = { git = "https://github.com/va1erian/xui", rev = "ba4b2c91f6d0bb1757ba66f17939a347ff78386e" }
 
 # The scripting language. `debugging` gives breakpoints and call stacks,
 # `metadata` feeds completion and signature help, and `internals` exposes the
