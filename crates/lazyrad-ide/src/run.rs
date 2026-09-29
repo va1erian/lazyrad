@@ -41,6 +41,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+/// `CREATE_NO_WINDOW` from the Windows SDK's `WinBase.h` process creation
+/// flags: start a console application without a console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 use lazyrad_player::Report;
 use lazyrad_runtime::check_project;
 
@@ -118,11 +123,21 @@ impl Launcher for PlayerLauncher {
         run: RunId,
         sink: EventSink,
     ) -> Result<Box<dyn ChildProcess>, LaunchError> {
-        let mut child = Command::new(player)
+        let mut command = Command::new(player);
+        command
             .arg(project_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // The IDE is a GUI-subsystem app, so Windows would give the
+        // console-subsystem player a console window of its own; its output is
+        // piped back to the IDE instead, so don't create one.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command
             .spawn()
             .map_err(|source| LaunchError::new(player, source))?;
 

@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+// A GUI application: on Windows, don't open a console window behind the IDE.
+// (Ignored on other platforms.) Messages go to the IDE's Output pane.
+#![windows_subsystem = "windows"]
 
 //! The `lazyrad-ide` binary: thin wrapper over [`lazyrad_ide::run`].
 
