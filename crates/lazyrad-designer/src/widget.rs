@@ -46,6 +46,7 @@ use xui_form::{
 };
 
 use crate::geometry::{DesignRect, Handle};
+use crate::local_paint::paint_local;
 use crate::surface::{
     Change, CursorHint, DEFAULT_GRID, KeyInput, KeyPress, Outcome, PropertyError, Selection,
     Surface, Target,
@@ -617,7 +618,9 @@ impl<M: 'static> Designer<M> {
         let surface = Rc::clone(&self.surface);
         let theme = ui.theme_handle();
         overlay.set_painter(Rc::new(move |canvas| {
-            paint(canvas, &surface.borrow(), &theme.get());
+            paint_local(canvas, |canvas, _| {
+                paint(canvas, &surface.borrow(), &theme.get());
+            });
         }));
 
         let wrap = Rc::clone(&self.wrap);

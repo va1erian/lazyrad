@@ -357,11 +357,12 @@ fn the_tabs_and_category_headers_show_lucide_icons() {
     let spec = PlatformSpec::new("grid").size(Dip(560.0), Dip(240.0));
 
     run_app(trait_backend, spec, move |ui| {
-        // The grid's painter works in its own coordinates, so this test gives
-        // it the window origin and puts the designer beside it.
+        // The designer on the left, the grid beside it at `left` (`x` in image
+        // pixels); the grid paints in its own coordinates.
+        let (left, x) = (340, 340_u32);
         let designer = Designer::new(
             ui,
-            Rect::new(240, 0, 560, 200),
+            Rect::new(0, 0, 320, 200),
             button_doc(),
             Rc::clone(&catalog),
             Msg::Designer,
@@ -370,7 +371,7 @@ fn the_tabs_and_category_headers_show_lucide_icons() {
         let designer = Rc::new(RefCell::new(designer));
         let grid = PropertyGrid::new(
             ui,
-            Rect::new(0, 0, 216, 200),
+            Rect::new(left, 0, left + 216, 200),
             Rc::clone(&designer),
             catalog,
             Msg::Grid,
@@ -381,19 +382,19 @@ fn the_tabs_and_category_headers_show_lucide_icons() {
         let image = backend.render(ui.window()).expect("the window renders");
 
         // A grid surface pixel, clear of the combo and the tabs.
-        let bg = image.pixel(1, 1).expect("a background sample");
+        let bg = image.pixel(x + 1, 1).expect("a background sample");
         // Tab icons: 16px, 4px in from each tab's left edge (tabs at y 32).
         assert!(
-            painted(&image, 8, 35, 16, 16, bg),
+            painted(&image, x + 8, 35, 16, 16, bg),
             "the Alphabetic tab shows its icon"
         );
         assert!(
-            painted(&image, 112, 35, 16, 16, bg),
+            painted(&image, x + 112, 35, 16, 16, bg),
             "the Categorized tab shows its icon"
         );
         // The first category header's expander chevron (body top 58).
         assert!(
-            painted(&image, 4, 62, 14, 14, bg),
+            painted(&image, x + 4, 62, 14, 14, bg),
             "the category header shows its chevron"
         );
 

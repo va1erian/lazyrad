@@ -32,6 +32,8 @@ use xui_core::units::Dip;
 use xui_core::widget::Control;
 use xui_core::{Lucide, Theme};
 
+use crate::local_paint::paint_local;
+
 /// The Iteration 1 control kinds the toolbox offers, by xui kind name.
 pub const CONTROL_KINDS: [&str; 8] = [
     "Button",
@@ -221,7 +223,9 @@ impl<M: 'static> Toolbox<M> {
             let state = Rc::clone(&state);
             let theme = ui.theme_handle();
             control.set_painter(Rc::new(move |canvas| {
-                paint(canvas, &tools, &state.borrow(), &theme.get());
+                paint_local(canvas, |canvas, area| {
+                    paint(canvas, area, &tools, &state.borrow(), &theme.get());
+                });
             }));
         }
         {
@@ -289,12 +293,11 @@ impl<M: 'static> Toolbox<M> {
     }
 }
 
-/// Paints the tile background, the icon and the label for every entry.
-fn paint(canvas: &mut dyn Canvas, tools: &[Tool], state: &State, theme: &Theme) {
+/// Paints the tile background, the icon and the label for every entry, over
+/// the toolbox's `area` in its own coordinates.
+fn paint(canvas: &mut dyn Canvas, area: Rect, tools: &[Tool], state: &State, theme: &Theme) {
     let dpi = canvas.dpi();
-    let bounds = canvas.bounds();
-    let area = Rect::new(0, 0, bounds.width(), bounds.height());
-    canvas.clear(theme.surface);
+    canvas.fill_rect(area, theme.surface);
 
     let layout = Layout::new(area, dpi);
     let icon = ICON_SIZE.to_px(dpi).value().max(1);
