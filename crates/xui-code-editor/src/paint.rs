@@ -221,7 +221,11 @@ fn paint_lines(
         for token in state.highlight.tokens(line) {
             let start = display_col(&raw, token.start, tab);
             let end = display_col(&raw, token.end, tab);
-            if end <= first_col || start >= last_col {
+            // Visibility uses the same one-column overhang margin as the drawn
+            // range, so a token ending just left of the view still draws the
+            // glyph that reaches into it.
+            let visible = drawn_cols(start..end, first_col, last_col);
+            if visible.is_empty() {
                 continue;
             }
             let style = state.options.font.style(theme.token_color(token.class));
@@ -233,11 +237,7 @@ fn paint_lines(
             // Only the visible columns are drawn, plus one either side for a
             // glyph that overhangs its cell, so a long token off to the side
             // costs nothing on each repaint.
-            let drawn = whole_clusters(
-                &line_chars,
-                drawn_cols(start..end, first_col, last_col),
-                start..end,
-            );
+            let drawn = whole_clusters(&line_chars, visible, start..end);
             let chars = &line_chars[drawn.clone()];
             for (offset, cluster) in clusters(chars) {
                 if cluster == " " {
@@ -541,6 +541,10 @@ mod tests {
         assert_eq!(drawn_cols(0..5, 0, 80), 0..5);
         // A token past the view draws nothing.
         assert!(drawn_cols(500..600, 100, 180).is_empty());
+        // A token ending at the view's left edge keeps its last column, whose
+        // glyph can overhang into view; one ending further left draws nothing.
+        assert_eq!(drawn_cols(90..100, 100, 180), 99..100);
+        assert!(drawn_cols(90..99, 100, 180).is_empty());
     }
 
     #[test]
