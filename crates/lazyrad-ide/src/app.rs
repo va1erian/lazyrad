@@ -3483,6 +3483,47 @@ mod tests {
     }
 
     #[test]
+    fn the_designer_ignores_input_while_running() {
+        let dir = run_scratch("designer-locked");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            let form = crate::project::DEFAULT_FORM.to_owned();
+            app.open_document(&form, DocKind::Designer)
+                .expect("the form opens in a designer");
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::ok());
+            app.start_run(ui);
+            assert!(app.is_running());
+
+            let controls = |app: &IdeApp| {
+                app.session
+                    .as_ref()
+                    .and_then(|session| session.form(&form))
+                    .map_or(0, |doc| doc.nodes.len())
+            };
+            let drop_button = Msg::Toolbox(ToolboxMsg::Activate(lazyrad_designer::Tool::control(
+                "Button",
+            )));
+            app.update(drop_button.clone(), ui);
+            assert_eq!(controls(&app), 0, "the toolbox is ignored while running");
+
+            app.end_run(ui);
+            app.update(drop_button, ui);
+            assert_eq!(controls(&app), 1, "and works again after End");
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
     fn the_project_structure_is_locked_while_running() {
         let dir = run_scratch("locked");
         let cleanup = dir.clone();
