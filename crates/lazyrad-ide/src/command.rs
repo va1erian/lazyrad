@@ -296,6 +296,24 @@ impl Command {
         )
     }
 
+    /// Whether the command changes design-time code or the project, so it must
+    /// be refused while a program is running (issue #16).
+    pub fn is_editing(self) -> bool {
+        matches!(
+            self,
+            Command::Undo
+                | Command::Redo
+                | Command::Cut
+                | Command::Paste
+                | Command::Delete
+                | Command::Replace
+                | Command::AddForm
+                | Command::AddModule
+                | Command::Remove
+                | Command::ProjectProperties
+        )
+    }
+
     /// The command a key-down event maps to, if any.
     ///
     /// Only plain Ctrl/Shift chords are bound; Alt combinations are left to the
@@ -321,6 +339,7 @@ impl Command {
 pub struct Dispatcher {
     enabled: HashMap<Command, bool>,
     project_open: bool,
+    running: bool,
 }
 
 impl Dispatcher {
@@ -329,10 +348,12 @@ impl Dispatcher {
         let mut dispatcher = Dispatcher {
             enabled: HashMap::new(),
             project_open: true,
+            running: false,
         };
         for &command in Command::ALL {
             dispatcher.enabled.insert(command, true);
         }
+        dispatcher.recompute();
         dispatcher
     }
 
@@ -358,14 +379,38 @@ impl Dispatcher {
         self.project_open
     }
 
+    /// Whether a program is currently running (issue #16).
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
     /// Records whether a project is open; project-scoped commands follow.
     pub fn set_project_open(&mut self, open: bool) {
         self.project_open = open;
+        self.recompute();
+    }
+
+    /// Records whether a program is running: Start is offered only while idle
+    /// and End only while running (issue #16).
+    pub fn set_running(&mut self, running: bool) {
+        self.running = running;
+        self.recompute();
+    }
+
+    /// Re-derives every command's enabled state from the project and run state.
+    ///
+    /// Run's two commands are special: a project-scoped command follows the
+    /// project, while Start/End also follow whether a program is running.
+    fn recompute(&mut self) {
         for &command in Command::ALL {
             if command.requires_project() {
-                self.enabled.insert(command, open);
+                self.enabled.insert(command, self.project_open);
             }
         }
+        self.enabled
+            .insert(Command::RunStart, self.project_open && !self.running);
+        self.enabled
+            .insert(Command::RunEnd, self.project_open && self.running);
     }
 
     /// Runs `command`'s M0 behaviour: log it. The commands that already have
@@ -512,6 +557,41 @@ mod tests {
 
         dispatcher.set_project_open(true);
         assert!(dispatcher.is_enabled(Command::Save));
+    }
+
+    #[test]
+    fn run_start_and_end_follow_the_running_state() {
+        let mut dispatcher = Dispatcher::new();
+        assert!(dispatcher.is_enabled(Command::RunStart));
+        assert!(
+            !dispatcher.is_enabled(Command::RunEnd),
+            "End is for a running program only"
+        );
+
+        dispatcher.set_running(true);
+        assert!(!dispatcher.is_enabled(Command::RunStart));
+        assert!(dispatcher.is_enabled(Command::RunEnd));
+
+        dispatcher.set_running(false);
+        assert!(dispatcher.is_enabled(Command::RunStart));
+        assert!(!dispatcher.is_enabled(Command::RunEnd));
+
+        dispatcher.set_running(true);
+        dispatcher.set_project_open(false);
+        assert!(
+            !dispatcher.is_enabled(Command::RunEnd),
+            "closing the project ends the run"
+        );
+    }
+
+    #[test]
+    fn mutating_commands_are_refused_while_running() {
+        assert!(Command::AddForm.is_editing());
+        assert!(Command::Remove.is_editing());
+        assert!(Command::Paste.is_editing());
+        assert!(!Command::RunEnd.is_editing());
+        assert!(!Command::Save.is_editing());
+        assert!(!Command::ViewCode.is_editing());
     }
 
     #[test]

@@ -27,6 +27,9 @@ const HEIGHT: Dip = Dip(800.0);
 const MENU_HEIGHT: i32 = 24;
 /// The toolbar's height.
 const TOOLBAR_HEIGHT: i32 = 32;
+/// The status bar's height, matching the app; it is carved off the bottom
+/// before the split area, so every pane ends above it.
+const STATUS_HEIGHT: i32 = 22;
 /// The number of main-toolbar items.
 const TOOLBAR_ITEMS: usize = 11;
 /// The Project Explorer's icons live in the right-hand column, whose width is
@@ -213,9 +216,9 @@ fn every_pane_shows_its_title() {
     let height = i32::try_from(image.height()).unwrap();
     let main_top = MENU_HEIGHT + TOOLBAR_HEIGHT;
     let right_left = width - RIGHT_COLUMN;
-    // The centre row ends above the Output pane and its divider; the
-    // Properties pane is the bottom of the right column within it.
-    let centre_bottom = height - panes.output as i32 - DIVIDER;
+    // The centre row ends above the Output pane, its divider and the status
+    // bar; the Properties pane is the bottom of the right column within it.
+    let centre_bottom = height - STATUS_HEIGHT - panes.output as i32 - DIVIDER;
     let properties_top = centre_bottom - panes.project as i32;
 
     for (name, left, top, rect) in [

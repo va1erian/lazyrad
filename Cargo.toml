@@ -64,6 +64,7 @@ rfd = "0.17"
 xui-form = { path = "crates/xui-form" }
 lazyrad-project = { path = "crates/lazyrad-project" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime" }
+lazyrad-player = { path = "crates/lazyrad-player" }
 xui-code-editor = { path = "crates/xui-code-editor" }
 lazyrad-designer = { path = "crates/lazyrad-designer" }
 
