@@ -1320,7 +1320,13 @@ impl IdeApp {
                 format!("{}:{}: {}", report.file, report.line, report.message),
             );
         }
-        if report.kind == lazyrad_player::Kind::Runtime {
+        // Jump only when the file is a project item: an error with no location
+        // (Rhai gives none for `1 / 0`) is listed but opens nothing.
+        let known = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.code(&name).is_some());
+        if report.kind == lazyrad_player::Kind::Runtime && known {
             self.open_code(&name, ui);
             if let Some(editor) = self.code_editor(&name) {
                 editor.goto(report.line.saturating_sub(1), report.col.saturating_sub(1));
@@ -3610,6 +3616,49 @@ mod tests {
             app.end_run(ui);
             app.rename_item(&module, "renamed_module", ui);
             assert!(has(&app, "renamed_module"));
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_runtime_error_without_a_file_is_listed_but_opens_nothing() {
+        let dir = run_scratch("no-file");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::ok());
+            app.start_run(ui);
+            let id = app.run.run_id().expect("a run id");
+            let tabs = app.documents.len();
+
+            app.on_run_event(
+                id,
+                RunEvent::Diagnostic(lazyrad_player::Report {
+                    kind: lazyrad_player::Kind::Runtime,
+                    file: String::new(),
+                    line: 0,
+                    col: 0,
+                    message: "Division by zero: 1 / 0".to_owned(),
+                }),
+                ui,
+            );
+            assert_eq!(app.errors.len(), 1, "the error is listed");
+            assert_eq!(app.documents.len(), tabs, "no code tab was opened");
+            assert!(
+                !app.output_lines
+                    .iter()
+                    .any(|line| line.contains("has no code")),
+                "no confusing log line: {:?}",
+                app.output_lines
+            );
             app
         })
         .expect("the offscreen backend runs to completion");
