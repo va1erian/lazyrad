@@ -4359,3 +4359,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cleanup);
     }
 }
+
+#[cfg(test)]
+#[path = "exit_criterion_tests.rs"]
+mod exit_criterion_tests;
