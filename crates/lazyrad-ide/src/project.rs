@@ -581,7 +581,7 @@ fn is_identifier(name: &str) -> bool {
 
 /// The code-behind template for a new form.
 fn form_code(name: &str) -> String {
-    format!("// {name} — event handlers for the form.\n\nfn Form_Load() {{\n}}\n")
+    format!("// {name} — event handlers for the form.\n\nfn form_load() {{\n}}\n")
 }
 
 /// The source template for a new standard module.
