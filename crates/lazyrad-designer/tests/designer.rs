@@ -721,7 +721,7 @@ fn set_doc_keeps_the_current_form_when_the_new_one_is_invalid_and_resizes_the_pa
         .expect("the designer builds");
 
         // An unknown kind is rejected, and the current form survives.
-        let mut invalid = FormDoc::new("frmBroken");
+        let mut invalid = FormDoc::new("broken_form");
         invalid.insert(Node::new("NoSuchKind", "ghost"));
         let rejected = designer.set_doc(invalid, ui).is_err();
         let kept = designer.doc().window.name.clone();

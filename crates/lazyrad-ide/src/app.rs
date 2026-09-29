@@ -3120,11 +3120,11 @@ mod tests {
             assert_eq!(app.grid_form.as_deref(), Some(crate::project::DEFAULT_FORM));
             assert!(app.properties_grid.is_some());
 
-            app.open_document("Form2", DocKind::Designer)
+            app.open_document("form1", DocKind::Designer)
                 .expect("the second form opens");
             assert_eq!(
                 app.grid_form.as_deref(),
-                Some("Form2"),
+                Some("form1"),
                 "the grid follows the newly opened form"
             );
 
