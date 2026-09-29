@@ -46,7 +46,7 @@ lazyrad/
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
 │  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (JSON lines over stdio)
 │  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir, a payload, or --debug
-│  ├─ lazyrad-editor/         xui code-editor widget (buffer, view, highlight, completion)
+│  ├─ xui-code-editor/        xui code-editor widget (buffer, view, highlight, completion)
 │  ├─ lazyrad-designer/       xui form-designer surface, toolbox, property grid
 │  ├─ lazyrad-packager/       exe export: stub + payload, icon/metadata where possible
 │  └─ lazyrad-ide/     (bin)  the IDE shell: windows, menus, project explorer, wiring
@@ -211,7 +211,7 @@ Rhai integration (AST-aware completion, inline diagnostics, breakpoint gutter) w
 nothing extra to port to LazyOS. **Recommendation: build a custom editor, with an
 optional one-week Scintilla spike only if the custom editor stalls.**
 
-### Custom editor design (`lazyrad-editor`)
+### Custom editor design (`xui-code-editor`)
 
 - **Buffer:** `ropey` rope, a line index, and a transactional undo/redo stack that
   coalesces typing runs.

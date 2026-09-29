@@ -5,7 +5,7 @@
 //! Each function takes the buffer, the view and (where it needs it) the
 //! clipboard, and returns whether the text changed so the widget can raise
 //! `on_change`. Keeping the rules here means typing, auto-indent, indentation,
-//! cut/copy/paste and undo are all unit-tested directly (PLAN.md §5).
+//! cut/copy/paste and undo are all unit-tested directly.
 
 use crate::buffer::Buffer;
 use crate::options::Options;

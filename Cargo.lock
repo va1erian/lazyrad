@@ -1159,26 +1159,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazyrad-editor"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "lazyrad-runtime",
- "regex",
- "rhai",
- "ropey",
- "xui-canvas",
- "xui-core",
-]
-
-[[package]]
 name = "lazyrad-ide"
 version = "0.1.0"
 dependencies = [
  "dark-light",
  "directories",
  "lazyrad-designer",
- "lazyrad-editor",
  "lazyrad-project",
  "lazyrad-runtime",
  "rfd",
@@ -1186,6 +1172,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "xui-canvas",
+ "xui-code-editor",
  "xui-core",
  "xui-form",
 ]
@@ -3299,6 +3286,18 @@ dependencies = [
  "winit",
  "xui-core",
  "xui-gpu",
+]
+
+[[package]]
+name = "xui-code-editor"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "regex",
+ "rhai",
+ "ropey",
+ "xui-canvas",
+ "xui-core",
 ]
 
 [[package]]
