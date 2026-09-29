@@ -57,7 +57,7 @@ use xui_form::{
     build_with,
 };
 
-use lazyrad_project::{Project, lazyrad_catalog, load_form};
+use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
 use crate::control::FormHost;
 use crate::engine::EngineHost;
@@ -160,8 +160,8 @@ pub enum RuntimeError {
 /// different form to open, and the request travels through this type.
 pub struct FormRuntime {
     project: Project,
-    forms: BTreeMap<String, FormSource>,
-    modules: Vec<ModuleSource>,
+    pub(crate) forms: BTreeMap<String, FormSource>,
+    pub(crate) modules: Vec<ModuleSource>,
     catalog: Catalog,
     pending: Pending,
     /// The project directory, shown to scripts as `App.path`.
@@ -188,19 +188,41 @@ impl FormRuntime {
     /// (the value scripts see as `app.path`).
     pub fn load_path(path: impl AsRef<Path>) -> Result<Rc<FormRuntime>, RuntimeError> {
         let (dir, project) = open_project(path.as_ref())?;
+        let root = dir.clone();
+        Self::from_project(project, dir, |relative| {
+            fs::read_to_string(root.join(relative))
+        })
+    }
+
+    /// Builds a runtime from a project and a way to read its files, without
+    /// assuming they live on disk.
+    ///
+    /// `read` returns the text of a file named by an item path (`main.lfm`,
+    /// `main.rhai`); `dir` is only what scripts see as `app.path`. The player
+    /// uses this to run an exported executable's payload from memory, and
+    /// [`FormRuntime::load_path`] uses it to read from the project folder, so
+    /// both take exactly the same route.
+    pub fn from_project(
+        project: Project,
+        dir: PathBuf,
+        read: impl Fn(&Path) -> std::io::Result<String>,
+    ) -> Result<Rc<FormRuntime>, RuntimeError> {
         let catalog = lazyrad_catalog();
         let mut forms = BTreeMap::new();
         let mut modules = Vec::new();
 
         for item in &project.items {
-            let code_path = dir.join(item.code());
-            let code = fs::read_to_string(&code_path).map_err(|source| RuntimeError::Io {
-                path: code_path.clone(),
+            let code = read(item.code()).map_err(|source| RuntimeError::Io {
+                path: dir.join(item.code()),
                 source,
             })?;
             match item.layout() {
                 Some(layout) => {
-                    let doc = load_form(&dir.join(layout), &catalog)?;
+                    let text = read(layout).map_err(|source| RuntimeError::Io {
+                        path: dir.join(layout),
+                        source,
+                    })?;
+                    let doc = parse_form(&dir.join(layout), &text, &catalog)?;
                     forms.insert(
                         item.name().to_owned(),
                         FormSource {

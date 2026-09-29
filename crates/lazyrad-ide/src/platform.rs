@@ -58,6 +58,19 @@ pub mod dialogs {
             .save_file()
     }
 
+    /// Asks where to write the exported executable, suggesting `file_name`.
+    ///
+    /// `None` when the user cancels.
+    pub fn save_exe_file(file_name: &str) -> Option<PathBuf> {
+        let mut dialog = FileDialog::new()
+            .set_title("Make Executable")
+            .set_file_name(file_name);
+        if !std::env::consts::EXE_EXTENSION.is_empty() {
+            dialog = dialog.add_filter("Program", &[std::env::consts::EXE_EXTENSION]);
+        }
+        dialog.save_file()
+    }
+
     /// The folder a chosen file lives in, or the file itself when it has no
     /// parent (the filesystem root).
     pub fn containing_folder(path: &Path) -> PathBuf {

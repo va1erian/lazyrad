@@ -21,6 +21,11 @@ pub struct Project {
     pub startup: String,
     /// The forms and modules that make up the project.
     pub items: Vec<ProjectItem>,
+    /// An optional `.ico` file, relative to the project directory, used as the
+    /// icon of an exported executable. Checked like an item path: it must be a
+    /// plain file name in the project folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PathBuf>,
 }
 
 impl Project {
@@ -32,6 +37,7 @@ impl Project {
             version: "0.1.0".to_owned(),
             startup: name,
             items: Vec::new(),
+            icon: None,
         }
     }
 
@@ -50,14 +56,32 @@ impl Project {
         format!("{}.lrp", self.name)
     }
 
-    /// The first item path that is not a plain file name in the project
+    /// The first item path (or the icon path) that is not a plain file name in the project
     /// folder, if any (see [`is_plain_file_name`]).
     pub fn unsafe_item_path(&self) -> Option<&Path> {
-        self.items.iter().find_map(|item| {
-            std::iter::once(item.code())
-                .chain(item.layout())
-                .find(|path| !is_plain_file_name(path))
-        })
+        self.items
+            .iter()
+            .find_map(|item| {
+                std::iter::once(item.code())
+                    .chain(item.layout())
+                    .find(|path| !is_plain_file_name(path))
+            })
+            .or_else(|| {
+                self.icon
+                    .as_deref()
+                    .filter(|path| !is_plain_file_name(path))
+            })
+    }
+}
+
+impl Project {
+    /// Every file the project references by path: each item's code and layout,
+    /// then the icon.
+    pub fn referenced_files(&self) -> impl Iterator<Item = &Path> {
+        self.items
+            .iter()
+            .flat_map(|item| std::iter::once(item.code()).chain(item.layout()))
+            .chain(self.icon.as_deref())
     }
 }
 

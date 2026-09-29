@@ -43,6 +43,7 @@ use crate::command::{Command, Dispatcher};
 use crate::compile::{self, CodeDiagnostic, CompileScheduler};
 use crate::dialog::ChoiceDialog;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
+use crate::make_exe;
 use crate::platform::dialogs;
 use crate::procedures::{self, ObjectEntry};
 use crate::project::{DEFAULT_PROJECT, ProjectSession};
@@ -548,7 +549,7 @@ impl IdeApp {
         let status_rect = status_band.bottom.unwrap_or_default();
         let main_rect = status_band.fill;
 
-        let (menu, menu_commands) = build_menu(ui, menu_rect, &recent)?;
+        let (menu, menu_commands) = build_menu(ui, menu_rect, &recent, None)?;
         let menu_id = menu.id().unwrap_or(WidgetId::NONE);
 
         let mut toolbar = Toolbar::empty(ui, toolbar_rect)?;
@@ -978,7 +979,12 @@ impl IdeApp {
     /// (PLAN.md §10, gap G11).
     fn rebuild_menu(&mut self, ui: &Ui<Msg>) {
         let bounds = ui.bounds(self.menu_id);
-        match build_menu(ui, bounds, &self.settings.recent_projects) {
+        match build_menu(
+            ui,
+            bounds,
+            &self.settings.recent_projects,
+            self.session.as_ref().map(ProjectSession::name),
+        ) {
             Ok((menu, commands)) => {
                 self.menu_commands = commands;
                 self.menu_id = menu.id().unwrap_or(WidgetId::NONE);
@@ -1105,6 +1111,7 @@ impl IdeApp {
             }
             Command::Save | Command::SaveAll => self.save_project(ui),
             Command::SaveAs => self.save_project_as(ui),
+            Command::MakeExe => self.make_exe(ui),
             Command::AddForm => {
                 if let Some(name) = self.session.as_mut().map(ProjectSession::add_form) {
                     self.after_structure_change(ui);
@@ -1238,7 +1245,7 @@ impl IdeApp {
         }
 
         // 2. Compile-check; problems go to the Error List and nothing spawns.
-        if !self.check_for_run(&dir, ui) {
+        if !self.check_for_run(&dir, "the program was not started", ui) {
             return;
         }
 
@@ -1266,6 +1273,50 @@ impl IdeApp {
         }
     }
 
+    /// Makes the project into a self-contained executable (File → Make
+    /// `<Project>`.exe…): saves, runs the same whole-project check as a run and
+    /// refuses on any problem, then asks where to write the file and exports.
+    fn make_exe(&mut self, ui: &mut Ui<Msg>) {
+        let Some((dir, name, project_file)) = self.session.as_ref().map(|session| {
+            (
+                session.dir().to_path_buf(),
+                session.name().to_owned(),
+                session.project_file(),
+            )
+        }) else {
+            self.log(ui, "Open a project before making an executable.");
+            return;
+        };
+
+        if let Err(error) = self.save_for_run(ui) {
+            self.log(
+                ui,
+                format!("Make cancelled: the project could not be saved ({error})."),
+            );
+            return;
+        }
+        if !self.check_for_run(&dir, "the executable was not made", ui) {
+            return;
+        }
+        let stub = match run::resolve_player(self.settings.player_path.as_deref()) {
+            Ok(stub) => stub,
+            Err(error) => {
+                self.log(ui, error.to_string());
+                return;
+            }
+        };
+        let Some(output) = dialogs::save_exe_file(&make_exe::suggested_file_name(&name)) else {
+            return;
+        };
+        match make_exe::export_project(&project_file, &stub, &output) {
+            Ok(report) => self.log(
+                ui,
+                format!("Made {} ({} bytes).", report.output.display(), report.bytes),
+            ),
+            Err(error) => self.log(ui, format!("Make failed: {error}")),
+        }
+    }
+
     /// Saves the project and every open document for a run, marking them clean.
     fn save_for_run(&mut self, ui: &mut Ui<Msg>) -> Result<(), String> {
         // The same path as Save: open designers' layouts go in with the code.
@@ -1286,7 +1337,7 @@ impl IdeApp {
 
     /// Compile-checks the saved project, filling the Error List with any
     /// problems. Returns whether the project may start.
-    fn check_for_run(&mut self, dir: &Path, ui: &mut Ui<Msg>) -> bool {
+    fn check_for_run(&mut self, dir: &Path, refusal: &str, ui: &mut Ui<Msg>) -> bool {
         let problems = match run::check(dir) {
             Ok(problems) => problems,
             Err(error) => {
@@ -1318,10 +1369,7 @@ impl IdeApp {
                 ),
             );
         }
-        self.log(
-            ui,
-            format!("{} error(s): the program was not started.", problems.len()),
-        );
+        self.log(ui, format!("{} error(s): {refusal}.", problems.len()));
         false
     }
 
@@ -1632,7 +1680,7 @@ impl IdeApp {
         }
         self.refresh_explorer(ui);
         self.dispatcher.set_project_open(false);
-        self.refresh_menu();
+        self.rebuild_menu(ui);
         self.update_title(ui);
         self.log(ui, "Project closed.");
     }
@@ -3075,6 +3123,7 @@ fn build_menu(
     ui: &Ui<Msg>,
     bounds: Rect,
     recent: &[PathBuf],
+    project_name: Option<&str>,
 ) -> UiResult<(Menu<Msg>, MenuCommands)> {
     let mut ids = MenuIds::new();
     let menu = Menu::bar(ui, bounds)?.build(|bar| {
@@ -3098,6 +3147,13 @@ fn build_menu(
                 .command(&mut ids, Command::Save, "&Save")
                 .command(&mut ids, Command::SaveAs, "Save &As…")
                 .command(&mut ids, Command::SaveAll, "Save &All")
+                .separator()
+                .command(
+                    &mut ids,
+                    Command::MakeExe,
+                    &make_exe::menu_label(project_name),
+                )
+                .separator()
                 .command(&mut ids, Command::CloseProject, "&Close Project")
                 .separator()
                 .command(&mut ids, Command::Exit, "E&xit");

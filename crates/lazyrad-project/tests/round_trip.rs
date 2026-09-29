@@ -206,6 +206,7 @@ fn missing_startup_and_files_are_located_in_the_project_file() {
             layout: PathBuf::from("broken_form.lfm"),
             code: PathBuf::from("broken_form.rhai"),
         }],
+        icon: None,
     };
     project.save(temp.path()).expect("project saves");
 
@@ -244,6 +245,7 @@ fn form_problems_are_located_in_the_form_file() {
             layout: PathBuf::from("broken_form.lfm"),
             code: PathBuf::from("broken_form.rhai"),
         }],
+        icon: None,
     };
     project.save(temp.path()).expect("project saves");
     fs::write(temp.path().join("broken_form.rhai"), "// code\n").expect("code is written");
@@ -310,6 +312,59 @@ fn item_paths_outside_the_project_folder_are_rejected() {
         };
         assert_eq!(diagnostic.kind, DiagnosticKind::ProjectFile, "{bad}");
     }
+}
+
+#[test]
+fn the_icon_is_optional_round_trips_and_is_checked_like_an_item_path() {
+    let temp = TempDir::new("icon");
+    let lrp = temp.path().join("App.lrp");
+    let text = |icon: &str| {
+        format!(
+            "name = \"App\"\nversion = \"0.1.0\"\nstartup = \"modX\"\n{icon}\n[[items]]\nkind = \"module\"\nname = \"modX\"\ncode = \"modX.rhai\"\n"
+        )
+    };
+
+    // No icon: none is written back.
+    fs::write(&lrp, text("")).expect("writes");
+    let project = Project::load(temp.path()).expect("loads");
+    assert_eq!(project.icon, None);
+    assert!(
+        !toml::to_string(&project)
+            .expect("serialises")
+            .contains("icon")
+    );
+
+    // A plain icon name loads, is listed as a referenced file and, missing on
+    // disk, is a located validation diagnostic.
+    fs::write(&lrp, text("icon = \"app.ico\"\n")).expect("writes");
+    let project = Project::load(temp.path()).expect("loads");
+    assert_eq!(project.icon.as_deref(), Some(Path::new("app.ico")));
+    assert!(
+        project
+            .referenced_files()
+            .any(|f| f == Path::new("app.ico"))
+    );
+    let diagnostics = project.validate(temp.path());
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::MissingFile && d.message.contains("icon")),
+        "{diagnostics:?}"
+    );
+
+    // An icon outside the project folder is rejected at load.
+    for bad in ["../evil.ico", "sub/a.ico", "/abs.ico"] {
+        fs::write(&lrp, text(&format!("icon = {bad:?}\n"))).expect("writes");
+        assert!(Project::load(temp.path()).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_project_parses_from_text_without_touching_the_disk() {
+    let text = "name = \"App\"\nversion = \"1\"\nstartup = \"m\"\nitems = []\n";
+    let project = Project::parse(Path::new("App.lrp"), text).expect("parses");
+    assert_eq!(project.name, "App");
+    assert!(Project::parse(Path::new("Other.lrp"), text).is_err());
 }
 
 #[test]

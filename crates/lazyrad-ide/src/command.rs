@@ -31,6 +31,8 @@ pub enum Command {
     SaveAs,
     /// File → Save All.
     SaveAll,
+    /// File → Make `<Project>`.exe.
+    MakeExe,
     /// File → Close Project.
     CloseProject,
     /// File → Exit.
@@ -167,6 +169,7 @@ impl Command {
         Command::Save,
         Command::SaveAs,
         Command::SaveAll,
+        Command::MakeExe,
         Command::CloseProject,
         Command::Exit,
         Command::Undo,
@@ -206,6 +209,7 @@ impl Command {
             Command::Save => "Save".to_string(),
             Command::SaveAs => "Save As".to_string(),
             Command::SaveAll => "Save All".to_string(),
+            Command::MakeExe => "Make EXE".to_string(),
             Command::CloseProject => "Close Project".to_string(),
             Command::Exit => "Exit".to_string(),
             Command::Undo => "Undo".to_string(),
@@ -273,6 +277,7 @@ impl Command {
             Command::Save
                 | Command::SaveAs
                 | Command::SaveAll
+                | Command::MakeExe
                 | Command::CloseProject
                 | Command::Undo
                 | Command::Redo

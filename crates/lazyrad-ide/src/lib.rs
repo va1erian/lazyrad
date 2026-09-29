@@ -20,6 +20,7 @@ pub mod command;
 pub mod compile;
 pub mod dialog;
 pub mod explorer;
+pub mod make_exe;
 pub mod platform;
 pub mod procedures;
 pub mod project;
