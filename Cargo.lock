@@ -1168,6 +1168,7 @@ dependencies = [
  "lazyrad-project",
  "thiserror 2.0.21",
  "xui-canvas",
+ "xui-code-editor",
  "xui-core",
  "xui-form",
  "xui-scrollbar",

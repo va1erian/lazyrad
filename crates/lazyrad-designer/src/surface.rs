@@ -86,6 +86,8 @@ pub enum KeyInput {
     Escape,
     /// Copy the selection (Ctrl+C).
     Copy,
+    /// Cut the selection: copy it, then delete it (Ctrl+X).
+    Cut,
     /// Paste the clipboard (Ctrl+V).
     Paste,
     /// Duplicate the selection (Ctrl+D).
@@ -746,6 +748,15 @@ impl Surface {
         if press.ctrl {
             let shortcut = match press.key {
                 KeyInput::Copy => Some(self.copy()),
+                KeyInput::Cut => {
+                    // Nothing on the clipboard changes unless something was
+                    // copied, so an empty selection cuts nothing.
+                    return if self.copy() {
+                        self.delete_selection()
+                    } else {
+                        Outcome::none()
+                    };
+                }
                 KeyInput::Paste => Some(self.paste()),
                 KeyInput::Duplicate => Some(self.duplicate()),
                 KeyInput::Undo if press.shift => Some(self.redo()),
@@ -1617,6 +1628,32 @@ mod tests {
         let node = surface.doc.node("ok_button1").expect("pasted");
         assert_eq!(node.prop("left"), Some(&Value::Int(24)));
         assert_eq!(node.prop("top"), Some(&Value::Int(24)));
+    }
+
+    #[test]
+    fn ctrl_x_copies_then_deletes_the_selected_controls() {
+        let mut surface = sample();
+        surface.select_node("ok_button");
+        let outcome = surface.key(KeyPress::ctrl(KeyInput::Cut));
+        assert!(outcome.change.structure);
+        assert!(surface.doc.node("ok_button").is_none());
+        assert_eq!(surface.clipboard_len(), 1);
+        assert!(surface.paste(), "the cut control pastes back");
+        assert!(surface.doc.node("ok_button").is_some());
+        // One undo reverts the paste, another the cut.
+        assert!(surface.undo());
+        assert!(surface.undo());
+        assert!(surface.doc.node("ok_button").is_some());
+    }
+
+    #[test]
+    fn ctrl_x_with_only_the_form_selected_cuts_nothing() {
+        let mut surface = sample();
+        surface.select_form();
+        let outcome = surface.key(KeyPress::ctrl(KeyInput::Cut));
+        assert!(!outcome.change.structure);
+        assert_eq!(surface.clipboard_len(), 0);
+        assert!(!surface.can_undo(), "no history entry for a no-op cut");
     }
 
     #[test]

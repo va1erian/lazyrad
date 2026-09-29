@@ -332,6 +332,23 @@ impl<M: 'static> Designer<M> {
         ui.invalidate(self.id());
     }
 
+    /// Whether any control is selected (the form itself does not count), so
+    /// Cut, Copy and Delete have something to act on.
+    pub fn has_selection(&self) -> bool {
+        !self.surface.borrow().selection().nodes().is_empty()
+    }
+
+    /// Whether the form holds any control, so Select All has something to
+    /// select.
+    pub fn has_controls(&self) -> bool {
+        !self.surface.borrow().doc().nodes.is_empty()
+    }
+
+    /// Whether a paste would add controls: the in-process clipboard holds some.
+    pub fn can_paste(&self) -> bool {
+        self.surface.borrow().clipboard_len() > 0
+    }
+
     /// Whether an undo step is available.
     pub fn can_undo(&self) -> bool {
         self.surface.borrow().can_undo()
@@ -855,6 +872,7 @@ fn key_input(key: Key, ctrl: bool) -> Option<KeyInput> {
         Key::BACK => KeyInput::Backspace,
         Key::ESCAPE => KeyInput::Escape,
         Key::C if ctrl => KeyInput::Copy,
+        Key::X if ctrl => KeyInput::Cut,
         Key::V if ctrl => KeyInput::Paste,
         Key::D if ctrl => KeyInput::Duplicate,
         Key::Z if ctrl => KeyInput::Undo,

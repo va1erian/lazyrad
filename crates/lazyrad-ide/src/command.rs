@@ -12,6 +12,8 @@ use std::collections::HashMap;
 
 use xui_core::message::{Key, Modifiers};
 
+use crate::edit_state::EditAvailability;
+
 /// One IDE action.
 ///
 /// The variants are grouped by the menu they belong to. `OpenRecent` carries
@@ -150,6 +152,13 @@ fn key_name(key: Key) -> &'static str {
         Key::F => "F",
         Key::G => "G",
         Key::H => "H",
+        Key::A => "A",
+        Key::C => "C",
+        Key::V => "V",
+        Key::X => "X",
+        Key::Y => "Y",
+        Key::Z => "Z",
+        Key::DELETE => "Del",
         _ => "?",
     }
 }
@@ -245,6 +254,14 @@ impl Command {
             Command::NewProject => Some(Shortcut::new(true, false, false, Key::N)),
             Command::OpenProject => Some(Shortcut::new(true, false, false, Key::O)),
             Command::RunStart => Some(Shortcut::new(false, false, false, Key::F5)),
+            Command::RunEnd => Some(Shortcut::new(false, true, false, Key::F5)),
+            Command::Undo => Some(Shortcut::new(true, false, false, Key::Z)),
+            Command::Redo => Some(Shortcut::new(true, false, false, Key::Y)),
+            Command::Cut => Some(Shortcut::new(true, false, false, Key::X)),
+            Command::Copy => Some(Shortcut::new(true, false, false, Key::C)),
+            Command::Paste => Some(Shortcut::new(true, false, false, Key::V)),
+            Command::Delete => Some(Shortcut::new(false, false, false, Key::DELETE)),
+            Command::SelectAll => Some(Shortcut::new(true, false, false, Key::A)),
             Command::ViewCode => Some(Shortcut::new(false, false, false, Key::F7)),
             Command::ViewObject => Some(Shortcut::new(false, true, false, Key::F7)),
             Command::Find => Some(Shortcut::new(true, false, false, Key::F)),
@@ -255,10 +272,52 @@ impl Command {
         }
     }
 
+    /// Further chords that trigger the command besides [`Command::shortcut`]:
+    /// Redo also answers to Ctrl+Shift+Z.
+    pub fn extra_shortcuts(self) -> &'static [Shortcut] {
+        const REDO: &[Shortcut] = &[Shortcut::new(true, true, false, Key::Z)];
+        match self {
+            Command::Redo => REDO,
+            _ => &[],
+        }
+    }
+
+    /// Whether the command acts on the focused widget (the Edit group's
+    /// Undo/Redo/Cut/Copy/Paste/Delete/Select All).
+    ///
+    /// The window-level shortcut handler never intercepts these chords: the
+    /// focused code editor, text box, property-grid editor or designer handles
+    /// its own keys, so a chord reaches that widget exactly once. Only the menu
+    /// and toolbar dispatch them as commands, and then on the active document.
+    pub fn acts_on_focus(self) -> bool {
+        matches!(
+            self,
+            Command::Undo
+                | Command::Redo
+                | Command::Cut
+                | Command::Copy
+                | Command::Paste
+                | Command::Delete
+                | Command::SelectAll
+        )
+    }
+
+    /// The menu label with its accelerator appended, e.g. `Save    Ctrl+S`.
+    ///
+    /// The pinned xui menus have no accelerator column (gap G11) and their
+    /// painter does not lay out tabs, so the text rides on the label after a
+    /// run of spaces.
+    pub fn label_with_shortcut(self, label: &str) -> String {
+        match self.shortcut_text() {
+            Some(shortcut) => format!("{label}    {shortcut}"),
+            None => label.to_owned(),
+        }
+    }
+
     /// The shortcut's display text, e.g. `Ctrl+S`.
     ///
-    /// xui menus cannot render this yet (gap G11), but the dispatcher and the
-    /// eventual command palette use it.
+    /// The menu builder appends it to the entry's label, and the dispatcher's
+    /// log line uses it.
     pub fn shortcut_text(self) -> Option<String> {
         self.shortcut().map(Shortcut::text)
     }
@@ -325,8 +384,17 @@ impl Command {
         Command::ALL.iter().copied().find(|command| {
             command
                 .shortcut()
-                .is_some_and(|shortcut| shortcut.matches(key, modifiers))
+                .into_iter()
+                .chain(command.extra_shortcuts().iter().copied())
+                .any(|shortcut| shortcut.matches(key, modifiers))
         })
+    }
+
+    /// The command a chord triggers at window level: [`Command::from_keydown`]
+    /// without the [`Command::acts_on_focus`] chords, which stay with the
+    /// focused widget.
+    pub fn from_global_keydown(key: Key, modifiers: Modifiers) -> Option<Command> {
+        Command::from_keydown(key, modifiers).filter(|command| !command.acts_on_focus())
     }
 }
 
@@ -340,6 +408,8 @@ pub struct Dispatcher {
     enabled: HashMap<Command, bool>,
     project_open: bool,
     running: bool,
+    /// What the active document can do; gates the Edit group's menu entries.
+    edit: EditAvailability,
 }
 
 impl Dispatcher {
@@ -349,6 +419,7 @@ impl Dispatcher {
             enabled: HashMap::new(),
             project_open: true,
             running: false,
+            edit: EditAvailability::ALL,
         };
         for &command in Command::ALL {
             dispatcher.enabled.insert(command, true);
@@ -366,7 +437,15 @@ impl Dispatcher {
         if matches!(command, Command::OpenRecent(_)) {
             return true;
         }
-        self.enabled.get(&command).copied().unwrap_or(false)
+        self.enabled.get(&command).copied().unwrap_or(false) && self.edit.allows(command)
+    }
+
+    /// Records what the active document can do, and returns whether that
+    /// changed, so the caller refreshes the menu only when it must.
+    pub fn set_edit_availability(&mut self, edit: EditAvailability) -> bool {
+        let changed = self.edit != edit;
+        self.edit = edit;
+        changed
     }
 
     /// Sets a command's enabled state explicitly.
@@ -536,7 +615,84 @@ mod tests {
             Command::ViewObject.shortcut_text().as_deref(),
             Some("Shift+F7")
         );
-        assert_eq!(Command::Copy.shortcut_text(), None);
+        assert_eq!(Command::Copy.shortcut_text().as_deref(), Some("Ctrl+C"));
+        assert_eq!(Command::Delete.shortcut_text().as_deref(), Some("Del"));
+        assert_eq!(Command::RunEnd.shortcut_text().as_deref(), Some("Shift+F5"));
+        assert_eq!(Command::ViewCode.shortcut_text().as_deref(), Some("F7"));
+        assert_eq!(Command::ViewProject.shortcut_text(), None);
+    }
+
+    fn chord(ctrl: bool, shift: bool) -> Modifiers {
+        Modifiers {
+            ctrl,
+            shift,
+            ..Modifiers::NONE
+        }
+    }
+
+    /// Every bound chord, the command it maps to and whether the window-level
+    /// handler may intercept it. Edit chords belong to the focused widget.
+    #[test]
+    fn the_shortcut_table_maps_every_chord() {
+        let table: &[(Key, Modifiers, Command, bool)] = &[
+            (Key::N, chord(true, false), Command::NewProject, true),
+            (Key::O, chord(true, false), Command::OpenProject, true),
+            (Key::S, chord(true, false), Command::Save, true),
+            (Key::S, chord(true, true), Command::SaveAll, true),
+            (Key::F5, chord(false, false), Command::RunStart, true),
+            (Key::F5, chord(false, true), Command::RunEnd, true),
+            (Key::F7, chord(false, false), Command::ViewCode, true),
+            (Key::F7, chord(false, true), Command::ViewObject, true),
+            (Key::F, chord(true, false), Command::Find, true),
+            (Key::F3, chord(false, false), Command::FindNext, true),
+            (Key::H, chord(true, false), Command::Replace, true),
+            (Key::G, chord(true, false), Command::GoToLine, true),
+            (Key::Z, chord(true, false), Command::Undo, false),
+            (Key::Y, chord(true, false), Command::Redo, false),
+            (Key::Z, chord(true, true), Command::Redo, false),
+            (Key::X, chord(true, false), Command::Cut, false),
+            (Key::C, chord(true, false), Command::Copy, false),
+            (Key::V, chord(true, false), Command::Paste, false),
+            (Key::A, chord(true, false), Command::SelectAll, false),
+            (Key::DELETE, chord(false, false), Command::Delete, false),
+        ];
+        for &(key, modifiers, command, global) in table {
+            assert_eq!(
+                Command::from_keydown(key, modifiers),
+                Some(command),
+                "{key:?} {modifiers:?}"
+            );
+            assert_eq!(
+                Command::from_global_keydown(key, modifiers),
+                global.then_some(command),
+                "{key:?} {modifiers:?} at window level"
+            );
+            assert_eq!(command.acts_on_focus(), !global, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn edit_chords_with_extra_modifiers_are_unbound() {
+        assert_eq!(Command::from_keydown(Key::Z, chord(false, false)), None);
+        assert_eq!(Command::from_keydown(Key::C, chord(true, true)), None);
+        assert_eq!(Command::from_keydown(Key::DELETE, chord(true, false)), None);
+        let win = Modifiers {
+            win: true,
+            ..chord(true, false)
+        };
+        assert_eq!(Command::from_keydown(Key::V, win), None);
+    }
+
+    #[test]
+    fn menu_labels_carry_their_accelerator() {
+        assert_eq!(
+            Command::Save.label_with_shortcut("&Save"),
+            "&Save    Ctrl+S"
+        );
+        assert_eq!(
+            Command::ViewProject.label_with_shortcut("&Project"),
+            "&Project"
+        );
     }
 
     #[test]
@@ -557,6 +713,27 @@ mod tests {
 
         dispatcher.set_project_open(true);
         assert!(dispatcher.is_enabled(Command::Save));
+    }
+
+    #[test]
+    fn edit_availability_gates_only_the_edit_group() {
+        let mut dispatcher = Dispatcher::new();
+        let no_paste = EditAvailability {
+            paste: false,
+            ..EditAvailability::ALL
+        };
+        assert!(dispatcher.set_edit_availability(no_paste));
+        assert!(!dispatcher.set_edit_availability(no_paste), "unchanged");
+        assert!(!dispatcher.is_enabled(Command::Paste));
+        assert!(dispatcher.is_enabled(Command::Copy));
+        assert!(dispatcher.is_enabled(Command::Save));
+        dispatcher.set_project_open(false);
+        dispatcher.set_project_open(true);
+        assert!(
+            !dispatcher.is_enabled(Command::Paste),
+            "a project change keeps the document's answer"
+        );
+        assert_eq!(dispatcher.dispatch(Command::Paste), None);
     }
 
     #[test]
@@ -598,7 +775,11 @@ mod tests {
     fn every_shortcut_is_unique() {
         let mut seen: Vec<(Key, bool, bool, bool)> = Vec::new();
         for &command in Command::ALL {
-            if let Some(shortcut) = command.shortcut() {
+            for shortcut in command
+                .shortcut()
+                .into_iter()
+                .chain(command.extra_shortcuts().iter().copied())
+            {
                 let chord = (shortcut.key, shortcut.ctrl, shortcut.shift, shortcut.alt);
                 assert!(
                     !seen.contains(&chord),

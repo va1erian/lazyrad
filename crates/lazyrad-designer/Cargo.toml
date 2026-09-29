@@ -16,6 +16,7 @@ workspace = true
 # (PLAN.md §6; issue #12 replaces #4 for the preview).
 lazyrad-project.workspace = true
 thiserror.workspace = true
+xui-code-editor.workspace = true
 xui-core.workspace = true
 xui-form.workspace = true
 xui-scrollbar.workspace = true

@@ -42,6 +42,7 @@ use xui_core::{Dip, Lucide, Rect, dip};
 use crate::command::{Command, Dispatcher};
 use crate::compile::{self, CodeDiagnostic, CompileScheduler};
 use crate::dialog::ChoiceDialog;
+use crate::edit_state::EditAvailability;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
 use crate::platform::dialogs;
 use crate::procedures::{self, ObjectEntry};
@@ -81,6 +82,12 @@ const WELCOME: &str = "LazyRAD — the IDE. Open or create a project to begin.";
 pub enum Msg {
     /// A command was chosen from the menu, the toolbar or a shortcut.
     Command(Command),
+    /// A window-level chord fired a command. Unlike [`Msg::Command`] it is
+    /// dropped while the command is disabled or a prompt is open, since the
+    /// shortcut backend sees keys typed into any window, prompts included.
+    Shortcut(Command),
+    /// Re-derive which Edit commands the active document can act on.
+    RefreshEdit,
     /// The window resized; re-flow the frame.
     Relayout,
     /// A divider moved, carrying the first pane's new extent in design units.
@@ -682,7 +689,9 @@ impl IdeApp {
                         });
                     });
                 }
-                None
+                // Text selections and the clipboard change without any message,
+                // so the Edit menu's enabled state is re-read on each tick.
+                Some(Msg::RefreshEdit)
             });
         }
         let compile_timer = ui.set_timer(COMPILE_POLL_MS);
@@ -2058,10 +2067,71 @@ impl IdeApp {
         self.sync_designer(&name, &designer, ui);
     }
 
+    /// Runs a window-level chord's command, if it may run now.
+    ///
+    /// The shortcut backend also sees keys typed into the prompt dialogs' own
+    /// windows, so nothing fires while one is open; a disabled command (Run →
+    /// End with nothing running) is ignored like its greyed-out menu entry.
+    fn run_shortcut(&mut self, command: Command, ui: &mut Ui<Msg>) {
+        if self.prompt.is_some() || self.save_prompt.is_some() {
+            return;
+        }
+        if !self.dispatcher.is_enabled(command) {
+            return;
+        }
+        self.run_command(command, ui);
+    }
+
+    /// What the active document can do for each Edit command, right now.
+    ///
+    /// The Start Page and an empty window have no document, so nothing is
+    /// available there.
+    fn edit_availability(&self) -> EditAvailability {
+        if let Some((_, designer, _)) = self.active_designer() {
+            let designer = designer.borrow();
+            let selected = designer.has_selection();
+            return EditAvailability {
+                undo: designer.can_undo(),
+                redo: designer.can_redo(),
+                cut: selected,
+                copy: selected,
+                paste: designer.can_paste(),
+                delete: selected,
+                select_all: designer.has_controls(),
+            };
+        }
+        if let Some((_, editor)) = self.active_code_editor() {
+            let has_text = !editor.is_empty();
+            return EditAvailability {
+                undo: editor.can_undo(),
+                redo: editor.can_redo(),
+                // Cut and Copy take the caret's line when nothing is selected.
+                cut: has_text,
+                copy: has_text,
+                paste: editor.can_paste(),
+                delete: editor.selection().is_some(),
+                select_all: has_text,
+            };
+        }
+        EditAvailability::NONE
+    }
+
+    /// Re-reads [`IdeApp::edit_availability`] into the Edit menu.
+    fn refresh_edit_availability(&mut self) {
+        let availability = self.edit_availability();
+        if self.dispatcher.set_edit_availability(availability) {
+            self.refresh_menu();
+        }
+    }
+
     /// Routes Edit menu commands to the active designer, or to the active code
     /// editor when a code tab is in front.
+    ///
+    /// Choosing a menu entry or a toolbar button moves focus off the document,
+    /// so it is handed back first: the user carries on typing where they were.
     fn dispatch_edit(&mut self, command: Command, ui: &mut Ui<Msg>) {
         if let Some((name, designer, designer_ui)) = self.active_designer() {
+            designer_ui.focus(designer.borrow().id());
             let changed = {
                 let designer = designer.borrow();
                 match command {
@@ -2085,12 +2155,14 @@ impl IdeApp {
             if changed {
                 self.sync_designer(&name, &designer, ui);
             }
+            self.refresh_edit_availability();
             return;
         }
 
         let Some((name, editor)) = self.active_code_editor() else {
             return;
         };
+        editor.focus();
         let changed = match command {
             Command::Undo => editor.undo(),
             Command::Redo => editor.redo(),
@@ -2112,6 +2184,7 @@ impl IdeApp {
         if changed {
             self.after_programmatic_edit(&name, ui);
         }
+        self.refresh_edit_availability();
     }
 
     /// Rewrites a form's `.rhai` handlers after a designer rename, including an
@@ -2942,6 +3015,8 @@ impl App for IdeApp {
     fn update(&mut self, msg: Msg, ui: &mut Ui<Msg>) {
         match msg {
             Msg::Command(command) => self.run_command(command, ui),
+            Msg::Shortcut(command) => self.run_shortcut(command, ui),
+            Msg::RefreshEdit => self.refresh_edit_availability(),
             Msg::Relayout => self.layout_frame(ui),
             Msg::PaneMoved(slot, position) => self.on_pane_moved(slot, position, ui),
             Msg::ExplorerSelected(node) => self.on_explorer_selected(node, ui),
@@ -2966,6 +3041,7 @@ impl App for IdeApp {
                 self.layout_code_views(ui, ui.dpi());
                 self.refresh_property_grid(ui);
                 self.layout_frame(ui);
+                self.refresh_edit_availability();
             }
             Msg::CompileFinished {
                 name,
@@ -3208,7 +3284,7 @@ trait CommandItems {
 
 impl CommandItems for MenuScope<'_> {
     fn command(&mut self, ids: &mut MenuIds, command: Command, text: &str) -> &mut Self {
-        self.item(ids.id(command), text);
+        self.item(ids.id(command), &command.label_with_shortcut(text));
         if let Some(icon) = toolbar_icon(command) {
             self.icon(icon);
         }
@@ -3224,9 +3300,11 @@ fn toolbar_icon(command: Command) -> Option<Lucide> {
         .map(|item| item.icon)
 }
 
-/// Maps a key-down event to the command it triggers, for the shortcut backend.
+/// Maps a key-down event to the window-level command it triggers, for the
+/// shortcut backend.
 ///
-/// Auto-repeat and system (Alt) combinations are ignored.
+/// Auto-repeat and system (Alt) combinations are ignored, and so are the Edit
+/// chords (Ctrl+Z/Y/X/C/V/A, Delete), which the focused widget handles itself.
 pub fn shortcut_message(event: &Event) -> Option<Msg> {
     if let Event::KeyDown {
         key,
@@ -3237,7 +3315,8 @@ pub fn shortcut_message(event: &Event) -> Option<Msg> {
         && !*system
         && *repeat <= 1
     {
-        return Command::from_keydown(*key, *modifiers).map(Msg::Command);
+        // Edit chords are not intercepted: the focused widget handles them.
+        return Command::from_global_keydown(*key, *modifiers).map(Msg::Shortcut);
     }
     None
 }
@@ -3405,7 +3484,7 @@ mod tests {
                 repeat: 1,
                 system: false,
             }),
-            Some(Msg::Command(Command::Save))
+            Some(Msg::Shortcut(Command::Save))
         );
         assert_eq!(
             shortcut_message(&Event::KeyUp {
@@ -4518,3 +4597,11 @@ mod tests {
 #[cfg(test)]
 #[path = "exit_criterion_tests.rs"]
 mod exit_criterion_tests;
+
+#[cfg(test)]
+#[path = "shortcut_tests.rs"]
+mod shortcut_tests;
+
+#[cfg(test)]
+#[path = "shortcut_app_tests.rs"]
+mod shortcut_app_tests;
