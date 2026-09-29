@@ -7,7 +7,8 @@
 //! which the OS clipboard ([`arboard`], behind the `system-clipboard` feature)
 //! implements when it is available and an in-process buffer implements
 //! everywhere else. A build with `default-features = false` never touches an OS
-//! clipboard; an app on a platform without one implements [`Clipboard`] itself.
+//! clipboard; an app on a platform with its own clipboard implements
+//! [`Clipboard`] and passes it to [`Editor::with_clipboard`](crate::Editor::with_clipboard).
 
 use std::cell::RefCell;
 

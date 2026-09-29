@@ -37,7 +37,7 @@
 //! * `system-clipboard` (default): copy and paste through the OS clipboard with
 //!   `arboard`. With `default-features = false` the editor falls back to an
 //!   in-process clipboard, so it builds with no OS clipboard at all.
-//! * `rhai-syntax`: the [`RhaiHighlighter`]. It is off by default, so a
+//! * `rhai-syntax`: the `RhaiHighlighter`. It is off by default, so a
 //!   language-free editor carries no language rules.
 //!
 //! # Layout
@@ -46,8 +46,8 @@
 //! * [`lexer`] — the [`Highlighter`] trait, the incremental cache and the
 //!   optional Rhai lexer.
 //! * [`view`] — the caret, selection and scroll state and its navigation rules.
-//! * [`editor`] — the [`Editor`] widget that ties them to a `Custom` node.
-//! * [`paint`] — the monospace grid painter.
+//! * `editor` — the [`Editor`] widget that ties them to a `Custom` node.
+//! * `paint` — the monospace grid painter.
 //! * [`platform`] — the [`Clipboard`] seam.
 //!
 //! # Limitations

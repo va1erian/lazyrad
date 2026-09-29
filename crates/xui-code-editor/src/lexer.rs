@@ -13,7 +13,7 @@
 //!
 //! * [`PlainText`] emits no tokens and carries no state; it is the default for
 //!   [`Editor::new`](crate::Editor::new).
-//! * [`RhaiHighlighter`] is the hand-written Rhai lexer, behind the
+//! * `RhaiHighlighter` is the hand-written Rhai lexer, behind the
 //!   `rhai-syntax` feature.
 //!
 //! A highlighter is *line-incremental*: [`Highlighter::lex_line`] receives the
@@ -23,7 +23,7 @@
 //! correct.
 //!
 //! Token positions are *char* offsets within a line, not bytes, matching the
-//! editor's [`Buffer`](crate::buffer::Buffer).
+//! editor's [`Buffer`].
 
 use crate::buffer::Buffer;
 

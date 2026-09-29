@@ -38,15 +38,13 @@ fn build<M: 'static>(ui: &Ui<M>) -> xui_core::backend::Result<()> {
 select the highlighter:
 
 ```rust,no_run
-# use xui_core::app::Ui;
-# use xui_core::geometry::Rect;
-# use xui_code_editor::{Editor, RhaiHighlighter};
-# fn build<M: 'static>(ui: &Ui<M>) -> xui_core::backend::Result<()> {
-let editor = Editor::new(ui, Rect::new(0, 0, 640, 400))?
-    .with_highlighter(RhaiHighlighter);
-# let _ = editor;
-# Ok(())
-# }
+use xui_core::app::Ui;
+use xui_core::geometry::Rect;
+use xui_code_editor::{Editor, RhaiHighlighter};
+
+fn build<M: 'static>(ui: &Ui<M>) -> xui_core::backend::Result<Editor<M>> {
+    Ok(Editor::new(ui, Rect::new(0, 0, 640, 400))?.with_highlighter(RhaiHighlighter))
+}
 ```
 
 Run the plain-text example on the canvas backend:
@@ -63,9 +61,27 @@ cargo run -p xui-code-editor --example notepad
 
 Build with `default-features = false` for a platform with no OS clipboard: the
 editor then uses an in-process clipboard, which is enough for a single app (and
-is what the tests use). To use your own clipboard, implement the `Clipboard`
-trait and pass it through the editor's state; the `platform` module documents
-the seam.
+is what the tests use). To use your own clipboard, implement the two-method
+`Clipboard` trait (`text`, `set_text`) and pass it to `Editor::with_clipboard`:
+
+```rust,no_run
+use xui_code_editor::{Clipboard, Editor};
+
+struct MyOsClipboard;
+
+impl Clipboard for MyOsClipboard {
+    fn text(&self) -> Option<String> {
+        None // read your OS clipboard here
+    }
+    fn set_text(&self, _text: &str) {
+        // write your OS clipboard here
+    }
+}
+
+fn install<M: 'static>(editor: Editor<M>) -> Editor<M> {
+    editor.with_clipboard(MyOsClipboard)
+}
+```
 
 ## Writing a highlighter
 
@@ -91,8 +107,9 @@ An app that embeds the editor needs to provide:
 * Keyboard events with modifiers. The editor handles `KeyDown` for navigation,
   selection, editing and the usual shortcuts, and needs the backend to report
   Ctrl and Shift.
-* A clipboard, or `default-features = false` for the in-process one, or your own
-  `Clipboard` implementation.
+* A clipboard: the OS one (default `system-clipboard` feature), the in-process
+  one (`default-features = false`), or your own `Clipboard` implementation
+  passed to `Editor::with_clipboard`.
 
 ## Limitations
 

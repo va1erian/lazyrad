@@ -653,6 +653,62 @@ mod tests {
         });
     }
 
+    /// A clipboard shared with the test, so it can see what was copied and
+    /// choose what is pasted.
+    #[derive(Clone, Default)]
+    struct Recording(Rc<RefCell<String>>);
+
+    impl crate::platform::Clipboard for Recording {
+        fn text(&self) -> Option<String> {
+            let text = self.0.borrow();
+            (!text.is_empty()).then(|| text.clone())
+        }
+
+        fn set_text(&self, text: &str) {
+            *self.0.borrow_mut() = text.to_owned();
+        }
+    }
+
+    fn ctrl(key: xui_core::message::Key) -> Event {
+        Event::KeyDown {
+            key,
+            modifiers: xui_core::message::Modifiers {
+                ctrl: true,
+                ..xui_core::message::Modifiers::NONE
+            },
+            repeat: 1,
+            system: false,
+        }
+    }
+
+    #[test]
+    fn copy_and_paste_go_through_an_injected_clipboard() {
+        use xui_core::message::Key;
+
+        with_ui(|ui, id| {
+            let clipboard = Recording::default();
+            let mut state =
+                EditorState::new("hello", Options::default(), Box::new(clipboard.clone()));
+            handle(&mut state, ui, id, &Event::SetFocus);
+            handle(&mut state, ui, id, &ctrl(Key::A));
+            handle(&mut state, ui, id, &ctrl(Key::C));
+            assert_eq!(
+                *clipboard.0.borrow(),
+                "hello",
+                "copy reached the injected clipboard"
+            );
+
+            *clipboard.0.borrow_mut() = "bye".to_owned();
+            handle(&mut state, ui, id, &ctrl(Key::A));
+            handle(&mut state, ui, id, &ctrl(Key::V));
+            assert_eq!(
+                state.buffer.text(),
+                "bye",
+                "paste read the injected clipboard"
+            );
+        });
+    }
+
     #[test]
     fn typing_while_focused_changes_the_text() {
         with_ui(|ui, id| {

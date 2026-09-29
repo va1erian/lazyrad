@@ -23,6 +23,7 @@ use crate::markers::Marker;
 use crate::options::Options;
 use crate::paint;
 use crate::platform;
+use crate::platform::Clipboard;
 use crate::state::{EditorState, Effect};
 use crate::theme::EditorTheme;
 use crate::view::View;
@@ -138,6 +139,17 @@ impl<M: 'static> Editor<M> {
     /// language highlighter here to colour the text.
     pub fn with_highlighter(self, highlighter: impl Highlighter + 'static) -> Editor<M> {
         self.set_highlighter(highlighter);
+        self
+    }
+
+    /// Replaces the clipboard the editor copies, cuts and pastes through.
+    ///
+    /// [`Editor::new`] uses [`platform::clipboard`](crate::platform::clipboard):
+    /// the OS clipboard with the `system-clipboard` feature, otherwise an
+    /// in-process one. A platform with its own clipboard implements
+    /// [`Clipboard`](crate::Clipboard) and passes it here.
+    pub fn with_clipboard(self, clipboard: impl Clipboard + 'static) -> Editor<M> {
+        self.state.borrow_mut().clipboard = Box::new(clipboard);
         self
     }
 
@@ -351,6 +363,49 @@ impl<M: 'static> Editor<M> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn with_clipboard_installs_the_given_clipboard() {
+        use std::rc::Rc;
+
+        use xui_canvas::OffscreenBackend;
+        use xui_core::app::{App, Ui, run_app};
+        use xui_core::backend::PlatformSpec;
+        use xui_core::geometry::Rect;
+        use xui_core::units::Dip;
+
+        use crate::Clipboard;
+
+        struct Host;
+        impl Clipboard for Host {
+            fn text(&self) -> Option<String> {
+                Some("from the host".to_owned())
+            }
+            fn set_text(&self, _text: &str) {}
+        }
+
+        struct Empty;
+        impl App for Empty {
+            type Msg = ();
+            fn update(&mut self, _msg: (), _ui: &mut Ui<()>) {}
+        }
+
+        run_app(
+            Rc::new(OffscreenBackend::new()),
+            PlatformSpec::new("clipboard").size(Dip(200.0), Dip(100.0)),
+            |ui| {
+                let editor = super::Editor::<()>::new(ui, Rect::new(0, 0, 200, 100))
+                    .expect("editor")
+                    .with_clipboard(Host);
+                assert_eq!(
+                    editor.state.borrow().clipboard.text().as_deref(),
+                    Some("from the host")
+                );
+                Empty
+            },
+        )
+        .expect("run_app");
+    }
+
     use crate::markers::{Marker, MarkerKind};
     use crate::options::Options;
     use crate::state::EditorState;
