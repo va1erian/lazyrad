@@ -137,6 +137,12 @@ impl<M: 'static> Binder<M> for NoopBinder {
 /// The form-designer surface: a live preview panel plus an input/painting
 /// overlay.
 pub struct Designer<M: 'static> {
+    /// The handle the designer was built with. It owns the design-mode scope
+    /// and the parent the preview panel and overlay belong to, so it is used
+    /// for every node the designer creates even when the host forwards an
+    /// [`update`](Designer::update) with a different handle (the IDE edits a
+    /// form from a property grid in another pane).
+    ui: Ui<M>,
     panel: Panel<M>,
     panel_origin: Point,
     /// The overlay node, recreated after every rebuild. The `Control` destroys
@@ -198,6 +204,7 @@ impl<M: 'static> Designer<M> {
         let panel = Panel::new(ui, panel_bounds).map_err(|error| restore(error.into()))?;
 
         let designer = Designer {
+            ui: ui.clone(),
             panel,
             panel_origin: Point::new(bounds.left, bounds.top),
             overlay: RefCell::new(None),
@@ -366,24 +373,32 @@ impl<M: 'static> Designer<M> {
 
     /// Undoes the last change, returning whether anything changed.
     pub fn undo(&self, ui: &Ui<M>) -> bool {
-        self.apply(ui, |surface| {
-            if surface.undo() {
-                Outcome::changed(Change::STRUCTURE)
-            } else {
-                Outcome::none()
-            }
-        })
+        self.history_step(ui, Surface::undo)
     }
 
     /// Redoes the last undone change, returning whether anything changed.
     pub fn redo(&self, ui: &Ui<M>) -> bool {
-        self.apply(ui, |surface| {
-            if surface.redo() {
+        self.history_step(ui, Surface::redo)
+    }
+
+    /// Applies an undo or redo step, then reports every control rename it
+    /// reversed or re-applied through the rename sink, so the host rewrites the
+    /// form's handlers to match (a rename is undoable like any other edit).
+    fn history_step(&self, ui: &Ui<M>, step: impl FnOnce(&mut Surface) -> bool) -> bool {
+        let before = self.doc();
+        let changed = self.apply(ui, |surface| {
+            if step(surface) {
                 Outcome::changed(Change::STRUCTURE)
             } else {
                 Outcome::none()
             }
-        })
+        });
+        if changed {
+            for (old, new) in renamed_nodes(&before, &self.doc()) {
+                self.notify_rename(&old, &new);
+            }
+        }
+        changed
     }
 
     /// Copies the selection to the in-process clipboard, returning whether
@@ -599,7 +614,7 @@ impl<M: 'static> Designer<M> {
         )?;
         // Create the new overlay before touching the current preview, so a
         // failure leaves the old preview and overlay in place.
-        let overlay = self.create_overlay(ui)?;
+        let overlay = self.create_overlay()?;
         *self.live.borrow_mut() = Some(form);
         self.resize_panel(ui);
         self.overlay_id.set(overlay.id());
@@ -609,14 +624,19 @@ impl<M: 'static> Designer<M> {
 
     /// Creates the transparent overlay above the live widgets and wires its
     /// painter and event mapper; the caller installs it.
-    fn create_overlay(&self, ui: &Ui<M>) -> Result<Control<M>, BackendError> {
-        let (width, height) = self.form_px(ui);
+    ///
+    /// The overlay is created through the handle the designer was built with,
+    /// not the one an [`update`](Designer::update) arrived on, so a host that
+    /// drives the model from elsewhere (the IDE's property grid) cannot
+    /// re-parent the overlay out of its pane.
+    fn create_overlay(&self) -> Result<Control<M>, BackendError> {
+        let (width, height) = self.form_px(&self.ui);
         let origin = self.panel_origin;
         let bounds = Rect::new(origin.x, origin.y, origin.x + width, origin.y + height);
-        let overlay = Control::new(ui, &NodeSpec::new(NodeKind::Custom, bounds))?;
+        let overlay = Control::new(&self.ui, &NodeSpec::new(NodeKind::Custom, bounds))?;
 
         let surface = Rc::clone(&self.surface);
-        let theme = ui.theme_handle();
+        let theme = self.ui.theme_handle();
         overlay.set_painter(Rc::new(move |canvas| {
             paint_local(canvas, |canvas, _| {
                 paint(canvas, &surface.borrow(), &theme.get());
@@ -624,7 +644,7 @@ impl<M: 'static> Designer<M> {
         }));
 
         let wrap = Rc::clone(&self.wrap);
-        let ui_for_events = ui.clone();
+        let ui_for_events = self.ui.clone();
         overlay
             .on_events(move |event| designer_message(event, &ui_for_events).map(|msg| wrap(msg)));
         Ok(overlay)
@@ -701,6 +721,23 @@ impl<M: 'static> Designer<M> {
             sink(old, new);
         }
     }
+}
+
+/// The node renames between two versions of a form: `(old, new)` for each node
+/// that kept its position and kind but changed its name. A rename edits a node
+/// in place, so an undo or redo of one shows up exactly like this; a step that
+/// adds or removes nodes renames nothing.
+fn renamed_nodes(before: &FormDoc, after: &FormDoc) -> Vec<(String, String)> {
+    if before.nodes.len() != after.nodes.len() {
+        return Vec::new();
+    }
+    before
+        .nodes
+        .iter()
+        .zip(&after.nodes)
+        .filter(|(old, new)| old.name != new.name && old.kind == new.kind)
+        .map(|(old, new)| (old.name.clone(), new.name.clone()))
+        .collect()
 }
 
 /// Translates a local overlay event into a [`DesignerMsg`], dropping events the

@@ -19,6 +19,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
+use lazyrad_designer::{
+    Designer, DesignerMsg, PropertyGrid, PropertyGridMsg, Toolbox, ToolboxMsg, handler_events,
+    rename_handlers,
+};
+use lazyrad_project::Catalog;
 use xui_code_editor::{Editor, Marker, MarkerKind, Query, RhaiHighlighter};
 use xui_core::app::{App, Ui};
 use xui_core::backend::{BackendError, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId};
@@ -52,6 +57,8 @@ const DIVIDER: f32 = 5.0;
 const TABS_STRIP: Dip = dip(32.0);
 /// The code view's procedure-combo header height.
 const CODE_HEADER: Dip = dip(26.0);
+/// The device-pixel height of a pane title, so a pane's widget starts below it.
+const PANE_TITLE: i32 = 28;
 /// How often the compile scheduler is polled, in milliseconds.
 const COMPILE_POLL_MS: u32 = 100;
 /// How many output lines the pane keeps.
@@ -100,6 +107,32 @@ pub enum Msg {
     ObjectChanged(String, usize),
     /// The procedure combo of a form's code window changed.
     ProcedureChanged(String, usize),
+    /// A designer input message, tagged with the form document it belongs to,
+    /// so a message for a closed tab is dropped rather than reaching another.
+    Designer {
+        /// The form the designer is showing.
+        document: String,
+        /// The designer input to apply.
+        msg: DesignerMsg,
+    },
+    /// A toolbox message; the host forwards it to the active designer.
+    Toolbox(ToolboxMsg),
+    /// A property-grid message, tagged with the form the grid was bound to.
+    PropertyGrid {
+        /// The form the grid was editing.
+        form: String,
+        /// The grid input to apply.
+        msg: PropertyGridMsg,
+    },
+    /// A designer renamed a control; the form's `.rhai` handlers are rewritten.
+    RenamedControl {
+        /// The form whose script is rewritten.
+        form: String,
+        /// The control's old name.
+        old: String,
+        /// The control's new name.
+        new: String,
+    },
 }
 
 /// One diagnostic shown in the Error List, tagged with the document it belongs
@@ -278,8 +311,7 @@ const CONTEXT_MENU: &[(usize, ContextAction)] = &[
 /// Which document a tab holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocKind {
-    /// A form's object (the design surface; a preview until the designer
-    /// crate lands).
+    /// A form's object: the live [`lazyrad_designer::Designer`] surface.
     Designer,
     /// A form's or module's code-behind.
     Code,
@@ -287,10 +319,17 @@ pub enum DocKind {
 
 /// The widgets behind one open document.
 enum DocumentView {
-    /// A minimal form preview: a label per control at its model geometry.
+    /// A live form designer plus the page panel it is parented to and the
+    /// scoped handle it was built with (the handle that owns its design-mode
+    /// scope, so the rest of the IDE stays live).
     Designer {
-        _panel: Panel<Msg>,
-        _labels: Vec<Label<Msg>>,
+        /// The designer, shared with the property grid.
+        designer: Rc<RefCell<Designer<Msg>>>,
+        /// The handle the designer was built with, for every follow-up call.
+        designer_ui: Ui<Msg>,
+        /// The page panel the designer lives in, kept so its node lives as long
+        /// as the document.
+        _page: Panel<Msg>,
     },
     /// The code editor, with the two procedure combos for a form's code.
     Code(Box<CodeView>),
@@ -331,6 +370,10 @@ impl CodeView {
     }
 }
 
+/// The open form tab the Edit commands and the property grid act on: the form
+/// name, the designer and the scoped handle it was built with.
+type ActiveDesigner = (String, Rc<RefCell<Designer<Msg>>>, Ui<Msg>);
+
 /// One open document tab.
 struct Document {
     name: String,
@@ -338,6 +381,17 @@ struct Document {
     title: String,
     dirty: bool,
     view: DocumentView,
+}
+
+impl Document {
+    /// The tab strip's title: `*` appended while the document is dirty.
+    fn tab_title(&self) -> String {
+        if self.dirty {
+            format!("{}*", self.title)
+        } else {
+            self.title.clone()
+        }
+    }
 }
 
 /// The IDE shell's application state.
@@ -362,13 +416,23 @@ pub struct IdeApp {
     centre: Split<Msg>,
     right: Split<Msg>,
     /// The pane containers, kept alive.
-    _panels: Vec<Panel<Msg>>,
+    toolbox_panel: Panel<Msg>,
     output_panel: Panel<Msg>,
     project_panel: Panel<Msg>,
-    _properties_panel: Panel<Msg>,
-    /// The pane titles and the toolbox entries. A dropped widget destroys its
-    /// node, so they live as long as the app.
+    properties_panel: Panel<Msg>,
+    /// The pane titles. A dropped widget destroys its node, so they live as
+    /// long as the app.
     _pane_labels: Vec<Label<Msg>>,
+    /// The control catalog shared by every designer and the property grid.
+    catalog: Rc<Catalog>,
+    /// The toolbox tiles: one for the whole IDE, routed to the active designer.
+    toolbox: Toolbox<Msg>,
+    /// The property grid, bound to the active designer. It is rebuilt when the
+    /// active form tab changes, so a closed tab's grid cannot keep editing.
+    properties_grid: Option<PropertyGrid<Msg>>,
+    /// The form the grid is currently bound to, so a queued grid message for a
+    /// closed or inactive form is dropped rather than applied elsewhere.
+    grid_form: Option<String>,
     /// The centre split's scoped UI, where document tabs are built.
     docs_ui: Ui<Msg>,
     /// The document tab container; `None` only while it is being rebuilt.
@@ -449,10 +513,10 @@ impl IdeApp {
         // split's own scoped `Ui`, so the split can place its children.
         let outer = Split::row(ui, main_rect)?
             .on_moved(|position| Some(Msg::PaneMoved(PaneSlot::Toolbox, position.value())));
-        let toolbox = Panel::new(outer.ui(), Rect::default())?;
+        let toolbox_panel = Panel::new(outer.ui(), Rect::default())?;
         let rest = Split::column(outer.ui(), Rect::default())?
             .on_moved(|position| Some(Msg::PaneMoved(PaneSlot::Output, position.value())));
-        outer.pane_a(&[toolbox.id()]);
+        outer.pane_a(&[toolbox_panel.id()]);
         outer.pane_b(&[rest.id()]);
         outer.set_min(dip(80.0), dip(200.0));
 
@@ -477,24 +541,21 @@ impl IdeApp {
         right.pane_b(&[properties_panel.id()]);
         right.set_min(dip(60.0), dip(60.0));
 
-        // Pane contents: a title per pane, the Project Explorer tree, and the
-        // Output label.
+        // Pane contents: a title per pane, the Toolbox tiles, the Project
+        // Explorer tree, and the Output label.
         let mut labels = Vec::new();
         labels.push(Label::new(
-            toolbox.ui(),
-            Rect::new(8, 8, 132, 28),
+            toolbox_panel.ui(),
+            Rect::new(8, 6, 220, 26),
             "Toolbox",
         )?);
-        for (index, name) in ["Label", "Edit", "Button", "CheckBox", "ListView"]
-            .iter()
-            .enumerate()
-        {
-            labels.push(Label::new(
-                toolbox.ui(),
-                Rect::new(8, 36 + 22 * index as i32, 132, 56 + 22 * index as i32),
-                name,
-            )?);
-        }
+        // The toolbox fills its pane below the title. It is parented to the
+        // toolbox panel, so its local coordinates start at the panel's origin.
+        let toolbox = Toolbox::new(
+            toolbox_panel.ui(),
+            Rect::new(0, PANE_TITLE, 140, 200),
+            Msg::Toolbox,
+        )?;
         labels.push(Label::new(
             project_panel.ui(),
             Rect::new(8, 6, 220, 26),
@@ -502,7 +563,7 @@ impl IdeApp {
         )?);
         labels.push(Label::new(
             properties_panel.ui(),
-            Rect::new(8, 8, 220, 28),
+            Rect::new(8, 6, 220, 26),
             "Properties",
         )?);
         let output = Label::new(output_panel.ui(), Rect::new(8, 8, 480, 24), "Output")?;
@@ -581,11 +642,15 @@ impl IdeApp {
             rest,
             centre,
             right,
-            _panels: vec![toolbox],
+            toolbox_panel,
             output_panel,
             project_panel,
-            _properties_panel: properties_panel,
+            properties_panel,
             _pane_labels: labels,
+            catalog: Rc::new(lazyrad_project::lazyrad_catalog()),
+            toolbox,
+            properties_grid: None,
+            grid_form: None,
             docs_ui,
             docs: None,
             start_label: None,
@@ -684,6 +749,28 @@ impl IdeApp {
             self.tree.id(),
             Rect::new(0, 28, panel.width().max(0), panel.height().max(0)),
         )]);
+
+        // The Toolbox tiles fill their pane below the title; the grid fills the
+        // Properties pane below its title.
+        let toolbox = ui.bounds(self.toolbox_panel.id());
+        ui.apply_moves(&[(
+            self.toolbox.id(),
+            Rect::new(
+                0,
+                PANE_TITLE,
+                toolbox.width().max(0),
+                toolbox.height().max(0),
+            ),
+        )]);
+        let properties = ui.bounds(self.properties_panel.id());
+        if let Some(grid) = &self.properties_grid {
+            grid.set_bounds(Rect::new(
+                0,
+                PANE_TITLE,
+                properties.width().max(0),
+                properties.height().max(0),
+            ));
+        }
 
         // The Output pane: the log line on top, the Error List below it.
         let output = ui.bounds(self.output_panel.id());
@@ -915,6 +1002,13 @@ impl IdeApp {
             Command::FindNext => self.find_next(ui),
             Command::Replace => self.show_prompt(ui, PromptKind::ReplaceFind),
             Command::GoToLine => self.show_prompt(ui, PromptKind::GoToLine),
+            Command::Undo
+            | Command::Redo
+            | Command::Cut
+            | Command::Copy
+            | Command::Paste
+            | Command::Delete
+            | Command::SelectAll => self.dispatch_edit(command, ui),
             Command::ThemeLight => self.set_theme(ui, ThemeChoice::Light),
             Command::ThemeDark => self.set_theme(ui, ThemeChoice::Dark),
             Command::ThemeSystem => self.set_theme(ui, ThemeChoice::System),
@@ -957,6 +1051,9 @@ impl IdeApp {
                     second_extent(self.centre.id(), position, false, ui, dpi)
             }
         }
+        // Re-flow so the pane contents (tree, toolbox, grid, output) follow the
+        // panels the split just resized.
+        self.layout_frame(ui);
     }
 
     // ---- Project lifecycle -------------------------------------------------
@@ -1062,6 +1159,7 @@ impl IdeApp {
 
     /// Saves the project and every open code document.
     fn save_project(&mut self, ui: &mut Ui<Msg>) {
+        self.sync_designers();
         self.sync_documents();
         let Some(session) = self.session.as_mut() else {
             return;
@@ -1069,9 +1167,7 @@ impl IdeApp {
         match session.save() {
             Ok(report) => {
                 let name = session.name().to_owned();
-                for document in &mut self.documents {
-                    document.dirty = false;
-                }
+                self.mark_documents_saved();
                 if report.is_empty() {
                     self.log(ui, format!("Saved {name} (nothing changed)."));
                 } else {
@@ -1085,6 +1181,7 @@ impl IdeApp {
 
     /// Saves the project to a chosen `.lrp` location.
     fn save_project_as(&mut self, ui: &mut Ui<Msg>) {
+        self.sync_designers();
         self.sync_documents();
         let Some(session) = self.session.as_ref() else {
             return;
@@ -1100,9 +1197,7 @@ impl IdeApp {
             .save_as(&file);
         match result {
             Ok(_) => {
-                for document in &mut self.documents {
-                    document.dirty = false;
-                }
+                self.mark_documents_saved();
                 self.settings.push_recent(dialogs::containing_folder(&file));
                 let _ = self.settings.save();
                 self.rebuild_menu(ui);
@@ -1111,6 +1206,14 @@ impl IdeApp {
             Err(error) => self.log(ui, format!("Save As failed: {error}")),
         }
         self.update_title(ui);
+    }
+
+    /// Clears every document's dirty flag and rewrites its tab title.
+    fn mark_documents_saved(&mut self) {
+        for document in &mut self.documents {
+            document.dirty = false;
+        }
+        self.refresh_titles();
     }
 
     /// Asks to save, discard or cancel when the project is dirty, then exits.
@@ -1209,12 +1312,11 @@ impl IdeApp {
             SaveChoice::Cancel => {}
             SaveChoice::Discard => self.continue_pending(pending, ui),
             SaveChoice::Save => {
+                self.sync_designers();
                 self.sync_documents();
                 match self.session.as_mut().map(ProjectSession::save) {
                     Some(Ok(_)) => {
-                        for document in &mut self.documents {
-                            document.dirty = false;
-                        }
+                        self.mark_documents_saved();
                         self.update_title(ui);
                         self.continue_pending(pending, ui);
                     }
@@ -1420,6 +1522,296 @@ impl IdeApp {
         }
     }
 
+    /// The active designer's form name, designer and the scoped handle it was
+    /// built with, if a form tab is in front.
+    fn active_designer(&self) -> Option<ActiveDesigner> {
+        let docs = self.docs.as_ref()?;
+        let selected = docs.selected();
+        if selected == 0 {
+            return None;
+        }
+        let document = self.documents.get(selected - 1)?;
+        if document.kind != DocKind::Designer {
+            return None;
+        }
+        match &document.view {
+            DocumentView::Designer {
+                designer,
+                designer_ui,
+                ..
+            } => Some((
+                document.name.clone(),
+                Rc::clone(designer),
+                designer_ui.clone(),
+            )),
+            DocumentView::Code(_) => None,
+        }
+    }
+
+    /// Binds the property grid to the active designer, rebuilding it when the
+    /// active form tab changed.
+    ///
+    /// Rebuilding drops every sink and inline editor the old grid registered on
+    /// the old designer, so nothing it registered can keep firing after the tab
+    /// is closed or hidden. A queued grid message is tagged with its form (see
+    /// [`Msg::PropertyGrid`]) and dropped here once the binding no longer
+    /// matches.
+    fn refresh_property_grid(&mut self, ui: &Ui<Msg>) {
+        let active = self.active_designer();
+        let active_name = active.as_ref().map(|(name, _, _)| name.clone());
+        if active_name == self.grid_form {
+            if let Some(grid) = &self.properties_grid {
+                grid.sync(ui);
+            }
+            return;
+        }
+        // The grid registered a selection sink on the designer it was bound to.
+        // Drop it while that designer may still be open, so a sink does not
+        // accumulate every time the active tab changes.
+        self.clear_grid_sink();
+        self.properties_grid = None;
+        self.grid_form = active_name;
+        let Some((name, designer, _)) = active else {
+            return;
+        };
+        let panel = self.properties_panel.ui().clone();
+        let wrap_name = name.clone();
+        match PropertyGrid::new(
+            &panel,
+            Rect::default(),
+            designer,
+            Rc::clone(&self.catalog),
+            move |msg| Msg::PropertyGrid {
+                form: wrap_name.clone(),
+                msg,
+            },
+        ) {
+            Ok(grid) => {
+                let bounds = ui.bounds(self.properties_panel.id());
+                grid.set_bounds(Rect::new(
+                    0,
+                    PANE_TITLE,
+                    bounds.width().max(0),
+                    bounds.height().max(0),
+                ));
+                self.properties_grid = Some(grid);
+            }
+            Err(error) => self.log(ui, format!("the property grid could not be built: {error}")),
+        }
+    }
+
+    /// Pushes a designer's document into the session, marking the form and its
+    /// tab dirty when it actually changed.
+    fn sync_designer(
+        &mut self,
+        name: &str,
+        designer: &Rc<RefCell<Designer<Msg>>>,
+        ui: &mut Ui<Msg>,
+    ) {
+        let changed = self
+            .session
+            .as_mut()
+            .is_some_and(|session| session.set_form(name, designer.borrow().doc()));
+        if !changed {
+            return;
+        }
+        // The grid caches its rows; a canvas drag or an undo changes geometry
+        // without a selection change, so refresh it from the designer.
+        if self.grid_form.as_deref() == Some(name)
+            && let Some(grid) = &self.properties_grid
+        {
+            grid.sync(self.properties_panel.ui());
+        }
+        if self.mark_document_dirty(name, DocKind::Designer) {
+            self.refresh_titles();
+        }
+        self.update_title(ui);
+    }
+
+    /// Marks a document dirty, returning whether its dirty flag actually
+    /// changed (so the tab title only has to be rewritten on the transition).
+    fn mark_document_dirty(&mut self, name: &str, kind: DocKind) -> bool {
+        if let Some(document) = self
+            .documents
+            .iter_mut()
+            .find(|document| document.name == name && document.kind == kind)
+            && !document.dirty
+        {
+            document.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// Removes the property grid's selection sink from the designer it was
+    /// bound to, if that designer is still open.
+    fn clear_grid_sink(&self) {
+        let Some(name) = self.grid_form.as_deref() else {
+            return;
+        };
+        let designer = self
+            .documents
+            .iter()
+            .find(|document| document.name == name && document.kind == DocKind::Designer)
+            .and_then(|document| match &document.view {
+                DocumentView::Designer { designer, .. } => Some(Rc::clone(designer)),
+                DocumentView::Code(_) => None,
+            });
+        if let Some(designer) = designer {
+            designer.borrow().clear_selection_sink();
+        }
+    }
+
+    /// Routes a toolbox message to the active designer, or to nothing when no
+    /// form tab is in front.
+    fn toolbox_message(&mut self, msg: ToolboxMsg, ui: &mut Ui<Msg>) {
+        let Some((name, designer, designer_ui)) = self.active_designer() else {
+            return;
+        };
+        designer.borrow().handle_toolbox(msg, &designer_ui);
+        self.sync_designer(&name, &designer, ui);
+    }
+
+    /// Routes a property-grid message to the grid, dropping one whose form is
+    /// no longer the bound form.
+    fn property_grid_message(&mut self, form: &str, msg: PropertyGridMsg, ui: &mut Ui<Msg>) {
+        if self.grid_form.as_deref() != Some(form) {
+            return;
+        }
+        let Some((name, designer, _)) = self.active_designer() else {
+            return;
+        };
+        if let Some(grid) = &self.properties_grid {
+            // The grid edits from its own pane, so its inline editors parent
+            // there; the designer still rebuilds its overlay in its own page.
+            grid.update(msg, self.properties_panel.ui());
+        }
+        self.sync_designer(&name, &designer, ui);
+    }
+
+    /// Routes Edit menu commands to the active designer, or to the active code
+    /// editor when a code tab is in front.
+    fn dispatch_edit(&mut self, command: Command, ui: &mut Ui<Msg>) {
+        if let Some((name, designer, designer_ui)) = self.active_designer() {
+            let changed = {
+                let designer = designer.borrow();
+                match command {
+                    Command::Undo => designer.undo(&designer_ui),
+                    Command::Redo => designer.redo(&designer_ui),
+                    // Cut is copy then delete, like the code editor's cut.
+                    Command::Cut => {
+                        let copied = designer.copy();
+                        designer.delete_selection(&designer_ui) || copied
+                    }
+                    Command::Copy => designer.copy(),
+                    Command::Paste => designer.paste(&designer_ui),
+                    Command::Delete => designer.delete_selection(&designer_ui),
+                    Command::SelectAll => {
+                        designer.select_all(&designer_ui);
+                        false
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                self.sync_designer(&name, &designer, ui);
+            }
+            return;
+        }
+
+        let Some((name, editor)) = self.active_code_editor() else {
+            return;
+        };
+        let changed = match command {
+            Command::Undo => editor.undo(),
+            Command::Redo => editor.redo(),
+            Command::Cut => editor.cut(),
+            Command::Paste => editor.paste(),
+            Command::Delete => editor.delete_selection(),
+            // Copy and Select All leave the buffer alone, so they must not mark
+            // the document dirty.
+            Command::Copy => {
+                editor.copy();
+                false
+            }
+            Command::SelectAll => {
+                editor.select_all();
+                false
+            }
+            _ => false,
+        };
+        if changed {
+            self.after_programmatic_edit(&name, ui);
+        }
+    }
+
+    /// Rewrites a form's `.rhai` handlers after a designer rename, including an
+    /// open code tab for that form. Comments and strings are skipped by
+    /// [`rename_handlers`].
+    fn rename_control(&mut self, form: &str, old: &str, new: &str, ui: &mut Ui<Msg>) {
+        let Some(kind) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.form(form))
+            .and_then(|doc| doc.node(new))
+            .map(|node| node.kind.clone())
+        else {
+            return;
+        };
+        let events = handler_events(&self.catalog, &kind);
+        let Some(source) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.code(form))
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let rewritten = rename_handlers(&source, old, new, &events);
+        if rewritten == source {
+            return;
+        }
+        if let Some(session) = self.session.as_mut() {
+            session.set_code(form, rewritten.clone());
+        }
+        // One range replace keeps the editor's undo history, unlike set_text.
+        if let Some(editor) = self.code_editor(form) {
+            let len = editor.text().chars().count();
+            editor.replace(0, len, &rewritten);
+        }
+        if self.mark_document_dirty(form, DocKind::Code) {
+            self.refresh_titles();
+        }
+        self.schedule_compile(form, &rewritten);
+        self.update_title(ui);
+    }
+
+    /// Rewrites every tab title so a dirty document shows `*`.
+    fn refresh_titles(&self) {
+        let Some(docs) = &self.docs else {
+            return;
+        };
+        for (index, document) in self.documents.iter().enumerate() {
+            docs.rename_page(index + 1, &document.tab_title());
+        }
+    }
+
+    /// Pushes every open designer's document into the session, so Save writes
+    /// what the user drew even if no message followed the last edit.
+    fn sync_designers(&mut self) {
+        let mut layouts = Vec::new();
+        for document in &self.documents {
+            if let DocumentView::Designer { designer, .. } = &document.view {
+                layouts.push((document.name.clone(), designer.borrow().doc()));
+            }
+        }
+        if let Some(session) = self.session.as_mut() {
+            for (name, doc) in layouts {
+                session.set_form(&name, doc);
+            }
+        }
+    }
+
     /// Marks a document dirty after a programmatic edit, mirrors the editor's
     /// text into the session and arms the background compile.
     fn after_programmatic_edit(&mut self, name: &str, ui: &mut Ui<Msg>) {
@@ -1437,12 +1829,8 @@ impl IdeApp {
         if let Some(session) = self.session.as_mut() {
             session.set_code(name, text.clone());
         }
-        if let Some(document) = self
-            .documents
-            .iter_mut()
-            .find(|document| document.name == name && document.kind == DocKind::Code)
-        {
-            document.dirty = true;
+        if self.mark_document_dirty(name, DocKind::Code) {
+            self.refresh_titles();
         }
         self.schedule_compile(name, &text);
         self.update_title(ui);
@@ -1825,9 +2213,10 @@ impl IdeApp {
                 docs.select(index + 1);
             }
             // `select` raises no change message, so place the page's code
-            // children (the procedure combos) here.
+            // children (the procedure combos) and rebind the grid here.
             let docs_ui = self.docs_ui.clone();
             self.layout_code_views(&docs_ui, docs_ui.dpi());
+            self.refresh_property_grid(&docs_ui);
             return Ok(());
         }
 
@@ -1858,6 +2247,7 @@ impl IdeApp {
         }
         let docs_ui = self.docs_ui.clone();
         self.layout_code_views(&docs_ui, docs_ui.dpi());
+        self.refresh_property_grid(&docs_ui);
         Ok(())
     }
 
@@ -1871,24 +2261,48 @@ impl IdeApp {
     ) -> UiResult<(DocumentView, Vec<WidgetId>, String)> {
         match kind {
             DocKind::Designer => {
-                let panel = Panel::new(ui, Rect::default())?;
-                let mut labels = Vec::new();
-                if let Some(form) = self.session.as_ref().and_then(|s| s.form(name)) {
-                    labels.push(Label::new(
-                        panel.ui(),
-                        Rect::new(4, 4, 200, 24),
-                        &format!("{} — {}", form.window.name, window_title(form)),
-                    )?);
-                    for control in &form.nodes {
-                        let text = control_label(control);
-                        labels.push(Label::new(panel.ui(), control_rect(control), &text)?);
-                    }
-                }
-                let id = panel.id();
+                // The page panel scopes the designer's design mode to the
+                // document area, leaving the tab strip and the other panes live.
+                // Everything the designer builds is parented to it, so the tab
+                // shows and hides the whole form with the page.
+                let page = Panel::new(ui, Rect::default())?;
+                let designer_ui = page.ui().clone();
+                let doc = self
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.form(name))
+                    .cloned()
+                    .unwrap_or_else(|| lazyrad_project::FormDoc::new(name));
+                let document = name.to_owned();
+                let designer = Designer::new(
+                    &designer_ui,
+                    Rect::default(),
+                    doc,
+                    Rc::clone(&self.catalog),
+                    move |msg| Msg::Designer {
+                        document: document.clone(),
+                        msg,
+                    },
+                )
+                .map_err(|error| BackendError::Other(error.to_string()))?;
+                // Rewrite the form's handlers when the grid renames a control.
+                // The sink only raises a message; the rewrite happens on the
+                // update path, where the session and the code tabs are safe.
+                let renamed = name.to_owned();
+                let ui_for_sink = designer_ui.clone();
+                designer.set_rename_sink(move |old, new| {
+                    ui_for_sink.emit(Msg::RenamedControl {
+                        form: renamed.clone(),
+                        old: old.to_owned(),
+                        new: new.to_owned(),
+                    });
+                });
+                let id = page.id();
                 Ok((
                     DocumentView::Designer {
-                        _panel: panel,
-                        _labels: labels,
+                        designer: Rc::new(RefCell::new(designer)),
+                        designer_ui,
+                        _page: page,
                     },
                     vec![id],
                     name.to_owned(),
@@ -1987,6 +2401,10 @@ impl IdeApp {
         // one's Error List.
         self.diagnostics.borrow_mut().reset();
         self.editors.borrow_mut().clear();
+        // Drop the grid first: it holds a strong handle on a designer, which
+        // would otherwise outlive the document and keep its sinks alive.
+        self.properties_grid = None;
+        self.grid_form = None;
         self.documents.clear();
         self.errors.clear();
         self.error_list.set_items(&[]);
@@ -2005,6 +2423,10 @@ impl IdeApp {
             .map(|document| (document.name.clone(), document.kind))
             .collect();
         self.editors.borrow_mut().clear();
+        // The grid holds a designer alive; drop it before the documents so a
+        // closed tab's designer is really dropped.
+        self.properties_grid = None;
+        self.grid_form = None;
         self.documents.clear();
         self.docs = None;
         self.start_label = None;
@@ -2028,6 +2450,9 @@ impl IdeApp {
             self.centre.pane_a(&[docs.id()]);
             docs.relayout();
         }
+        // The selected page's designer may have changed; rebind and reposition.
+        let docs_ui = self.docs_ui.clone();
+        self.refresh_property_grid(&docs_ui);
         Ok(())
     }
 
@@ -2069,17 +2494,15 @@ impl App for IdeApp {
                 if let Some(session) = self.session.as_mut() {
                     session.set_code(&name, text);
                 }
-                if let Some(document) = self
-                    .documents
-                    .iter_mut()
-                    .find(|document| document.name == name && document.kind == DocKind::Code)
-                {
-                    document.dirty = true;
+                if self.mark_document_dirty(&name, DocKind::Code) {
+                    self.refresh_titles();
                 }
                 self.update_title(ui);
             }
             Msg::TabChanged(_) => {
                 self.layout_code_views(ui, ui.dpi());
+                self.refresh_property_grid(ui);
+                self.layout_frame(ui);
             }
             Msg::CompileFinished {
                 name,
@@ -2089,42 +2512,22 @@ impl App for IdeApp {
             Msg::ErrorActivated(row) => self.activate_error(row, ui),
             Msg::ObjectChanged(name, index) => self.change_object(&name, index, ui),
             Msg::ProcedureChanged(name, index) => self.insert_procedure(&name, index, ui),
+            Msg::Designer { document, msg } => {
+                if let Some((_, designer, designer_ui)) = self
+                    .active_designer()
+                    .filter(|(name, _, _)| *name == document)
+                {
+                    designer.borrow().update(msg, &designer_ui);
+                    self.sync_designer(&document, &designer, ui);
+                }
+            }
+            Msg::Toolbox(msg) => self.toolbox_message(msg, ui),
+            Msg::PropertyGrid { form, msg } => self.property_grid_message(&form, msg, ui),
+            Msg::RenamedControl { form, old, new } => {
+                self.rename_control(&form, &old, &new, ui);
+            }
         }
     }
-}
-
-/// The label a designer preview draws for `control`: its caption when it has
-/// one, otherwise its type and name.
-fn control_label(control: &lazyrad_project::Node) -> String {
-    let caption = control
-        .prop("text")
-        .and_then(lazyrad_project::Value::as_str)
-        .filter(|caption| !caption.is_empty());
-    match caption {
-        Some(caption) => format!("{caption} [{}]", control.kind),
-        None => format!("{} {}", control.kind, control.name),
-    }
-}
-
-/// The window title a form declares, or an empty string.
-fn window_title(form: &lazyrad_project::FormDoc) -> &str {
-    form.window
-        .prop("title")
-        .and_then(lazyrad_project::Value::as_str)
-        .unwrap_or_default()
-}
-
-/// A control's rectangle in the form's own coordinates. Geometry the node
-/// leaves out uses the placeholder size the preview draws.
-fn control_rect(control: &lazyrad_project::Node) -> Rect {
-    let int = |name: &str, default: i64| {
-        control
-            .prop(name)
-            .and_then(lazyrad_project::Value::as_int)
-            .unwrap_or(default) as i32
-    };
-    let (left, top) = (int("left", 0), int("top", 0));
-    Rect::new(left, top, left + int("width", 120), top + int("height", 24))
 }
 
 /// A split's extent along its split axis: height for a column, width for a row.
@@ -2457,24 +2860,6 @@ mod tests {
     }
 
     #[test]
-    fn a_designer_label_prefers_the_caption() {
-        let mut control = lazyrad_project::Node::new("Label", "lblOne");
-        assert_eq!(control_label(&control), "Label lblOne");
-        control.set_prop("text", lazyrad_project::Value::Text("Hello".to_owned()));
-        assert_eq!(control_label(&control), "Hello [Label]");
-    }
-
-    #[test]
-    fn a_control_rect_maps_the_geometry() {
-        let mut control = lazyrad_project::Node::new("Button", "go_button");
-        control.set_prop("left", lazyrad_project::Value::Int(16));
-        control.set_prop("top", lazyrad_project::Value::Int(32));
-        control.set_prop("width", lazyrad_project::Value::Int(120));
-        control.set_prop("height", lazyrad_project::Value::Int(24));
-        assert_eq!(control_rect(&control), Rect::new(16, 32, 136, 56));
-    }
-
-    #[test]
     fn session_errors_read_well() {
         let error = SessionError::InvalidName("`bad` is not valid".to_owned());
         assert_eq!(error.to_string(), "`bad` is not valid");
@@ -2535,6 +2920,277 @@ mod tests {
             assert!(app.errors.is_empty());
             assert_eq!(app.error_list.len(), 0);
 
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn the_grid_shows_new_geometry_after_a_canvas_drag() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-drag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            let form = crate::project::DEFAULT_FORM.to_owned();
+            app.open_document(&form, DocKind::Designer)
+                .expect("the form opens in a designer");
+            // The toolbox drops a selected button1, which the grid shows.
+            app.update(
+                Msg::Toolbox(ToolboxMsg::Activate(lazyrad_designer::Tool::control(
+                    "Button",
+                ))),
+                ui,
+            );
+            let geometry = |app: &IdeApp| {
+                let node = app
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.form(&form))
+                    .and_then(|doc| doc.node("button1"))
+                    .cloned()
+                    .expect("button1 exists");
+                let int = |name: &str| {
+                    node.prop(name)
+                        .and_then(lazyrad_project::Value::as_int)
+                        .unwrap_or(0)
+                };
+                (int("left"), int("top"), int("width"), int("height"))
+            };
+            let grid_left = |app: &IdeApp| {
+                app.properties_grid
+                    .as_ref()
+                    .expect("the grid is bound")
+                    .rows()
+                    .into_iter()
+                    .find(|row| row.name == "left")
+                    .map(|row| row.value)
+            };
+            let (left, top, width, height) = geometry(&app);
+            assert_eq!(grid_left(&app), Some(lazyrad_project::Value::Int(left)));
+
+            // Drag the button by (24, 16) on the canvas.
+            let (x, y) = (left + width / 2, top + height / 2);
+            for msg in [
+                DesignerMsg::PointerDown { x, y, ctrl: false },
+                DesignerMsg::PointerMove {
+                    x: x + 24,
+                    y: y + 16,
+                    ctrl: false,
+                },
+                DesignerMsg::PointerUp {
+                    x: x + 24,
+                    y: y + 16,
+                    ctrl: false,
+                },
+            ] {
+                app.update(
+                    Msg::Designer {
+                        document: form.clone(),
+                        msg,
+                    },
+                    ui,
+                );
+            }
+            let (moved, _, _, _) = geometry(&app);
+            assert_ne!(moved, left, "the drag moved the button");
+            assert_eq!(
+                grid_left(&app),
+                Some(lazyrad_project::Value::Int(moved)),
+                "the grid's cached row follows the drag"
+            );
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_form_tab_hosts_a_live_designer_and_the_grid_follows_the_active_tab() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-grid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+            session.add_form();
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Designer)
+                .expect("the form opens in a designer");
+            assert!(
+                matches!(
+                    app.documents.first().map(|document| &document.view),
+                    Some(DocumentView::Designer { .. })
+                ),
+                "a form tab hosts a real designer, not placeholder labels"
+            );
+            assert_eq!(app.grid_form.as_deref(), Some(crate::project::DEFAULT_FORM));
+            assert!(app.properties_grid.is_some());
+
+            app.open_document("Form2", DocKind::Designer)
+                .expect("the second form opens");
+            assert_eq!(
+                app.grid_form.as_deref(),
+                Some("Form2"),
+                "the grid follows the newly opened form"
+            );
+
+            // Selecting the first form rebinds the grid to it.
+            app.docs.as_ref().expect("the tabs exist").select(1);
+            app.refresh_property_grid(ui);
+            assert_eq!(app.grid_form.as_deref(), Some(crate::project::DEFAULT_FORM));
+
+            // Selecting the Start Page leaves the pane with no grid at all.
+            app.docs.as_ref().expect("the tabs exist").select(0);
+            app.refresh_property_grid(ui);
+            assert_eq!(app.grid_form, None);
+            assert!(
+                app.properties_grid.is_none(),
+                "no designer means no grid and no lingering sink"
+            );
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn copy_and_select_all_in_a_code_tab_do_not_dirty_it() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Code)
+                .expect("the code tab opens");
+            // The form template is non-empty, so a copy has something to take.
+            app.dispatch_edit(Command::Copy, ui);
+            app.dispatch_edit(Command::SelectAll, ui);
+            assert!(
+                !app.documents.iter().any(|document| document.dirty),
+                "copy and select all must not dirty the document"
+            );
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_pane_move_reflows_the_toolbox_and_grid_into_their_panes() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-panes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Designer)
+                .expect("the form opens in a designer");
+
+            // Moving the toolbox divider re-flows its contents into the pane.
+            app.on_pane_moved(PaneSlot::Toolbox, 220.0, ui);
+            let toolbox_pane = ui.bounds(app.toolbox_panel.id());
+            let toolbox = ui.bounds(app.toolbox.id());
+            assert_eq!(toolbox.left, 0);
+            assert_eq!(toolbox.top, PANE_TITLE);
+            assert_eq!(toolbox.width(), toolbox_pane.width());
+            assert_eq!(toolbox.height(), toolbox_pane.height() - PANE_TITLE);
+
+            // The grid follows the Properties pane the same way.
+            let grid = app.properties_grid.as_ref().expect("the grid is bound");
+            let properties = ui.bounds(app.properties_panel.id());
+            let grid_bounds = ui.bounds(grid.id());
+            assert_eq!(grid_bounds.left, 0);
+            assert_eq!(grid_bounds.top, PANE_TITLE);
+            assert_eq!(grid_bounds.width(), properties.width());
+            assert_eq!(grid_bounds.height(), properties.height() - PANE_TITLE);
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_rename_rewrites_the_open_code_tab_as_one_undoable_edit() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+            // The designer renames the model before its rename sink fires, so
+            // the session already holds the new name when the rewrite runs.
+            let mut form = session
+                .form(crate::project::DEFAULT_FORM)
+                .cloned()
+                .expect("a form");
+            form.insert(lazyrad_project::Node::new("Button", "go_button"));
+            session.set_form(crate::project::DEFAULT_FORM, form);
+            session.set_code(
+                crate::project::DEFAULT_FORM,
+                "fn button1_click() {\n}\n".to_owned(),
+            );
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Code)
+                .expect("the code tab opens");
+
+            app.rename_control(crate::project::DEFAULT_FORM, "button1", "go_button", ui);
+
+            let editor = app
+                .code_editor(crate::project::DEFAULT_FORM)
+                .expect("the editor is open");
+            assert_eq!(editor.text(), "fn go_button_click() {\n}\n");
+            assert!(
+                app.session
+                    .as_ref()
+                    .and_then(|session| session.code(crate::project::DEFAULT_FORM))
+                    .is_some_and(|code| code.contains("go_button_click")),
+                "the session's code follows the rename"
+            );
+            // The rewrite is one range replace, so the editor's history keeps
+            // the pre-rename text.
+            assert!(editor.undo());
+            assert_eq!(editor.text(), "fn button1_click() {\n}\n");
+
+            // Renaming a control that does not exist is a no-op.
+            app.rename_control(crate::project::DEFAULT_FORM, "ghost", "still_ghost", ui);
+            assert_eq!(editor.text(), "fn button1_click() {\n}\n");
             app
         })
         .expect("the offscreen backend runs to completion");
