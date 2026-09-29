@@ -721,7 +721,13 @@ impl Surface {
                 self.marquee = None;
                 let rect = DesignRect::from_points(origin, (x, y));
                 let hits = self.nodes_in(rect);
-                self.selection = Selection::Nodes(hits);
+                // A click or marquee that catches nothing selects the form, as in
+                // VB6, so its handles and properties come back.
+                self.selection = if hits.is_empty() {
+                    Selection::Form
+                } else {
+                    Selection::Nodes(hits)
+                };
                 Outcome::changed(Change::SELECTION).cursor(cursor)
             }
             Drag::Create { kind, origin } => {
@@ -1859,13 +1865,13 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_empty_space_clears_the_selection() {
+    fn a_click_on_empty_space_selects_the_form() {
         let mut surface = sample();
         surface.select_node("ok_button");
         surface.pointer_down(300, 190, false);
         assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
         surface.pointer_up(300, 190, false);
-        assert_eq!(surface.selection(), &Selection::Nodes(Vec::new()));
+        assert_eq!(surface.selection(), &Selection::Form);
     }
 
     #[test]
