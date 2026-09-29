@@ -69,8 +69,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create the release with the binaries attached
+      # Idempotent: if the release already exists (created by hand, or this is a
+      # re-run), attach the archives to it, replacing same-named files, instead
+      # of failing; otherwise create it with generated notes.
+      - name: Create the release or attach the binaries to it
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "LazyRAD $GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME exists; attaching the archives."
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "LazyRAD $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi
