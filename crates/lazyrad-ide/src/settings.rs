@@ -12,11 +12,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform;
+
 /// The number of recent projects kept.
 pub const RECENT_LIMIT: usize = 10;
-
-/// The config directory's application name.
-const APP: &str = "LazyRAD";
 
 /// A temporary path next to `path` that no other save uses: two IDE instances
 /// saving at once, or two saves in one process, never share a temporary file.
@@ -134,16 +133,10 @@ impl Default for Settings {
     }
 }
 
-/// The monospace family a platform ships with: Consolas on Windows, Menlo on
-/// macOS and DejaVu Sans Mono elsewhere.
+/// The monospace family a platform ships with (see
+/// [`platform::config::default_monospace_font`]).
 pub fn default_editor_font_family() -> &'static str {
-    if cfg!(windows) {
-        "Consolas"
-    } else if cfg!(target_os = "macos") {
-        "Menlo"
-    } else {
-        "DejaVu Sans Mono"
-    }
+    platform::config::default_monospace_font()
 }
 
 impl Settings {
@@ -153,8 +146,7 @@ impl Settings {
     /// `None` when the platform reports no config directory (an unusual
     /// environment); the IDE then runs with in-memory defaults.
     pub fn path() -> Option<PathBuf> {
-        let dirs = directories::ProjectDirs::from("", "", APP)?;
-        Some(dirs.config_dir().join("settings.toml"))
+        platform::config::settings_file()
     }
 
     /// These settings, saved to `path` from now on (the IDE uses the default
@@ -444,6 +436,35 @@ mod store_tests {
             Settings::load_from(&path).expect("reloaded").theme,
             ThemeChoice::Dark
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_platform_without_a_config_directory_keeps_settings_in_memory() {
+        // `Settings::path` is `None` there, so `load` yields unsaved defaults.
+        let settings = Settings::default();
+        assert_eq!(settings.store(), None);
+        settings
+            .save()
+            .expect("saving in-memory settings is a no-op");
+    }
+
+    #[test]
+    fn an_unwritable_settings_location_is_an_error_not_a_panic() {
+        let dir =
+            std::env::temp_dir().join(format!("lazyrad-settings-block-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        // A file where the settings directory should be blocks the save.
+        let blocker = dir.join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("blocker file");
+
+        let settings = Settings::default().stored_at(blocker.join("settings.toml"));
+        let error = settings.save().expect_err("the save fails");
+        assert!(matches!(error, SettingsError::Io(_)));
+        // The failed save leaves no temporary file behind.
+        let leftovers = std::fs::read_dir(&dir).expect("readable").count();
+        assert_eq!(leftovers, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

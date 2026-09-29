@@ -17,6 +17,7 @@ use lazyrad_project::Project;
 use crate::error::{ExportError, PayloadError};
 use crate::payload::{Payload, has_footer, read_regular};
 use crate::pe::{PeMetadata, is_pe, patch};
+use crate::platform::make_executable;
 
 /// The largest player stub export will copy, in bytes.
 pub const MAX_STUB_BYTES: u64 = 512 * 1024 * 1024;
@@ -244,14 +245,4 @@ fn create_temp(output: &Path) -> std::io::Result<(PathBuf, fs::File)> {
         std::io::ErrorKind::AlreadyExists,
         "no unused temporary file name",
     ))
-}
-
-/// Makes the new file executable on Unix; other platforms have no such bit.
-fn make_executable(_file: &fs::File) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        _file.set_permissions(fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(())
 }

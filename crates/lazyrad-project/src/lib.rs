@@ -13,6 +13,7 @@
 //! by the runtime, the designer and the IDE, and never depends on any of them.
 
 pub mod error;
+pub mod fs_safety;
 pub mod io;
 pub mod model;
 pub mod schema;

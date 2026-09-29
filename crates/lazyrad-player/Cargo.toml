@@ -14,11 +14,17 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["native-dialogs"]
+# The native message box for an exported app that cannot start (`rfd`).
+# Without it the platform seam falls back to stderr.
+native-dialogs = ["dep:rfd"]
+
 [dependencies]
 lazyrad-packager.workspace = true
 lazyrad-project.workspace = true
 lazyrad-runtime.workspace = true
-rfd.workspace = true
+rfd = { workspace = true, optional = true }
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -37,7 +37,7 @@ pub fn menu_label(project_name: Option<&str>) -> String {
 /// The file name suggested in the save dialog: the project name plus the
 /// platform's executable suffix.
 pub fn suggested_file_name(project_name: &str) -> String {
-    format!("{project_name}{}", std::env::consts::EXE_SUFFIX)
+    crate::platform::process::executable_file_name(project_name)
 }
 
 /// Exports the project whose `.lrp` is `project_file` to `output`, using

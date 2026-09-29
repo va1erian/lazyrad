@@ -24,6 +24,7 @@ pub mod error;
 pub mod export;
 pub mod payload;
 pub mod pe;
+pub mod platform;
 
 pub use error::{ExportError, PayloadError};
 pub use export::{ExportReport, ExportRequest, atomic_write, export};
