@@ -1,0 +1,85 @@
+name: Release
+
+# Pushing a tag that starts with `v` (for example `v0.1.0`) builds release
+# binaries and publishes them as a GitHub release with that tag's name.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+            exe: .exe
+          - os: ubuntu-latest
+            target: linux-x64
+            exe: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release --locked -p lazyrad-ide -p lazyrad-player
+      # The IDE runs `lazyrad-player` from next to its own executable (F5), so
+      # both binaries ship side by side, with the sample projects.
+      - name: Package
+        shell: bash
+        run: |
+          name="lazyrad-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/release/lazyrad-ide${{ matrix.exe }}" "target/release/lazyrad-player${{ matrix.exe }}" "dist/$name/"
+          cp README.md "dist/$name/"
+          cp -r examples "dist/$name/examples"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Idempotent: if the release already exists (created by hand, or this is a
+      # re-run), attach the archives to it, replacing same-named files, instead
+      # of failing; otherwise create it with generated notes.
+      - name: Create the release or attach the binaries to it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME exists; attaching the archives."
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "LazyRAD $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi

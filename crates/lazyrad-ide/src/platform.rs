@@ -9,6 +9,18 @@
 //!
 //! [`rfd`]: https://docs.rs/rfd
 
+/// Reports an error that stops the IDE before (or instead of) its window, in a
+/// native message box. The IDE is a GUI-subsystem app on Windows, so there is
+/// no console to print to.
+pub fn show_fatal_error(message: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("LazyRAD")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
 /// Native file and folder dialogs.
 pub mod dialogs {
     use std::path::{Path, PathBuf};
