@@ -336,6 +336,11 @@ const TOOLBAR: &[ToolbarItem] = &[
     },
 ];
 
+/// The [`TOOLBAR`] indices that start a new group, drawn with a separator
+/// before them: file | undo/redo | clipboard | run. xui separators take no item
+/// index, so `on_click` indices still map straight into [`TOOLBAR`].
+const TOOLBAR_GROUP_STARTS: &[usize] = &[4, 6, 9];
+
 /// The five context-menu entries, in id order.
 const CONTEXT_MENU: &[(usize, ContextAction)] = &[
     (0, ContextAction::ViewCode),
@@ -546,7 +551,10 @@ impl IdeApp {
         let menu_id = menu.id().unwrap_or(WidgetId::NONE);
 
         let mut toolbar = Toolbar::empty(ui, toolbar_rect)?;
-        for entry in TOOLBAR {
+        for (index, entry) in TOOLBAR.iter().enumerate() {
+            if TOOLBAR_GROUP_STARTS.contains(&index) {
+                toolbar = toolbar.separator();
+            }
             let tooltip = entry.tooltip();
             toolbar = match entry.label {
                 Some(label) => toolbar.item_with_text(entry.icon, &tooltip, label),
@@ -3230,6 +3238,25 @@ mod tests {
     use xui_core::Key;
     use xui_core::backend::Backend;
     use xui_core::run_app;
+
+    #[test]
+    fn the_toolbar_groups_are_file_edit_clipboard_and_run() {
+        let starts: Vec<Command> = TOOLBAR_GROUP_STARTS
+            .iter()
+            .map(|&index| TOOLBAR[index].command)
+            .collect();
+        assert_eq!(
+            starts,
+            [Command::Undo, Command::Cut, Command::RunStart],
+            "each group starts where its first command is"
+        );
+        assert!(
+            TOOLBAR_GROUP_STARTS
+                .iter()
+                .all(|&index| index > 0 && index < TOOLBAR.len()),
+            "no separator at either end"
+        );
+    }
 
     #[test]
     fn code_editors_use_the_configured_monospace_font() {
