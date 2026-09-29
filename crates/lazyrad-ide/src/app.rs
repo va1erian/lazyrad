@@ -1196,15 +1196,15 @@ impl IdeApp {
 
     /// Saves the project and every open document for a run, marking them clean.
     fn save_for_run(&mut self, ui: &mut Ui<Msg>) -> Result<(), String> {
+        // The same path as Save: open designers' layouts go in with the code.
+        self.sync_designers();
         self.sync_documents();
         let Some(result) = self.session.as_mut().map(ProjectSession::save) else {
             return Ok(());
         };
         match result {
             Ok(_) => {
-                for document in &mut self.documents {
-                    document.dirty = false;
-                }
+                self.mark_documents_saved();
                 self.update_title(ui);
                 Ok(())
             }
@@ -3476,6 +3476,50 @@ mod tests {
                     .any(|line| line.contains("could not start"))
             );
 
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn start_saves_an_unsaved_designer_layout_first() {
+        let dir = run_scratch("save-layout");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            let form = crate::project::DEFAULT_FORM.to_owned();
+            app.open_document(&form, DocKind::Designer)
+                .expect("the form opens in a designer");
+            app.update(
+                Msg::Toolbox(ToolboxMsg::Activate(lazyrad_designer::Tool::control(
+                    "Button",
+                ))),
+                ui,
+            );
+            assert!(app.documents.iter().any(|document| document.dirty));
+
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::ok());
+            app.start_run(ui);
+            assert!(app.is_running());
+
+            let layout = std::fs::read_to_string(dir.join(format!("{form}.lfm")))
+                .expect("the layout is on disk");
+            assert!(
+                layout.contains("button1"),
+                "the drawn button was saved: {layout}"
+            );
+            assert!(
+                app.documents.iter().all(|document| !document.dirty),
+                "every tab is clean after the save"
+            );
             app
         })
         .expect("the offscreen backend runs to completion");
