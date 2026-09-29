@@ -216,7 +216,7 @@ fn paint_lines(
     canvas.push_clip(text);
     for line in first_line..last_line {
         let raw = state.buffer.line_string(line);
-        let expanded = expand_tabs(&raw, tab);
+        let line_chars: Vec<char> = expand_tabs(&raw, tab).chars().collect();
         let y = metrics.y_of_line(text, line, first_line);
         for token in state.highlight.tokens(line) {
             let start = display_col(&raw, token.start, tab);
@@ -233,13 +233,13 @@ fn paint_lines(
             // Only the visible columns are drawn, plus one either side for a
             // glyph that overhangs its cell, so a long token off to the side
             // costs nothing on each repaint.
-            let drawn = drawn_cols(start..end, first_col, last_col);
-            let chars: Vec<char> = expanded
-                .chars()
-                .skip(drawn.start)
-                .take(drawn.len())
-                .collect();
-            for (offset, cluster) in clusters(&chars) {
+            let drawn = whole_clusters(
+                &line_chars,
+                drawn_cols(start..end, first_col, last_col),
+                start..end,
+            );
+            let chars = &line_chars[drawn.clone()];
+            for (offset, cluster) in clusters(chars) {
                 if cluster == " " {
                     continue;
                 }
@@ -263,6 +263,30 @@ fn drawn_cols(
     let from = token.start.max(first_col.saturating_sub(1));
     let to = token.end.min(last_col + 1);
     from..to.max(from)
+}
+
+/// Widens `cols` so it neither starts nor ends inside a cluster: the start moves
+/// back to its cluster's base and the end forward over trailing marks, both
+/// within `token` and the line. A view scrolled so that a base character sits
+/// just off the left edge still draws its accent attached, not on its own.
+fn whole_clusters(
+    line: &[char],
+    cols: std::ops::Range<usize>,
+    token: std::ops::Range<usize>,
+) -> std::ops::Range<usize> {
+    let floor = token.start;
+    let ceiling = token.end.min(line.len());
+    let continues =
+        |index: usize| index > 0 && (attaches(line[index]) || line[index - 1] == '\u{200D}');
+    let mut start = cols.start.min(ceiling);
+    while start > floor && continues(start) {
+        start -= 1;
+    }
+    let mut end = cols.end.min(ceiling).max(start);
+    while end < ceiling && continues(end) {
+        end += 1;
+    }
+    start..end
 }
 
 /// Splits `chars` into the runs drawn together, each with its offset: a base
@@ -536,6 +560,25 @@ mod tests {
             clusters(&chars("ab")),
             [(0, "a".to_owned()), (1, "b".to_owned())]
         );
+    }
+
+    #[test]
+    fn a_cluster_cut_by_the_left_edge_is_drawn_whole() {
+        // "xe" + two combining marks + "y": columns 0..5.
+        let line: Vec<char> = "xe\u{0301}\u{0323}y".chars().collect();
+        // Scrolled so the drawn range would start on the second mark (col 3):
+        // it moves back to the "e" at col 1, not past the token start.
+        assert_eq!(whole_clusters(&line, 3..5, 0..5), 1..5);
+        assert_eq!(
+            whole_clusters(&line, 3..5, 2..5),
+            2..5,
+            "bounded by the token"
+        );
+        // A range ending inside a cluster takes the trailing marks too.
+        assert_eq!(whole_clusters(&line, 0..2, 0..5), 0..4);
+        // Plain text is unchanged.
+        let plain: Vec<char> = "abcdef".chars().collect();
+        assert_eq!(whole_clusters(&plain, 2..4, 0..6), 2..4);
     }
 
     fn render(state: &EditorState) -> RgbaImage {
