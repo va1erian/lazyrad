@@ -546,6 +546,103 @@ mod tests {
         assert!(image.width() > 0 && image.height() > 0);
     }
 
+    /// A click lands on the line and column under it wherever the editor sits.
+    ///
+    /// Mouse events arrive in node-local coordinates, so hit-testing must not
+    /// use the editor's rectangle relative to its parent: an editor offset
+    /// inside a panel (a code tab below its header) would map every click to
+    /// the wrong cell.
+    #[test]
+    fn a_click_inside_an_offset_editor_puts_the_caret_under_the_pointer() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        use xui_canvas::snapshot::{Snapshot, render_with};
+        use xui_core::geometry::Rect;
+        use xui_core::units::Dip;
+        use xui_core::widget::Panel;
+        use xui_core::{App, Color};
+
+        use crate::metrics::{CELL_PROBE, Metrics};
+
+        struct Empty(#[allow(dead_code)] Panel<()>);
+
+        impl App for Empty {
+            type Msg = ();
+            fn update(&mut self, _msg: (), _ui: &mut xui_core::Ui<()>) {}
+        }
+
+        let text: String = (0..12).map(|n| format!("line {n:02} xxxxxxxxxxxxxxxx
+")).collect();
+        let (line, col) = (4, 7);
+        // The editor sits at (60, 50) inside a panel that sits at (30, 20).
+        let panel_origin = (30, 20);
+        let editor_origin = (60, 50);
+
+        let editor: Rc<RefCell<Option<crate::Editor<()>>>> = Rc::new(RefCell::new(None));
+        let target = Rc::new(Cell::new((0, 0)));
+        let expected = Rc::new(Cell::new(0));
+        let result = Rc::new(Cell::new(usize::MAX));
+        render_with(
+            Snapshot::new(Dip(500.0), Dip(400.0)),
+            {
+                let editor = Rc::clone(&editor);
+                let target = Rc::clone(&target);
+                let expected = Rc::clone(&expected);
+                let text = text.clone();
+                move |ui| {
+                    let panel = Panel::new(
+                        ui,
+                        Rect::new(panel_origin.0, panel_origin.1, 480, 380),
+                    )?;
+                    let scoped = ui.with_parent(panel.id());
+                    let widget = crate::Editor::new(
+                        &scoped,
+                        Rect::new(editor_origin.0, editor_origin.1, 400, 300),
+                    )?;
+                    widget.set_text(&text);
+
+                    let options = crate::Options::default();
+                    let style = options.font.style(Color::rgb(0, 0, 0));
+                    let measured = ui.measure_text(CELL_PROBE, &style, ui.dpi());
+                    let metrics = Metrics::new(
+                        measured,
+                        widget.state.borrow().buffer.line_count(),
+                        options.show_gutter,
+                        ui.dpi(),
+                    );
+                    // The middle of the cell, in window coordinates.
+                    target.set((
+                        panel_origin.0
+                            + editor_origin.0
+                            + metrics.gutter
+                            + col as i32 * metrics.advance
+                            + metrics.advance / 2,
+                        panel_origin.1
+                            + editor_origin.1
+                            + line as i32 * metrics.line_height
+                            + metrics.line_height / 2,
+                    ));
+                    expected.set(widget.state.borrow().buffer.line_start(line) + col);
+                    *editor.borrow_mut() = Some(widget);
+                    Ok(Empty(panel))
+                }
+            },
+            {
+                let editor = Rc::clone(&editor);
+                let target = Rc::clone(&target);
+                let result = Rc::clone(&result);
+                move |stage| {
+                    let (x, y) = target.get();
+                    stage.click(x, y);
+                    result.set(editor.borrow().as_ref().expect("editor").caret());
+                }
+            },
+        )
+        .expect("render");
+        assert_eq!(result.get(), expected.get());
+    }
+
     #[test]
     fn programmatic_edits_and_find_work_on_a_live_widget() {
         use std::cell::RefCell;
