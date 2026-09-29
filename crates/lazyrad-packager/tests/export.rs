@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use lazyrad_packager::payload::{
     FOOTER_LEN, FORMAT_VERSION, MAX_ENTRIES, MAX_ENTRY_BYTES, MAX_PAYLOAD_BYTES, encode_unchecked,
 };
-use lazyrad_packager::{ExportError, ExportRequest, Payload, PayloadError, atomic_write, export};
+use lazyrad_packager::{
+    Entry, ExportError, ExportRequest, Payload, PayloadError, atomic_write, export,
+};
 
 /// A scratch directory removed on drop.
 struct Scratch(PathBuf);
@@ -293,10 +295,31 @@ fn two_module_project(scratch: &Scratch, first: &str, second: &str) -> PathBuf {
 
 #[test]
 fn references_differing_only_by_case_are_a_clear_error() {
+    let entry = |name: &str| Entry {
+        name: name.to_owned(),
+        data: Vec::new(),
+    };
+    let error = Payload::new(vec![entry("a.lrp"), entry("Foo.rhai"), entry("foo.rhai")])
+        .expect_err("a case collision fails");
+    assert!(matches!(error, PayloadError::Duplicate(_)), "{error}");
+
+    // Through from_project too, when the filesystem keeps the two names apart.
     let scratch = Scratch::new("case");
     let lrp = two_module_project(&scratch, "Foo.rhai", "foo.rhai");
-    let error = Payload::from_project(&lrp).expect_err("a case collision fails");
-    assert!(matches!(error, PayloadError::Duplicate(_)), "{error}");
+    let dir = scratch.path("proj");
+    fs::write(dir.join("foo.rhai"), "").expect("second file");
+    let distinct = fs::read_dir(&dir)
+        .expect("lists")
+        .filter(|e| {
+            e.as_ref()
+                .is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".rhai"))
+        })
+        .count()
+        == 2;
+    if distinct {
+        let error = Payload::from_project(&lrp).expect_err("a case collision fails");
+        assert!(matches!(error, PayloadError::Duplicate(_)), "{error}");
+    }
 }
 
 #[test]
