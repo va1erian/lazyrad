@@ -7,7 +7,10 @@
 
 fn main() {
     if let Err(error) = lazyrad_ide::run() {
+        let message = format!("LazyRAD could not start: {error}");
         eprintln!("lazyrad-ide: {error}");
+        // With no console (GUI subsystem), the message box is what the user sees.
+        lazyrad_ide::platform::show_fatal_error(&message);
         std::process::exit(1);
     }
 }
