@@ -34,6 +34,7 @@
 //! call, so an IDE reading the player's stdout sees each line as it happens.
 
 pub mod embedded;
+pub mod platform;
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;

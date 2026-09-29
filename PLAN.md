@@ -436,9 +436,56 @@ editor move to 1.x.
   - **Fallback when L4 is missing:** run the program in-process on a nested xui window,
     with the debugger callback pumping a mini event loop. This is less robust, but it
     has no dependency on process spawning.
-- Keep all platform assumptions behind a small `lazyrad-runtime::platform` module:
-  paths, config directory, clipboard, file dialogs and spawning. That way the LazyOS
-  port is one new implementation of that module.
+- Platform assumptions live behind one seam module per crate, so the LazyOS port is a
+  new implementation of those modules only. See "Porting LazyRAD" below.
+
+### Porting LazyRAD
+
+The rule: **no `cfg(target_os)` / `cfg(windows)` / `cfg(unix)`, no OS-specific crate and
+no `std::os::*` outside the seam modules below and the `build.rs` files.** Everything
+else calls the seam. Each seam has a portable fallback (what a new platform gets before
+it implements anything), so a port compiles and runs first, then improves one module at a
+time. CI checks Windows, Linux and macOS (`.github/workflows/ci.yml`).
+
+**Seam modules and what a port must provide**
+
+| Seam | Provides | Portable fallback |
+|---|---|---|
+| `lazyrad-ide/src/platform/dialogs.rs` | file open/save, folder dialogs, fatal-error box (`rfd`, feature `native-dialogs`) | every dialog answers "cancelled"; errors go to stderr. LazyOS supplies a painted xui dialog here |
+| `lazyrad-ide/src/platform/theme.rs` | `system_prefers_dark()` (`dark-light`, Windows and macOS only) | light |
+| `lazyrad-ide/src/platform/process.rs` | `hide_console_window` (`CREATE_NO_WINDOW`), `executable_file_name` | no flags, no suffix |
+| `lazyrad-ide/src/platform/config.rs` | `config_dir` / `settings_file` (`directories`), default monospace font | no config dir (settings stay in memory), DejaVu Sans Mono |
+| `lazyrad-project/src/fs_safety.rs` | `write_no_follow`, `is_symlink`: saves never follow a link out of the project (`O_NOFOLLOW` on Unix, reparse points on Windows) | check-then-open (slightly racy) |
+| `lazyrad-packager/src/platform.rs` | `make_executable` (mode `0o755` on Unix) | no-op |
+| `lazyrad-player/src/platform.rs` | `show_error`: why an exported GUI app did not start (`rfd`, feature `native-dialogs`) | stderr |
+| `xui-code-editor` platform module | system clipboard (`arboard`) | in-process clipboard. Moving to the xui repo in issue #72 |
+
+`--no-default-features` on `lazyrad-ide` and `lazyrad-player` builds without `rfd`, which
+exercises the fallbacks.
+
+**Inventory of platform-specific items**
+
+- `cfg` attributes: `lazyrad-ide` `platform/{theme,process,config}.rs`;
+  `lazyrad-project` `fs_safety.rs`; `lazyrad-packager` `platform.rs`. Windows-only resource
+  embedding in `lazyrad-ide/build.rs` and `lazyrad-player/build.rs` (allowed).
+- `#![windows_subsystem = "windows"]` in `lazyrad-ide/src/main.rs`: a crate attribute the
+  compiler ignores elsewhere. It stays in the binary's entry point.
+- Target-specific dependencies (`Cargo.toml` only): `dark-light` on Windows/macOS (it pulls
+  D-Bus on Linux), `libc` on Unix (`O_NOFOLLOW`), `embed-resource` build-dependency on
+  Windows, and `rfd` behind `native-dialogs` in the IDE and the player.
+- OS calls: `CREATE_NO_WINDOW` (process seam), `O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`
+  (fs seam), Unix file mode (packager seam), the native message box (dialog seams).
+- Path and file-system assumptions: the executable suffix goes through
+  `executable_file_name` and `EXE_EXTENSION`; the player is found next to the IDE
+  executable; settings are atomic write-and-rename in the config directory; the export is
+  an atomic write next to the destination. Patching a Windows stub's PE headers and
+  resources uses `editpe`, pure Rust, so it runs on every host and needs no seam.
+- Process creation: `lazyrad-ide/src/run.rs` spawns `lazyrad-player` with piped stdio through
+  the process seam. Without process spawning (LazyOS before L4) see the in-process
+  fallback above.
+- `xui-code-editor` and its `arboard` dependency: handled by issue #72, not here.
+- Test-only gating: symlink and Windows-resource tests under each crate's `tests/`
+  use `cfg(unix)` / `cfg(windows)` because they exercise the platform directly.
 
 ---
 

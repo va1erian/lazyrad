@@ -41,13 +41,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// `CREATE_NO_WINDOW` from the Windows SDK's `WinBase.h` process creation
-/// flags: start a console application without a console window.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 use lazyrad_player::Report;
 use lazyrad_runtime::check_project;
+
+use crate::platform;
 
 /// How long the exit watcher sleeps between polls of the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
@@ -132,11 +129,7 @@ impl Launcher for PlayerLauncher {
         // The IDE is a GUI-subsystem app, so Windows would give the
         // console-subsystem player a console window of its own; its output is
         // piped back to the IDE instead, so don't create one.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        platform::process::hide_console_window(&mut command);
         let mut child = command
             .spawn()
             .map_err(|source| LaunchError::new(player, source))?;
@@ -454,7 +447,7 @@ pub fn resolve_player(override_path: Option<&Path>) -> Result<PathBuf, PlayerErr
     let Some(dir) = exe.parent() else {
         return Err(PlayerError::NoExeDir);
     };
-    let candidate = dir.join(format!("lazyrad-player{}", std::env::consts::EXE_SUFFIX));
+    let candidate = dir.join(platform::process::executable_file_name("lazyrad-player"));
     if candidate.is_file() {
         Ok(candidate)
     } else {

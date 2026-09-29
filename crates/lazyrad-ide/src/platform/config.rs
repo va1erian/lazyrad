@@ -1,0 +1,63 @@
+#![forbid(unsafe_code)]
+
+//! Where the IDE keeps per-user data, and the default monospace font.
+
+use std::path::{Path, PathBuf};
+
+/// The config directory's application name.
+const APP: &str = "LazyRAD";
+
+/// The per-user configuration directory for the IDE.
+///
+/// `None` when the platform reports none (an unusual environment); the IDE
+/// then runs with in-memory settings.
+pub fn config_dir() -> Option<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", APP)?;
+    Some(dirs.config_dir().to_path_buf())
+}
+
+/// The settings file inside `dir`, or `None` when there is no directory.
+pub fn settings_file_in(dir: Option<&Path>) -> Option<PathBuf> {
+    dir.map(|dir| dir.join("settings.toml"))
+}
+
+/// The IDE settings file's path (see [`config_dir`]).
+pub fn settings_file() -> Option<PathBuf> {
+    settings_file_in(config_dir().as_deref())
+}
+
+/// The portable fallback font family.
+const PORTABLE_MONOSPACE_FONT: &str = "DejaVu Sans Mono";
+
+/// The monospace family a platform ships with: Consolas on Windows, Menlo on
+/// macOS and DejaVu Sans Mono elsewhere (and on any new platform).
+pub fn default_monospace_font() -> &'static str {
+    if cfg!(windows) {
+        "Consolas"
+    } else if cfg!(target_os = "macos") {
+        "Menlo"
+    } else {
+        PORTABLE_MONOSPACE_FONT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_config_directory_means_no_settings_file() {
+        assert_eq!(settings_file_in(None), None);
+    }
+
+    #[test]
+    fn the_settings_file_is_named_inside_the_directory() {
+        let file = settings_file_in(Some(Path::new("cfg"))).expect("a directory gives a file");
+        assert_eq!(file, Path::new("cfg").join("settings.toml"));
+    }
+
+    #[test]
+    fn the_default_font_is_never_empty() {
+        assert!(!default_monospace_font().is_empty());
+    }
+}

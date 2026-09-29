@@ -5,17 +5,18 @@
 
 use xui_core::Theme as Palette;
 
+use crate::platform;
 use crate::settings::ThemeChoice;
 
 /// Resolves `choice` to a palette.
 ///
 /// `System` asks the platform for its light/dark preference through
-/// `dark-light`; a platform that cannot answer falls back to light.
+/// [`platform::theme`]; a platform that cannot answer falls back to light.
 pub fn palette(choice: ThemeChoice) -> Palette {
     match choice {
         ThemeChoice::Light => Palette::light(),
         ThemeChoice::Dark => Palette::dark(),
-        ThemeChoice::System => palette_for_dark(system_prefers_dark()),
+        ThemeChoice::System => palette_for_dark(platform::theme::system_prefers_dark()),
     }
 }
 
@@ -29,23 +30,6 @@ fn palette_for_dark(dark: bool) -> Palette {
     } else {
         Palette::light()
     }
-}
-
-/// Whether the operating system currently prefers a dark theme.
-///
-/// A detection failure is treated as light, the same fallback the rest of the
-/// IDE uses. Platforms the detection crate does not cover (Linux, without a
-/// desktop portal wired up) also fall back to light; `System` still differs
-/// from a pinned `Light` in that a supporting desktop reports its preference.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn system_prefers_dark() -> bool {
-    matches!(dark_light::detect(), Ok(dark_light::Mode::Dark))
-}
-
-/// No system theme detection on this platform; use light.
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn system_prefers_dark() -> bool {
-    false
 }
 
 #[cfg(test)]

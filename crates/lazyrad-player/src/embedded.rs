@@ -117,10 +117,5 @@ pub fn show_failure(reports: &[Report]) {
     if reports.len() > 8 {
         text.push_str(&format!("... and {} more\n", reports.len() - 8));
     }
-    let _ = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Error)
-        .set_title("This program cannot start")
-        .set_description(text)
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+    crate::platform::show_error("This program cannot start", &text);
 }
