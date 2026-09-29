@@ -28,6 +28,9 @@ pub const HANDLE_TOLERANCE: i64 = 4;
 
 /// The smallest node a resize may leave behind, in design units.
 const MIN_SIZE: i64 = 1;
+/// The kinds whose `text` is a caption, which a new control fills with its own
+/// name.
+const CAPTIONED_KINDS: [&str; 4] = ["Button", "Label", "CheckBox", "GroupBox"];
 
 /// A drag shorter than this in either axis is treated as a click, so the tool
 /// drops the control at its schema default size instead of a degenerate one.
@@ -989,6 +992,12 @@ impl Surface {
         for (property, value) in self.schema_defaults(kind) {
             node.set_prop(property, value);
         }
+        // A control whose text is a caption starts out showing its name, as in
+        // VB, so a new button is not an empty box. An Edit's or a combo's text
+        // is the user's input, so it stays empty.
+        if CAPTIONED_KINDS.contains(&kind) {
+            node.set_prop("text", Value::Text(name.clone()));
+        }
         node.set_prop("left", Value::Int(left));
         node.set_prop("top", Value::Int(top));
         node.set_prop("width", Value::Int(rect.width().max(MIN_SIZE)));
@@ -1764,7 +1773,7 @@ mod tests {
         surface.create_control("Button", DesignRect::new(0, 0, 100, 28), None);
         surface.create_control("Label", DesignRect::new(0, 40, 120, 20), None);
         let button = surface.doc.node("button1").expect("button");
-        assert_eq!(button.prop("text"), Some(&Value::Text(String::new())));
+        assert_eq!(button.prop("text"), Some(&Value::Text("button1".into())));
         assert_eq!(button.prop("enabled"), Some(&Value::Bool(true)));
         assert_eq!(button.prop("tab_index"), Some(&Value::Int(0)));
         let label = surface.doc.node("label1").expect("label");
@@ -1798,6 +1807,29 @@ mod tests {
         assert_eq!(
             surface.node_rect("label1"),
             Some(DesignRect::new(48, 48, 96, 80))
+        );
+    }
+
+    #[test]
+    fn a_new_captioned_control_shows_its_name_and_an_edit_stays_empty() {
+        let mut surface = empty();
+        for kind in ["Button", "Label", "CheckBox", "Edit"] {
+            surface.drop_control(kind);
+        }
+        let text = |name: &str| {
+            surface
+                .doc
+                .node(name)
+                .and_then(|node| node.prop("text"))
+                .cloned()
+        };
+        assert_eq!(text("button1"), Some(Value::Text("button1".into())));
+        assert_eq!(text("label1"), Some(Value::Text("label1".into())));
+        assert_eq!(text("check_box1"), Some(Value::Text("check_box1".into())));
+        assert_ne!(
+            text("edit1"),
+            Some(Value::Text("edit1".into())),
+            "an Edit's text is the user's input, not a caption"
         );
     }
 
