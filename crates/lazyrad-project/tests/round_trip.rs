@@ -202,9 +202,9 @@ fn missing_startup_and_files_are_located_in_the_project_file() {
         version: "0.1.0".to_owned(),
         startup: "ghost".to_owned(),
         items: vec![ProjectItem::Form {
-            name: "frmBroken".to_owned(),
-            layout: PathBuf::from("frmBroken.lfm"),
-            code: PathBuf::from("frmBroken.rhai"),
+            name: "broken_form".to_owned(),
+            layout: PathBuf::from("broken_form.lfm"),
+            code: PathBuf::from("broken_form.rhai"),
         }],
     };
     project.save(temp.path()).expect("project saves");
@@ -238,22 +238,22 @@ fn form_problems_are_located_in_the_form_file() {
     let project = Project {
         name: "Broken".to_owned(),
         version: "0.1.0".to_owned(),
-        startup: "frmBroken".to_owned(),
+        startup: "broken_form".to_owned(),
         items: vec![ProjectItem::Form {
-            name: "frmBroken".to_owned(),
-            layout: PathBuf::from("frmBroken.lfm"),
-            code: PathBuf::from("frmBroken.rhai"),
+            name: "broken_form".to_owned(),
+            layout: PathBuf::from("broken_form.lfm"),
+            code: PathBuf::from("broken_form.rhai"),
         }],
     };
     project.save(temp.path()).expect("project saves");
-    fs::write(temp.path().join("frmBroken.rhai"), "// code\n").expect("code is written");
+    fs::write(temp.path().join("broken_form.rhai"), "// code\n").expect("code is written");
     fs::write(
-        temp.path().join("frmBroken.lfm"),
+        temp.path().join("broken_form.lfm"),
         "\
 format = 1
 
 [window]
-name = \"frmBroken\"
+name = \"broken_form\"
 
 [[node]]
 kind = \"NoSuchWidget\"
@@ -267,7 +267,7 @@ name = \"bad\"
         .iter()
         .find(|diagnostic| diagnostic.kind == DiagnosticKind::InvalidForm)
         .unwrap_or_else(|| panic!("invalid form is reported: {diagnostics:?}"));
-    assert_eq!(invalid.file, temp.path().join("frmBroken.lfm"));
+    assert_eq!(invalid.file, temp.path().join("broken_form.lfm"));
     assert_eq!(invalid.line, Some(7), "the `kind` line is located");
 }
 

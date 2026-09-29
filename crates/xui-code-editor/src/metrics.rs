@@ -29,7 +29,10 @@ pub const SCROLLBAR: Dip = Dip(12.0);
 impl Metrics {
     /// The metrics for a measured glyph cell and a line count.
     pub fn new(measured: TextMetrics, line_count: usize, show_gutter: bool, dpi: u32) -> Metrics {
-        let advance = (measured.width / CELL_PROBE_LEN).max(1);
+        // Round to the nearest pixel: the painter draws each character in its
+        // own cell, so this only sets the spacing, and nearest is closest to
+        // the font's real advance.
+        let advance = ((measured.width + CELL_PROBE_LEN / 2) / CELL_PROBE_LEN).max(1);
         let line_height = measured.height.max(1);
         let gutter = if show_gutter {
             let digits = digit_count(line_count) as i32;

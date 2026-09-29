@@ -83,6 +83,30 @@ fn an_lrp_path_is_accepted_and_checked() {
 }
 
 #[test]
+fn the_ide_can_parse_the_json_the_player_emits() {
+    let dir = scratch("parse");
+    write_project(&dir, "fn broken() {\n    let x = ;\n}\n");
+
+    let output = player().arg(&dir).output().expect("the player runs");
+    assert_eq!(output.status.code(), Some(1));
+
+    // The IDE reads each stderr line through the player's own parser, so the
+    // two halves cannot drift apart.
+    let stderr = String::from_utf8(output.stderr.clone()).expect("stderr is UTF-8");
+    let reports: Vec<lazyrad_player::Report> = stderr
+        .lines()
+        .filter_map(lazyrad_player::Report::from_json)
+        .collect();
+    assert_eq!(reports.len(), 1, "one diagnostic: {stderr:?}");
+    assert_eq!(reports[0].kind, lazyrad_player::Kind::Compile);
+    assert_eq!(reports[0].file, "main_form.rhai");
+    assert_eq!(reports[0].line, 2);
+    assert!(reports[0].col > 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_directory_without_a_project_exits_1() {
     let dir = scratch("empty");
     let output = player().arg(&dir).output().expect("the player runs");

@@ -212,21 +212,21 @@ mod tests {
         let labels: Vec<&str> = explorer.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["MyApp", "Forms", "Form1", "Modules", "Module1"],
+            ["MyApp", "Forms", "main_form", "Modules", "module1"],
             "the project is a root row above the groups"
         );
         assert_eq!(explorer.entry(0), Some(&ExplorerItem::Project));
         assert_eq!(explorer.entry(1), Some(&ExplorerItem::Group(Group::Forms)));
         assert_eq!(
             explorer.entry(2),
-            Some(&ExplorerItem::Form("Form1".to_owned()))
+            Some(&ExplorerItem::Form("main_form".to_owned()))
         );
         assert_eq!(
             explorer.entry(4),
-            Some(&ExplorerItem::Module("Module1".to_owned()))
+            Some(&ExplorerItem::Module("module1".to_owned()))
         );
-        assert_eq!(explorer.node_of("Form1"), Some(2));
-        assert_eq!(explorer.node_of("Module1"), Some(4));
+        assert_eq!(explorer.node_of("main_form"), Some(2));
+        assert_eq!(explorer.node_of("module1"), Some(4));
         assert_eq!(explorer.entry(99), None);
 
         let _ = std::fs::remove_dir_all(&dir);

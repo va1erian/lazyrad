@@ -125,6 +125,15 @@ impl Kind {
             Kind::Runtime => "runtime",
         }
     }
+
+    /// The kind a JSON `kind` field names, if it is one this player writes.
+    pub fn from_name(name: &str) -> Option<Kind> {
+        match name {
+            "compile" => Some(Kind::Compile),
+            "runtime" => Some(Kind::Runtime),
+            _ => None,
+        }
+    }
 }
 
 /// One problem, in the shape both output formats need.
@@ -226,6 +235,25 @@ impl Report {
         .to_string()
     }
 
+    /// Parses one JSON diagnostic line exactly as [`Report::to_json`] writes it.
+    ///
+    /// A line that is not one JSON object with a known `kind` is `None`, so the
+    /// IDE can treat an ordinary log line on `stderr` as output rather than an
+    /// error. Missing fields default to the same "unknown" values the rest of
+    /// this module uses (empty file, line/col `0`).
+    pub fn from_json(line: &str) -> Option<Report> {
+        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        let object = value.as_object()?;
+        let kind = Kind::from_name(object.get("kind")?.as_str()?)?;
+        Some(Report {
+            kind,
+            file: json_string(object.get("file")),
+            line: json_usize(object.get("line")),
+            col: json_usize(object.get("col")),
+            message: json_string(object.get("message")),
+        })
+    }
+
     /// The human-readable single line for this report.
     pub fn to_text(&self) -> String {
         if self.line > 0 && self.col > 0 {
@@ -238,6 +266,25 @@ impl Report {
             format!("{}: {}", self.file, self.message)
         }
     }
+}
+
+/// The string form of a JSON value, or an empty string when it is missing or
+/// not a string.
+fn json_string(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The unsigned form of a JSON value, or `0` when it is missing or not a
+/// non-negative integer.
+fn json_usize(value: Option<&serde_json::Value>) -> usize {
+    value
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .try_into()
+        .unwrap_or(0)
 }
 
 /// Writes `reports` to stderr: JSON always, and a readable line on a terminal.
@@ -315,6 +362,41 @@ mod tests {
             ..report
         };
         assert_eq!(named.to_text(), "main_form.lfm: the backend is gone");
+    }
+
+    #[test]
+    fn a_written_report_parses_back_unchanged() {
+        let report = Report {
+            kind: Kind::Compile,
+            file: "main_form.rhai".to_owned(),
+            line: 2,
+            col: 7,
+            message: "boom \"quoted\"".to_owned(),
+        };
+        assert_eq!(Report::from_json(&report.to_json()), Some(report));
+    }
+
+    #[test]
+    fn a_non_diagnostic_stderr_line_is_not_a_report() {
+        assert_eq!(Report::from_json("lazyrad: form `x` is not open"), None);
+        assert_eq!(
+            Report::from_json("{}"),
+            None,
+            "a missing kind is not a report"
+        );
+        assert_eq!(Report::from_json(r#"{"kind":"nope"}"#), None);
+        assert_eq!(Report::from_json(""), None);
+    }
+
+    #[test]
+    fn a_sparse_report_fills_in_unknown_fields() {
+        let report = Report::from_json(r#"{"kind":"runtime","message":"boom"}"#)
+            .expect("the kind alone is enough");
+        assert_eq!(report.kind, Kind::Runtime);
+        assert!(report.file.is_empty());
+        assert_eq!(report.line, 0);
+        assert_eq!(report.col, 0);
+        assert_eq!(report.message, "boom");
     }
 
     #[test]

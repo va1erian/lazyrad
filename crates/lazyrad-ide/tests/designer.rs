@@ -50,7 +50,7 @@ fn a_toolbox_control_and_a_property_edit_round_trip_through_save_and_reload() {
 
             // Edit the new control's `(Name)` property through the grid: the
             // synthetic name row is always first, so one Down selects it.
-            let form = "Form1".to_owned();
+            let form = "main_form".to_owned();
             ui.emit(Msg::PropertyGrid {
                 form: form.clone(),
                 msg: PropertyGridMsg::MoveRow(RowMove::Down),
@@ -71,7 +71,7 @@ fn a_toolbox_control_and_a_property_edit_round_trip_through_save_and_reload() {
     .expect("the offscreen backend runs to completion");
 
     let reopened = ProjectSession::open(&dir).expect("the project reopens");
-    let form = reopened.form("Form1").expect("the form persisted");
+    let form = reopened.form("main_form").expect("the form persisted");
     let node = form
         .node("go_button")
         .expect("the toolbox control and its rename persisted");
@@ -120,7 +120,7 @@ fn a_late_designer_message_for_a_closed_form_does_not_reach_another_form() {
 
     let reopened = ProjectSession::open(&dir).expect("the project reopens");
     assert!(
-        reopened.form("Form1").is_some(),
+        reopened.form("main_form").is_some(),
         "the real form is untouched by the stale messages"
     );
 

@@ -196,10 +196,10 @@ fn paint_selection(
 
 /// The visible lines' text, coloured by lexical class.
 ///
-/// Each token is drawn as its own run, mapped from char offsets to display
-/// columns through the raw line (tabs expand to several cells). Runs entirely
-/// off-screen are skipped; a run that starts before the first visible column is
-/// drawn from its true x and clipped.
+/// Each token is mapped from char offsets to display columns through the raw
+/// line (tabs expand to several cells), then drawn one character per cell.
+/// Tokens entirely off-screen are skipped, and only a token's visible columns
+/// (plus one either side for overhang) are drawn; the text clip trims the rest.
 fn paint_lines(
     canvas: &mut dyn Canvas,
     state: &EditorState,
@@ -216,26 +216,113 @@ fn paint_lines(
     canvas.push_clip(text);
     for line in first_line..last_line {
         let raw = state.buffer.line_string(line);
-        let expanded = expand_tabs(&raw, tab);
+        let line_chars: Vec<char> = expand_tabs(&raw, tab).chars().collect();
         let y = metrics.y_of_line(text, line, first_line);
         for token in state.highlight.tokens(line) {
             let start = display_col(&raw, token.start, tab);
             let end = display_col(&raw, token.end, tab);
-            if end <= first_col || start >= last_col {
+            // Visibility uses the same one-column overhang margin as the drawn
+            // range, so a token ending just left of the view still draws the
+            // glyph that reaches into it.
+            let visible = drawn_cols(start..end, first_col, last_col);
+            if visible.is_empty() {
                 continue;
             }
-            let run: String = expanded.chars().skip(start).take(end - start).collect();
-            if run.is_empty() {
-                continue;
-            }
-            let x = metrics.x_of_col(text, start, first_col);
-            let width = (end - start) as i32 * metrics.advance;
-            let row = Rect::new(x, y, x + width, y + metrics.line_height);
             let style = state.options.font.style(theme.token_color(token.class));
-            canvas.draw_text(&run, row, &style);
+            // Each character is drawn in its own cell. The advance is a whole
+            // number of pixels while the font's is fractional, so a whole run
+            // drawn at once drifts from the grid: its tail is clipped and the
+            // next token covers it. The rect spans two cells so a glyph a
+            // little wider than its rounded cell is not clipped either.
+            // Only the visible columns are drawn, plus one either side for a
+            // glyph that overhangs its cell, so a long token off to the side
+            // costs nothing on each repaint.
+            let drawn = whole_clusters(&line_chars, visible, start..end);
+            let chars = &line_chars[drawn.clone()];
+            for (offset, cluster) in clusters(chars) {
+                if cluster == " " {
+                    continue;
+                }
+                let x = metrics.x_of_col(text, drawn.start + offset, first_col);
+                let cell = Rect::new(x, y, x + metrics.advance * 2, y + metrics.line_height);
+                canvas.draw_text(&cluster, cell, &style);
+            }
         }
     }
     canvas.pop_clip();
+}
+
+/// The columns of a token spanning `token` that are worth drawing when
+/// `first_col..last_col` is visible: the visible part, plus one column either
+/// side for a glyph that overhangs its cell. Empty when nothing is visible.
+fn drawn_cols(
+    token: std::ops::Range<usize>,
+    first_col: usize,
+    last_col: usize,
+) -> std::ops::Range<usize> {
+    let from = token.start.max(first_col.saturating_sub(1));
+    let to = token.end.min(last_col + 1);
+    from..to.max(from)
+}
+
+/// Widens `cols` so it neither starts nor ends inside a cluster: the start moves
+/// back to its cluster's base and the end forward over trailing marks, both
+/// within `token` and the line. A view scrolled so that a base character sits
+/// just off the left edge still draws its accent attached, not on its own.
+fn whole_clusters(
+    line: &[char],
+    cols: std::ops::Range<usize>,
+    token: std::ops::Range<usize>,
+) -> std::ops::Range<usize> {
+    let floor = token.start;
+    let ceiling = token.end.min(line.len());
+    let continues =
+        |index: usize| index > 0 && (attaches(line[index]) || line[index - 1] == '\u{200D}');
+    let mut start = cols.start.min(ceiling);
+    while start > floor && continues(start) {
+        start -= 1;
+    }
+    let mut end = cols.end.min(ceiling).max(start);
+    while end < ceiling && continues(end) {
+        end += 1;
+    }
+    start..end
+}
+
+/// Splits `chars` into the runs drawn together, each with its offset: a base
+/// character plus the combining marks, variation selectors and zero-width-joined
+/// characters that follow it, so an accent or a joined emoji is shaped with its
+/// base instead of on its own. The grid is still one column per `char`, so the
+/// caller advances by the offset, not by the cluster.
+fn clusters(chars: &[char]) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut joined = false;
+    for (index, &character) in chars.iter().enumerate() {
+        match out.last_mut() {
+            Some((_, cluster)) if joined || attaches(character) => cluster.push(character),
+            _ => out.push((index, character.to_string())),
+        }
+        joined = character == '\u{200D}';
+    }
+    out
+}
+
+/// Whether `character` attaches to the one before it rather than starting a
+/// cell of its own: a combining mark, a variation selector or a zero-width
+/// joiner. A small table stands in for full grapheme segmentation, which this
+/// crate avoids a dependency for.
+fn attaches(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FE20}'..='\u{FE2F}'
+            | '\u{200D}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// A fill behind the bracket pair at the caret, if any.
@@ -443,6 +530,60 @@ mod tests {
     use crate::state::EditorState;
     use crate::theme::EditorTheme;
     use xui_canvas::{RgbaImage, Surface};
+
+    #[test]
+    fn only_the_visible_columns_of_a_long_token_are_drawn() {
+        // A 10 000-column token with columns 100..180 on screen.
+        assert_eq!(drawn_cols(0..10_000, 100, 180), 99..181);
+        // A token entirely inside the view is drawn whole.
+        assert_eq!(drawn_cols(120..130, 100, 180), 120..130);
+        // At the left edge nothing underflows.
+        assert_eq!(drawn_cols(0..5, 0, 80), 0..5);
+        // A token past the view draws nothing.
+        assert!(drawn_cols(500..600, 100, 180).is_empty());
+        // A token ending at the view's left edge keeps its last column, whose
+        // glyph can overhang into view; one ending further left draws nothing.
+        assert_eq!(drawn_cols(90..100, 100, 180), 99..100);
+        assert!(drawn_cols(90..99, 100, 180).is_empty());
+    }
+
+    #[test]
+    fn combining_marks_and_joined_characters_are_drawn_with_their_base() {
+        let chars = |text: &str| text.chars().collect::<Vec<_>>();
+        // "e" + combining acute, then "x": the accent stays with the "e", and
+        // the "x" keeps its own column (2, since the accent takes one).
+        assert_eq!(
+            clusters(&chars("e\u{0301}x")),
+            [(0, "e\u{0301}".to_owned()), (2, "x".to_owned())]
+        );
+        // A ZWJ sequence is one run.
+        let family = "\u{1F468}\u{200D}\u{1F469}";
+        assert_eq!(clusters(&chars(family)), [(0, family.to_owned())]);
+        // Plain ASCII is one cell per character.
+        assert_eq!(
+            clusters(&chars("ab")),
+            [(0, "a".to_owned()), (1, "b".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_cluster_cut_by_the_left_edge_is_drawn_whole() {
+        // "xe" + two combining marks + "y": columns 0..5.
+        let line: Vec<char> = "xe\u{0301}\u{0323}y".chars().collect();
+        // Scrolled so the drawn range would start on the second mark (col 3):
+        // it moves back to the "e" at col 1, not past the token start.
+        assert_eq!(whole_clusters(&line, 3..5, 0..5), 1..5);
+        assert_eq!(
+            whole_clusters(&line, 3..5, 2..5),
+            2..5,
+            "bounded by the token"
+        );
+        // A range ending inside a cluster takes the trailing marks too.
+        assert_eq!(whole_clusters(&line, 0..2, 0..5), 0..4);
+        // Plain text is unchanged.
+        let plain: Vec<char> = "abcdef".chars().collect();
+        assert_eq!(whole_clusters(&plain, 2..4, 0..6), 2..4);
+    }
 
     fn render(state: &EditorState) -> RgbaImage {
         let xui_theme = Theme::light();

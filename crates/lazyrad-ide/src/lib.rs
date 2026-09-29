@@ -23,6 +23,7 @@ pub mod explorer;
 pub mod platform;
 pub mod procedures;
 pub mod project;
+pub mod run;
 pub mod settings;
 pub mod shortcut_backend;
 pub mod theme;
