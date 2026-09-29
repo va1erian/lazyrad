@@ -373,24 +373,32 @@ impl<M: 'static> Designer<M> {
 
     /// Undoes the last change, returning whether anything changed.
     pub fn undo(&self, ui: &Ui<M>) -> bool {
-        self.apply(ui, |surface| {
-            if surface.undo() {
-                Outcome::changed(Change::STRUCTURE)
-            } else {
-                Outcome::none()
-            }
-        })
+        self.history_step(ui, Surface::undo)
     }
 
     /// Redoes the last undone change, returning whether anything changed.
     pub fn redo(&self, ui: &Ui<M>) -> bool {
-        self.apply(ui, |surface| {
-            if surface.redo() {
+        self.history_step(ui, Surface::redo)
+    }
+
+    /// Applies an undo or redo step, then reports every control rename it
+    /// reversed or re-applied through the rename sink, so the host rewrites the
+    /// form's handlers to match (a rename is undoable like any other edit).
+    fn history_step(&self, ui: &Ui<M>, step: impl FnOnce(&mut Surface) -> bool) -> bool {
+        let before = self.doc();
+        let changed = self.apply(ui, |surface| {
+            if step(surface) {
                 Outcome::changed(Change::STRUCTURE)
             } else {
                 Outcome::none()
             }
-        })
+        });
+        if changed {
+            for (old, new) in renamed_nodes(&before, &self.doc()) {
+                self.notify_rename(&old, &new);
+            }
+        }
+        changed
     }
 
     /// Copies the selection to the in-process clipboard, returning whether
@@ -713,6 +721,23 @@ impl<M: 'static> Designer<M> {
             sink(old, new);
         }
     }
+}
+
+/// The node renames between two versions of a form: `(old, new)` for each node
+/// that kept its position and kind but changed its name. A rename edits a node
+/// in place, so an undo or redo of one shows up exactly like this; a step that
+/// adds or removes nodes renames nothing.
+fn renamed_nodes(before: &FormDoc, after: &FormDoc) -> Vec<(String, String)> {
+    if before.nodes.len() != after.nodes.len() {
+        return Vec::new();
+    }
+    before
+        .nodes
+        .iter()
+        .zip(&after.nodes)
+        .filter(|(old, new)| old.name != new.name && old.kind == new.kind)
+        .map(|(old, new)| (old.name.clone(), new.name.clone()))
+        .collect()
 }
 
 /// Translates a local overlay event into a [`DesignerMsg`], dropping events the

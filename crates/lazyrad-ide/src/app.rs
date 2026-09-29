@@ -1615,6 +1615,13 @@ impl IdeApp {
         if !changed {
             return;
         }
+        // The grid caches its rows; a canvas drag or an undo changes geometry
+        // without a selection change, so refresh it from the designer.
+        if self.grid_form.as_deref() == Some(name)
+            && let Some(grid) = &self.properties_grid
+        {
+            grid.sync(self.properties_panel.ui());
+        }
         if self.mark_document_dirty(name, DocKind::Designer) {
             self.refresh_titles();
         }
@@ -2917,6 +2924,93 @@ mod tests {
         })
         .expect("the offscreen backend runs to completion");
 
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn the_grid_shows_new_geometry_after_a_canvas_drag() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-drag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            let form = crate::project::DEFAULT_FORM.to_owned();
+            app.open_document(&form, DocKind::Designer)
+                .expect("the form opens in a designer");
+            // The toolbox drops a selected button1, which the grid shows.
+            app.update(
+                Msg::Toolbox(ToolboxMsg::Activate(lazyrad_designer::Tool::control(
+                    "Button",
+                ))),
+                ui,
+            );
+            let geometry = |app: &IdeApp| {
+                let node = app
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.form(&form))
+                    .and_then(|doc| doc.node("button1"))
+                    .cloned()
+                    .expect("button1 exists");
+                let int = |name: &str| {
+                    node.prop(name)
+                        .and_then(lazyrad_project::Value::as_int)
+                        .unwrap_or(0)
+                };
+                (int("left"), int("top"), int("width"), int("height"))
+            };
+            let grid_left = |app: &IdeApp| {
+                app.properties_grid
+                    .as_ref()
+                    .expect("the grid is bound")
+                    .rows()
+                    .into_iter()
+                    .find(|row| row.name == "left")
+                    .map(|row| row.value)
+            };
+            let (left, top, width, height) = geometry(&app);
+            assert_eq!(grid_left(&app), Some(lazyrad_project::Value::Int(left)));
+
+            // Drag the button by (24, 16) on the canvas.
+            let (x, y) = (left + width / 2, top + height / 2);
+            for msg in [
+                DesignerMsg::PointerDown { x, y, ctrl: false },
+                DesignerMsg::PointerMove {
+                    x: x + 24,
+                    y: y + 16,
+                    ctrl: false,
+                },
+                DesignerMsg::PointerUp {
+                    x: x + 24,
+                    y: y + 16,
+                    ctrl: false,
+                },
+            ] {
+                app.update(
+                    Msg::Designer {
+                        document: form.clone(),
+                        msg,
+                    },
+                    ui,
+                );
+            }
+            let (moved, _, _, _) = geometry(&app);
+            assert_ne!(moved, left, "the drag moved the button");
+            assert_eq!(
+                grid_left(&app),
+                Some(lazyrad_project::Value::Int(moved)),
+                "the grid's cached row follows the drag"
+            );
+            app
+        })
+        .expect("the offscreen backend runs to completion");
         let _ = std::fs::remove_dir_all(&cleanup);
     }
 

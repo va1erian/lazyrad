@@ -745,3 +745,78 @@ fn a_failed_construction_restores_the_windows_design_mode() {
     assert!(failed, "the unbuildable form is reported");
     assert!(!design_mode, "the window left design mode again");
 }
+
+#[test]
+fn undoing_and_redoing_a_rename_reports_it_through_the_rename_sink() {
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let renames: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+    let observed = Rc::clone(&renames);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(backend, spec, move |ui| {
+        let designer = Designer::new(
+            ui,
+            Rect::new(0, 0, 320, 200),
+            button_doc(),
+            catalog,
+            Msg::Designer,
+        )
+        .expect("the designer builds");
+        let sink = Rc::clone(&observed);
+        designer.set_rename_sink(move |old, new| {
+            sink.borrow_mut().push((old.to_owned(), new.to_owned()));
+        });
+        designer
+            .set_property(
+                &lazyrad_designer::Target::Node("ok_button".to_owned()),
+                "name",
+                Value::Text("go_button".into()),
+                ui,
+            )
+            .expect("the rename is valid");
+        assert!(designer.undo(ui), "the rename is undone");
+        assert!(designer.redo(ui), "and redone");
+        // A move is undone without reporting any rename.
+        designer.update(
+            DesignerMsg::PointerDown {
+                x: 40,
+                y: 20,
+                ctrl: false,
+            },
+            ui,
+        );
+        designer.update(
+            DesignerMsg::PointerMove {
+                x: 60,
+                y: 40,
+                ctrl: false,
+            },
+            ui,
+        );
+        designer.update(
+            DesignerMsg::PointerUp {
+                x: 60,
+                y: 40,
+                ctrl: false,
+            },
+            ui,
+        );
+        assert!(designer.undo(ui), "the move is undone");
+        Editor {
+            designer: Rc::new(RefCell::new(designer)),
+        }
+    })
+    .expect("run_app succeeds");
+
+    let pair = |old: &str, new: &str| (old.to_owned(), new.to_owned());
+    assert_eq!(
+        *renames.borrow(),
+        vec![
+            pair("ok_button", "go_button"),
+            pair("go_button", "ok_button"),
+            pair("ok_button", "go_button"),
+        ],
+        "the rename, its undo and its redo each reach the host; the move's undo does not"
+    );
+}

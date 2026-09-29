@@ -360,12 +360,16 @@ impl<M: 'static> Editor<M> {
     /// Runs a text-changing command: re-lexes the affected lines, repaints and
     /// reports whether anything changed.
     fn edit(&self, command: impl FnOnce(&mut EditorState) -> bool) -> bool {
+        let ui = self.control.ui().clone();
         let changed = {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
             let changed = command(state);
             if changed {
                 state.sync_highlight();
+                // Keep the caret on screen, as the keyboard path does after the
+                // same edits (a paste or an undo can move it far away).
+                events::ensure_visible(state, &ui, self.control.id());
             }
             changed
         };
