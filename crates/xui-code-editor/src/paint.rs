@@ -21,13 +21,36 @@ use crate::theme::EditorTheme;
 use crate::view::caret_display_col;
 
 /// Draws `state` into `canvas`.
+///
+/// xui's software compositor reports [`Canvas::bounds`] as the node's window
+/// rectangle with no translation applied, so the painter moves the origin to
+/// the node's corner and clips to it, then works in node-local coordinates, as
+/// the mouse events do. On a canvas that honours the contract the bounds already
+/// sit at the origin and this is a no-op.
 pub(crate) fn paint(
     canvas: &mut dyn Canvas,
     state: &EditorState,
     theme: &EditorTheme,
     xui_theme: &Theme,
 ) {
-    let bounds = canvas.bounds();
+    let origin = canvas.bounds();
+    let area = Rect::from_size(origin.size());
+    canvas.save();
+    canvas.set_translation(origin.left as f32, origin.top as f32);
+    canvas.push_clip(area);
+    paint_local(canvas, state, theme, xui_theme, area);
+    canvas.pop_clip();
+    canvas.restore();
+}
+
+/// Draws `state` into `bounds`, the node's area at the canvas origin.
+fn paint_local(
+    canvas: &mut dyn Canvas,
+    state: &EditorState,
+    theme: &EditorTheme,
+    xui_theme: &Theme,
+    bounds: Rect,
+) {
     let dpi = canvas.dpi();
     let style = state.options.font.style(theme.text);
     let measured = canvas.measure_text(CELL_PROBE, &style);

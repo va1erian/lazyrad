@@ -8,6 +8,7 @@
 
 use xui_core::app::Ui;
 use xui_core::backend::{Event, WidgetId};
+use xui_core::geometry::Rect;
 use xui_core::message::{Key, MouseButton};
 
 use crate::edit;
@@ -41,7 +42,8 @@ fn viewport<M: 'static>(ui: &Ui<M>, id: WidgetId, state: &EditorState) -> Viewpo
     let line_count = state.buffer.line_count();
     let metrics = Metrics::new(measured, line_count, state.options.show_gutter, dpi);
     Viewport::split(
-        ui.bounds(id),
+        // Events are node-local, so the viewport sits at the node's origin.
+        Rect::from_size(ui.bounds(id).size()),
         metrics,
         line_count,
         state.buffer.max_line_cols(state.options.tab_width),
