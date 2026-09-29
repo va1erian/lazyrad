@@ -24,7 +24,9 @@ use lazyrad_designer::{
     handler_events, rename_handlers,
 };
 use lazyrad_project::Catalog;
-use xui_code_editor::{Editor, Marker, MarkerKind, Query, RhaiHighlighter};
+use xui_code_editor::{
+    Editor, FontConfig, Marker, MarkerKind, Options as EditorOptions, Query, RhaiHighlighter,
+};
 use xui_core::app::{App, Ui};
 use xui_core::backend::{BackendError, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId};
 use xui_core::geometry::Point;
@@ -898,6 +900,19 @@ impl IdeApp {
                 ui.apply_moves(&[(self.menu_id, bounds)]);
             }
             Err(error) => self.log(ui, format!("the menu could not be rebuilt: {error}")),
+        }
+    }
+
+    /// The code editors' options: the configured monospace family and size.
+    /// The editor is a monospace grid, so without a monospace family it would
+    /// fall back to the proportional UI font and space its tokens apart.
+    fn editor_options(&self) -> EditorOptions {
+        EditorOptions {
+            font: FontConfig {
+                family: Some(self.settings.editor_font_family.clone()),
+                size: Dip(self.settings.editor_font_size),
+            },
+            ..EditorOptions::default()
         }
     }
 
@@ -2385,7 +2400,7 @@ impl IdeApp {
                     None
                 };
 
-                let editor = Editor::new(ui, Rect::default())?
+                let editor = Editor::with_options(ui, Rect::default(), self.editor_options())?
                     .with_highlighter(RhaiHighlighter)
                     .on_change({
                         let name = name.to_owned();
@@ -2794,6 +2809,22 @@ mod tests {
     use xui_core::Key;
     use xui_core::backend::Backend;
     use xui_core::run_app;
+
+    #[test]
+    fn code_editors_use_the_configured_monospace_font() {
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), |ui| {
+            let mut settings = Settings::default();
+            settings.editor_font_family = "Test Mono".to_owned();
+            settings.editor_font_size = 15.0;
+            let app = IdeApp::build(ui, settings, Vec::new()).expect("the IDE builds");
+            let options = app.editor_options();
+            assert_eq!(options.font.family.as_deref(), Some("Test Mono"));
+            assert_eq!(options.font.size, Dip(15.0));
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+    }
 
     #[test]
     fn every_toolbar_entry_has_an_icon_and_a_tooltip_naming_its_shortcut() {

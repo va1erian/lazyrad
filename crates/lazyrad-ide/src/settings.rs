@@ -102,6 +102,9 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// The code editor's font size, in design points.
     pub editor_font_size: f32,
+    /// The code editor's font family. The editor is a monospace grid, so this
+    /// must name a monospace face; the default is the platform's usual one.
+    pub editor_font_family: String,
     /// The most recently opened projects, newest first.
     pub recent_projects: Vec<PathBuf>,
     /// The docked pane sizes.
@@ -118,10 +121,23 @@ impl Default for Settings {
         Settings {
             theme: ThemeChoice::Light,
             editor_font_size: 12.0,
+            editor_font_family: default_editor_font_family().to_owned(),
             recent_projects: Vec::new(),
             panes: PaneSizes::default(),
             store: None,
         }
+    }
+}
+
+/// The monospace family a platform ships with: Consolas on Windows, Menlo on
+/// macOS and DejaVu Sans Mono elsewhere.
+pub fn default_editor_font_family() -> &'static str {
+    if cfg!(windows) {
+        "Consolas"
+    } else if cfg!(target_os = "macos") {
+        "Menlo"
+    } else {
+        "DejaVu Sans Mono"
     }
 }
 
@@ -248,6 +264,13 @@ impl std::error::Error for SettingsError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_settings_file_gets_the_default_monospace_family() {
+        let parsed = Settings::from_toml("editor_font_size = 14.0\n").expect("old settings load");
+        assert_eq!(parsed.editor_font_family, default_editor_font_family());
+        assert!(!parsed.editor_font_family.is_empty());
+    }
 
     #[test]
     fn defaults_round_trip_through_toml() {

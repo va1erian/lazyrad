@@ -224,15 +224,21 @@ fn paint_lines(
             if end <= first_col || start >= last_col {
                 continue;
             }
-            let run: String = expanded.chars().skip(start).take(end - start).collect();
-            if run.is_empty() {
-                continue;
-            }
-            let x = metrics.x_of_col(text, start, first_col);
-            let width = (end - start) as i32 * metrics.advance;
-            let row = Rect::new(x, y, x + width, y + metrics.line_height);
             let style = state.options.font.style(theme.token_color(token.class));
-            canvas.draw_text(&run, row, &style);
+            // Each character is drawn in its own cell. The advance is a whole
+            // number of pixels while the font's is fractional, so a whole run
+            // drawn at once drifts from the grid: its tail is clipped and the
+            // next token covers it. The rect spans two cells so a glyph a
+            // little wider than its rounded cell is not clipped either.
+            let cells = expanded.chars().enumerate().skip(start).take(end - start);
+            for (col, character) in cells {
+                if character == ' ' {
+                    continue;
+                }
+                let x = metrics.x_of_col(text, col, first_col);
+                let cell = Rect::new(x, y, x + metrics.advance * 2, y + metrics.line_height);
+                canvas.draw_text(character.encode_utf8(&mut [0; 4]), cell, &style);
+            }
         }
     }
     canvas.pop_clip();
