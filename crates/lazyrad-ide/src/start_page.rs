@@ -9,7 +9,9 @@ use std::sync::OnceLock;
 
 use xui_core::Image;
 use xui_core::app::Ui;
-use xui_core::backend::{Canvas, NodeKind, NodeSpec, Result as UiResult, TextStyle, WidgetId};
+use xui_core::backend::{
+    Backend, Canvas, NodeKind, NodeSpec, Result as UiResult, TextStyle, WidgetId, WindowId,
+};
 use xui_core::geometry::Rect;
 use xui_core::units::{Dip, dip};
 use xui_core::widget::Control;
@@ -31,6 +33,18 @@ fn logo() -> Option<&'static Image> {
     static LOGO: OnceLock<Option<Image>> = OnceLock::new();
     LOGO.get_or_init(|| Image::decode_png(LOGO_PNG).ok())
         .as_ref()
+}
+
+/// The side of the window icon, in pixels. The platform scales it for the title
+/// bar and the taskbar; 64 keeps it sharp at 200% without being large.
+const ICON_SIDE: u32 = 64;
+
+/// Sets the logo as `window`'s icon (title bar and taskbar). Does nothing if the
+/// embedded PNG cannot be decoded.
+pub(crate) fn install_window_icon(backend: &dyn Backend, window: WindowId) {
+    if let Some(icon) = logo().and_then(|logo| scaled(logo, ICON_SIDE)) {
+        backend.set_window_icon(window, &icon);
+    }
 }
 
 /// The logo scaled to `side` pixels square. Halves repeatedly first, so a large
@@ -106,4 +120,22 @@ fn paint(
     }
     let text = Rect::new(bounds.left, text_top, bounds.right, text_top + text_height);
     canvas.draw_text(welcome, text, &style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_gets_the_logo_as_its_icon() {
+        use xui_core::backend::PlatformSpec;
+
+        let backend = xui_canvas::OffscreenBackend::new();
+        let window = backend
+            .open_window(&PlatformSpec::new("icon"))
+            .expect("the offscreen window opens");
+        install_window_icon(&backend, window);
+        let icon = backend.window_icon(window).expect("an icon was set");
+        assert_eq!((icon.width(), icon.height()), (ICON_SIDE, ICON_SIDE));
+    }
 }
