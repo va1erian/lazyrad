@@ -2411,6 +2411,15 @@ impl IdeApp {
         let Some(name) = self.context_target.clone() else {
             return;
         };
+        // Viewing stays available while a program runs; changing the project
+        // structure does not (issue #16).
+        let mutates = matches!(
+            action,
+            ContextAction::Rename | ContextAction::Remove | ContextAction::SetStartup
+        );
+        if mutates && self.refuse_while_running(ui) {
+            return;
+        }
         match action {
             ContextAction::ViewCode => self.open_code(&name, ui),
             ContextAction::ViewObject => self.open_object(&name, ui),
@@ -2418,6 +2427,19 @@ impl IdeApp {
             ContextAction::Remove => self.remove_item(&name, ui),
             ContextAction::SetStartup => self.set_startup(&name, ui),
         }
+    }
+
+    /// Logs and returns `true` when a program is running, so a caller that
+    /// changes the project structure stops. Code edits stay allowed: the player
+    /// runs the copy saved at Start, so they cannot affect the running program.
+    fn refuse_while_running(&mut self, ui: &mut Ui<Msg>) -> bool {
+        if self.run.is_running() {
+            self.log(
+                ui,
+                "The project cannot be changed while the program is running.",
+            );
+        }
+        self.run.is_running()
     }
 
     /// Removes an item and closes its documents.
@@ -2444,6 +2466,10 @@ impl IdeApp {
 
     /// Renames an item, updating its documents.
     fn rename_item(&mut self, old: &str, new: &str, ui: &mut Ui<Msg>) {
+        // A rename prompt opened before Start can be answered during the run.
+        if self.refuse_while_running(ui) {
+            return;
+        }
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -3450,6 +3476,55 @@ mod tests {
                     .any(|line| line.contains("could not start"))
             );
 
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn the_project_structure_is_locked_while_running() {
+        let dir = run_scratch("locked");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+            let module = session.add_module();
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.settings.player_path = Some(player_stub(&dir));
+            app.launcher = Rc::new(StubLauncher::ok());
+            app.start_run(ui);
+            assert!(app.is_running());
+
+            let has = |app: &IdeApp, name: &str| {
+                app.session
+                    .as_ref()
+                    .is_some_and(|session| session.code(name).is_some())
+            };
+            // The context menu's Remove and Set Startup are refused.
+            app.context_target = Some(module.clone());
+            app.run_context_action(ContextAction::Remove, ui);
+            assert!(has(&app, &module), "Remove is refused while running");
+            app.run_context_action(ContextAction::SetStartup, ui);
+            assert_ne!(
+                app.session
+                    .as_ref()
+                    .map(|session| session.startup().to_owned()),
+                Some(module.clone()),
+                "Set Startup is refused while running"
+            );
+            // A rename prompt answered during the run is refused too.
+            app.rename_item(&module, "renamed_module", ui);
+            assert!(has(&app, &module), "Rename is refused while running");
+
+            // After End, the same actions work again.
+            app.end_run(ui);
+            app.rename_item(&module, "renamed_module", ui);
+            assert!(has(&app, "renamed_module"));
             app
         })
         .expect("the offscreen backend runs to completion");
