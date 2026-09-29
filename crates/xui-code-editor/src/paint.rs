@@ -234,18 +234,18 @@ fn paint_lines(
             // glyph that overhangs its cell, so a long token off to the side
             // costs nothing on each repaint.
             let drawn = drawn_cols(start..end, first_col, last_col);
-            let cells = expanded
+            let chars: Vec<char> = expanded
                 .chars()
-                .enumerate()
                 .skip(drawn.start)
-                .take(drawn.len());
-            for (col, character) in cells {
-                if character == ' ' {
+                .take(drawn.len())
+                .collect();
+            for (offset, cluster) in clusters(&chars) {
+                if cluster == " " {
                     continue;
                 }
-                let x = metrics.x_of_col(text, col, first_col);
+                let x = metrics.x_of_col(text, drawn.start + offset, first_col);
                 let cell = Rect::new(x, y, x + metrics.advance * 2, y + metrics.line_height);
-                canvas.draw_text(character.encode_utf8(&mut [0; 4]), cell, &style);
+                canvas.draw_text(&cluster, cell, &style);
             }
         }
     }
@@ -263,6 +263,42 @@ fn drawn_cols(
     let from = token.start.max(first_col.saturating_sub(1));
     let to = token.end.min(last_col + 1);
     from..to.max(from)
+}
+
+/// Splits `chars` into the runs drawn together, each with its offset: a base
+/// character plus the combining marks, variation selectors and zero-width-joined
+/// characters that follow it, so an accent or a joined emoji is shaped with its
+/// base instead of on its own. The grid is still one column per `char`, so the
+/// caller advances by the offset, not by the cluster.
+fn clusters(chars: &[char]) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut joined = false;
+    for (index, &character) in chars.iter().enumerate() {
+        match out.last_mut() {
+            Some((_, cluster)) if joined || attaches(character) => cluster.push(character),
+            _ => out.push((index, character.to_string())),
+        }
+        joined = character == '\u{200D}';
+    }
+    out
+}
+
+/// Whether `character` attaches to the one before it rather than starting a
+/// cell of its own: a combining mark, a variation selector or a zero-width
+/// joiner. A small table stands in for full grapheme segmentation, which this
+/// crate avoids a dependency for.
+fn attaches(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FE20}'..='\u{FE2F}'
+            | '\u{200D}'
+            | '\u{E0100}'..='\u{E01EF}'
+    )
 }
 
 /// A fill behind the bracket pair at the caret, if any.
@@ -481,6 +517,25 @@ mod tests {
         assert_eq!(drawn_cols(0..5, 0, 80), 0..5);
         // A token past the view draws nothing.
         assert!(drawn_cols(500..600, 100, 180).is_empty());
+    }
+
+    #[test]
+    fn combining_marks_and_joined_characters_are_drawn_with_their_base() {
+        let chars = |text: &str| text.chars().collect::<Vec<_>>();
+        // "e" + combining acute, then "x": the accent stays with the "e", and
+        // the "x" keeps its own column (2, since the accent takes one).
+        assert_eq!(
+            clusters(&chars("e\u{0301}x")),
+            [(0, "e\u{0301}".to_owned()), (2, "x".to_owned())]
+        );
+        // A ZWJ sequence is one run.
+        let family = "\u{1F468}\u{200D}\u{1F469}";
+        assert_eq!(clusters(&chars(family)), [(0, family.to_owned())]);
+        // Plain ASCII is one cell per character.
+        assert_eq!(
+            clusters(&chars("ab")),
+            [(0, "a".to_owned()), (1, "b".to_owned())]
+        );
     }
 
     fn render(state: &EditorState) -> RgbaImage {
