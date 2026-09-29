@@ -31,8 +31,8 @@ use xui_core::geometry::Point;
 use xui_core::layout::Dock;
 use xui_core::units::Px;
 use xui_core::widget::{
-    ComboBox, Dialog, DialogAction, HasText, Label, ListView, Menu, MenuId, Panel, Split, Tabs,
-    Toolbar, TreeView,
+    ComboBox, Dialog, DialogAction, HasText, Label, ListModel, ListView, Menu, MenuId, MenuScope,
+    Panel, Split, Tabs, Toolbar, TreeView,
 };
 use xui_core::{Dip, Lucide, Rect, dip};
 
@@ -141,6 +141,24 @@ pub enum Msg {
         /// The object that was double-clicked.
         target: Target,
     },
+}
+
+/// The Error List's rows: one line per diagnostic, each led by the error icon.
+struct ErrorRows(Vec<String>);
+
+impl ListModel for ErrorRows {
+    fn rows(&self) -> usize {
+        self.0.len()
+    }
+
+    fn cell(&self, row: usize, column: usize) -> Option<&str> {
+        (column == 0).then(|| self.0.get(row).map(String::as_str))?
+    }
+
+    fn icon(&self, _row: usize) -> Option<xui_core::icon::IconRef> {
+        // Every entry is an error today; warnings would take TriangleAlert.
+        Some(Lucide::CircleX.into())
+    }
 }
 
 /// One diagnostic shown in the Error List, tagged with the document it belongs
@@ -1894,13 +1912,12 @@ impl IdeApp {
 
     /// Rebuilds the Error List rows from the collected diagnostics.
     fn refresh_error_list(&self) {
-        let labels: Vec<String> = self
+        let rows: Vec<String> = self
             .errors
             .iter()
             .map(|entry| format!("{}{}", entry.name, entry.diagnostic.label()))
             .collect();
-        let rows: Vec<&str> = labels.iter().map(String::as_str).collect();
-        self.error_list.set_items(&rows);
+        self.error_list.set_model(ErrorRows(rows));
     }
 
     /// Opens the document an Error List row belongs to and jumps to its
@@ -1949,7 +1966,9 @@ impl IdeApp {
                 .iter()
                 .map(|event| event.name.as_str())
                 .collect();
-            match ComboBox::new(&scoped, Rect::default(), &items) {
+            match ComboBox::new(&scoped, Rect::default(), &items)
+                .map(|combo| with_icons(combo, items.len(), Lucide::Zap))
+            {
                 Ok(combo) => {
                     let name = name.to_owned();
                     view.procedure =
@@ -2364,10 +2383,17 @@ impl IdeApp {
                 let object = if is_form {
                     let items: Vec<&str> =
                         objects.iter().map(|entry| entry.label.as_str()).collect();
-                    Some(ComboBox::new(ui, Rect::default(), &items)?.on_select({
-                        let name = name.to_owned();
-                        move |index| Some(Msg::ObjectChanged(name.clone(), index))
-                    }))
+                    Some(
+                        with_icons(
+                            ComboBox::new(ui, Rect::default(), &items)?,
+                            items.len(),
+                            Lucide::Box,
+                        )
+                        .on_select({
+                            let name = name.to_owned();
+                            move |index| Some(Msg::ObjectChanged(name.clone(), index))
+                        }),
+                    )
                 } else {
                     None
                 };
@@ -2377,10 +2403,17 @@ impl IdeApp {
                         .map(ObjectEntry::event_names)
                         .unwrap_or_default();
                     let items: Vec<&str> = items.iter().map(String::as_str).collect();
-                    Some(ComboBox::new(ui, Rect::default(), &items)?.on_select({
-                        let name = name.to_owned();
-                        move |index| Some(Msg::ProcedureChanged(name.clone(), index))
-                    }))
+                    Some(
+                        with_icons(
+                            ComboBox::new(ui, Rect::default(), &items)?,
+                            items.len(),
+                            Lucide::Zap,
+                        )
+                        .on_select({
+                            let name = name.to_owned();
+                            move |index| Some(Msg::ProcedureChanged(name.clone(), index))
+                        }),
+                    )
                 } else {
                     None
                 };
@@ -2654,8 +2687,8 @@ fn build_menu(
     let mut ids = MenuIds::new();
     let menu = Menu::bar(ui, bounds)?.build(|bar| {
         bar.submenu(ids.plain(), "&File", |file| {
-            file.item(ids.id(Command::NewProject), "&New Project")
-                .item(ids.id(Command::OpenProject), "&Open Project…");
+            file.command(&mut ids, Command::NewProject, "&New Project")
+                .command(&mut ids, Command::OpenProject, "&Open Project…");
             file.submenu(ids.plain(), "Recent", |recent_menu| {
                 if recent.is_empty() {
                     recent_menu.item(ids.plain(), "(no recent projects)");
@@ -2670,55 +2703,58 @@ fn build_menu(
                 }
             });
             file.separator()
-                .item(ids.id(Command::Save), "&Save")
-                .item(ids.id(Command::SaveAs), "Save &As…")
-                .item(ids.id(Command::SaveAll), "Save &All")
-                .item(ids.id(Command::CloseProject), "&Close Project")
+                .command(&mut ids, Command::Save, "&Save")
+                .command(&mut ids, Command::SaveAs, "Save &As…")
+                .command(&mut ids, Command::SaveAll, "Save &All")
+                .command(&mut ids, Command::CloseProject, "&Close Project")
                 .separator()
-                .item(ids.id(Command::Exit), "E&xit");
+                .command(&mut ids, Command::Exit, "E&xit");
         });
         bar.submenu(ids.plain(), "&Edit", |edit| {
-            edit.item(ids.id(Command::Undo), "&Undo")
-                .item(ids.id(Command::Redo), "&Redo")
+            edit.command(&mut ids, Command::Undo, "&Undo")
+                .command(&mut ids, Command::Redo, "&Redo")
                 .separator()
-                .item(ids.id(Command::Cut), "Cu&t")
-                .item(ids.id(Command::Copy), "&Copy")
-                .item(ids.id(Command::Paste), "&Paste")
-                .item(ids.id(Command::Delete), "&Delete")
+                .command(&mut ids, Command::Cut, "Cu&t")
+                .command(&mut ids, Command::Copy, "&Copy")
+                .command(&mut ids, Command::Paste, "&Paste")
+                .command(&mut ids, Command::Delete, "&Delete")
                 .separator()
-                .item(ids.id(Command::SelectAll), "Select &All")
-                .item(ids.id(Command::Find), "&Find…")
-                .item(ids.id(Command::FindNext), "Find &Next")
-                .item(ids.id(Command::Replace), "&Replace…")
-                .item(ids.id(Command::GoToLine), "&Go To Line…");
+                .command(&mut ids, Command::SelectAll, "Select &All")
+                .command(&mut ids, Command::Find, "&Find…")
+                .command(&mut ids, Command::FindNext, "Find &Next")
+                .command(&mut ids, Command::Replace, "&Replace…")
+                .command(&mut ids, Command::GoToLine, "&Go To Line…");
         });
         bar.submenu(ids.plain(), "&View", |view| {
-            view.item(ids.id(Command::ViewCode), "&Code")
-                .item(ids.id(Command::ViewObject), "&Object")
+            view.command(&mut ids, Command::ViewCode, "&Code")
+                .command(&mut ids, Command::ViewObject, "&Object")
                 .separator()
-                .item(ids.id(Command::ViewProject), "&Project")
-                .item(ids.id(Command::ViewProperties), "P&roperties")
-                .item(ids.id(Command::ViewToolbox), "&Toolbox")
-                .item(ids.id(Command::ViewOutput), "&Output")
+                .command(&mut ids, Command::ViewProject, "&Project")
+                .command(&mut ids, Command::ViewProperties, "P&roperties")
+                .command(&mut ids, Command::ViewToolbox, "&Toolbox")
+                .command(&mut ids, Command::ViewOutput, "&Output")
                 .separator()
                 .submenu(ids.plain(), "&Theme", |theme| {
-                    theme.item(ids.id(Command::ThemeLight), "&Light");
-                    theme.item(ids.id(Command::ThemeDark), "&Dark");
-                    theme.item(ids.id(Command::ThemeSystem), "&System");
+                    theme.command(&mut ids, Command::ThemeLight, "&Light");
+                    theme.command(&mut ids, Command::ThemeDark, "&Dark");
+                    theme.command(&mut ids, Command::ThemeSystem, "&System");
                 });
         });
         bar.submenu(ids.plain(), "&Project", |project| {
             project
-                .item(ids.id(Command::AddForm), "Add &Form")
-                .item(ids.id(Command::AddModule), "Add &Module")
+                .command(&mut ids, Command::AddForm, "Add &Form")
+                .command(&mut ids, Command::AddModule, "Add &Module")
                 .separator()
-                .item(ids.id(Command::Remove), "&Remove")
+                .command(&mut ids, Command::Remove, "&Remove")
                 .separator()
-                .item(ids.id(Command::ProjectProperties), "P&roperties");
+                .command(&mut ids, Command::ProjectProperties, "P&roperties");
         });
         bar.submenu(ids.plain(), "&Run", |run| {
-            run.item(ids.id(Command::RunStart), "&Start")
-                .item(ids.id(Command::RunEnd), "&End");
+            run.command(&mut ids, Command::RunStart, "&Start").command(
+                &mut ids,
+                Command::RunEnd,
+                "&End",
+            );
         });
     });
     let commands = Rc::new(ids.map);
@@ -2762,6 +2798,40 @@ impl MenuIds {
     }
 }
 
+/// Gives each of a combo's `count` items the same leading `icon`: the object
+/// combo marks objects with a box, the procedure combo events with a zap.
+fn with_icons(mut combo: ComboBox<Msg>, count: usize, icon: Lucide) -> ComboBox<Msg> {
+    for index in 0..count {
+        combo = combo.item_icon(index, icon);
+    }
+    combo
+}
+
+/// Menu entries that dispatch a [`Command`].
+trait CommandItems {
+    /// Appends an entry for `command`, with the command's toolbar icon when it
+    /// has one, so the menu and the toolbar show the same symbol.
+    fn command(&mut self, ids: &mut MenuIds, command: Command, text: &str) -> &mut Self;
+}
+
+impl CommandItems for MenuScope<'_> {
+    fn command(&mut self, ids: &mut MenuIds, command: Command, text: &str) -> &mut Self {
+        self.item(ids.id(command), text);
+        if let Some(icon) = toolbar_icon(command) {
+            self.icon(icon);
+        }
+        self
+    }
+}
+
+/// The toolbar icon of `command`, if the toolbar shows it.
+fn toolbar_icon(command: Command) -> Option<Lucide> {
+    TOOLBAR
+        .iter()
+        .find(|item| item.command == command)
+        .map(|item| item.icon)
+}
+
 /// Maps a key-down event to the command it triggers, for the shortcut backend.
 ///
 /// Auto-repeat and system (Alt) combinations are ignored.
@@ -2794,6 +2864,28 @@ mod tests {
     use xui_core::Key;
     use xui_core::backend::Backend;
     use xui_core::run_app;
+
+    #[test]
+    fn menu_entries_take_their_toolbar_icon() {
+        for item in TOOLBAR {
+            assert_eq!(toolbar_icon(item.command), Some(item.icon));
+        }
+        assert_eq!(
+            toolbar_icon(Command::Exit),
+            None,
+            "a command without a toolbar icon gets none in the menu"
+        );
+    }
+
+    #[test]
+    fn every_error_list_row_leads_with_the_error_icon() {
+        let rows = ErrorRows(vec!["Form1 (2:5): boom".to_owned(), "util: bad".to_owned()]);
+        assert_eq!(rows.rows(), 2);
+        assert_eq!(rows.cell(0, 0), Some("Form1 (2:5): boom"));
+        assert_eq!(rows.cell(0, 1), None, "the list has one column");
+        assert_eq!(rows.cell(5, 0), None);
+        assert_eq!(rows.icon(1), Some(Lucide::CircleX.into()));
+    }
 
     #[test]
     fn every_toolbar_entry_has_an_icon_and_a_tooltip_naming_its_shortcut() {
