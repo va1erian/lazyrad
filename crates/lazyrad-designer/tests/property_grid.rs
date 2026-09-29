@@ -381,20 +381,24 @@ fn the_tabs_and_category_headers_show_lucide_icons() {
         grid.update(PropertyGridMsg::SetView(View::Categorized), ui);
         let image = backend.render(ui.window()).expect("the window renders");
 
-        // A grid surface pixel, clear of the combo and the tabs.
-        let bg = image.pixel(x + 1, 1).expect("a background sample");
+        // Compare each icon with its own surface, sampled just left of it: a
+        // selected tab or a header has its own fill, which alone would differ
+        // from the grid background even with no icon drawn.
+        let alphabetic_bg = image.pixel(x + 5, 35).expect("an Alphabetic tab sample");
+        let categorized_bg = image.pixel(x + 109, 35).expect("a Categorized tab sample");
+        let header_bg = image.pixel(x + 2, 62).expect("a category header sample");
         // Tab icons: 16px, 4px in from each tab's left edge (tabs at y 32).
         assert!(
-            painted(&image, x + 8, 35, 16, 16, bg),
+            painted(&image, x + 8, 35, 16, 16, alphabetic_bg),
             "the Alphabetic tab shows its icon"
         );
         assert!(
-            painted(&image, x + 112, 35, 16, 16, bg),
+            painted(&image, x + 112, 35, 16, 16, categorized_bg),
             "the Categorized tab shows its icon"
         );
         // The first category header's expander chevron (body top 58).
         assert!(
-            painted(&image, x + 4, 62, 14, 14, bg),
+            painted(&image, x + 4, 62, 14, 14, header_bg),
             "the category header shows its chevron"
         );
 

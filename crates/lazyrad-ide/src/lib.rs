@@ -47,7 +47,11 @@ pub use settings::{PaneSizes, Settings, SettingsError, ThemeChoice};
 pub fn run() -> Result<(), Box<dyn Error>> {
     let settings = Settings::load().unwrap_or_else(|error| {
         eprintln!("lazyrad-ide: {error}; using defaults");
-        Settings::default()
+        let defaults = Settings::default();
+        match Settings::path() {
+            Some(path) => defaults.stored_at(path),
+            None => defaults,
+        }
     });
     let recent = settings.recent_projects.clone();
 

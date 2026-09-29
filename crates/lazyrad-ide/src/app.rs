@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-use lazyrad_editor::{Editor, Marker, MarkerKind, Query};
+use xui_code_editor::{Editor, Marker, MarkerKind, Query, RhaiHighlighter};
 use xui_core::app::{App, Ui};
 use xui_core::backend::{BackendError, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId};
 use xui_core::geometry::Point;
@@ -1361,7 +1361,7 @@ impl IdeApp {
             self.log(ui, "Open a code window first.");
             return;
         };
-        match lazyrad_editor::find::replace_all(
+        match xui_code_editor::find::replace_all(
             &editor.text(),
             &query,
             self.find_case_sensitive(),
@@ -1928,10 +1928,12 @@ impl IdeApp {
                     None
                 };
 
-                let editor = Editor::new(ui, Rect::default())?.on_change({
-                    let name = name.to_owned();
-                    move |text| Some(Msg::DocumentEdited(name.clone(), text.to_string()))
-                });
+                let editor = Editor::new(ui, Rect::default())?
+                    .with_highlighter(RhaiHighlighter)
+                    .on_change({
+                        let name = name.to_owned();
+                        move |text| Some(Msg::DocumentEdited(name.clone(), text.to_string()))
+                    });
                 let editor = Rc::new(editor);
                 self.editors.borrow_mut().push(Rc::clone(&editor));
                 let source = self

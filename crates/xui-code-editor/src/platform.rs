@@ -2,12 +2,13 @@
 
 //! Platform seams for the editor. Today that is only the clipboard.
 //!
-//! xui has no portable clipboard (PLAN.md §10, gap G2): it lives in
-//! `xui-win32`, not in `xui-core`. The editor copies and pastes through this
-//! [`Clipboard`] trait, which the OS clipboard ([`arboard`], behind the
-//! `system-clipboard` feature) implements when it is available and an
-//! in-process buffer implements everywhere else (LazyOS, the tests). The whole
-//! LazyOS port is then one implementation of this module, as PLAN.md §12 asks.
+//! xui has no portable clipboard: it lives in its Windows backend, not in
+//! `xui-core`. The editor copies and pastes through this [`Clipboard`] trait,
+//! which the OS clipboard ([`arboard`], behind the `system-clipboard` feature)
+//! implements when it is available and an in-process buffer implements
+//! everywhere else. A build with `default-features = false` never touches an OS
+//! clipboard; an app on a platform with its own clipboard implements
+//! [`Clipboard`] and passes it to [`Editor::with_clipboard`](crate::Editor::with_clipboard).
 
 use std::cell::RefCell;
 

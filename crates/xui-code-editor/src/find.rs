@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! Find and replace, plain or by regular expression (PLAN.md §5).
+//! Find and replace, plain or by regular expression.
 //!
 //! The rules live here, free of xui and of the event loop, so they are
 //! unit-tested directly. Everything works in *char* indices, the same unit the
 //! [`Buffer`](crate::Buffer) and the caret use, so a match on a line with
 //! multi-byte characters lands the caret on the right cell. The optional regex
-//! dialect is that of the `regex` crate, the same engine Rhai itself uses.
+//! dialect is that of the `regex` crate.
 //!
 //! A plain query is escaped and run through the same regex machinery, so there
 //! is one matching path. A query wrapped in slashes (`/foo\d+/`) is treated as

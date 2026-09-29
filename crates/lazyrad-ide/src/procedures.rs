@@ -13,8 +13,8 @@
 //! Everything here is pure data and text, so it is unit-tested without a
 //! `Ui`. The IDE supplies the source text and applies the returned snippet.
 
-use lazyrad_editor::{Buffer, LineLexer, TokenClass};
 use lazyrad_project::{Catalog, FormDoc};
+use xui_code_editor::{Buffer, HighlightCache, RhaiHighlighter, TokenClass};
 use xui_form::EventSpec;
 
 /// The prefix the form's own handlers use: `form_load`, `form_close`.
@@ -139,7 +139,7 @@ pub fn find_handler(text: &str, signature: &str) -> Option<usize> {
 /// only sees code. Offsets are unchanged.
 fn code_chars(text: &str) -> Vec<char> {
     let buffer = Buffer::new(text);
-    let lexer = LineLexer::new(&buffer);
+    let lexer = HighlightCache::new(&buffer, RhaiHighlighter);
     let mut code: Vec<char> = text.chars().collect();
     for line in 0..buffer.line_count() {
         let base = buffer.line_start(line);

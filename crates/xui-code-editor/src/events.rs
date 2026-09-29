@@ -4,8 +4,7 @@
 //! scrolling and edits.
 //!
 //! The mapper is generic over the app's message type for the [`Ui`] it needs to
-//! measure, focus and repaint; the widget wraps it and raises `on_change`
-//! (PLAN.md §5).
+//! measure, focus and repaint; the widget wraps it and raises `on_change`.
 
 use xui_core::app::Ui;
 use xui_core::backend::{Event, WidgetId};
@@ -615,6 +614,17 @@ mod tests {
         EditorState::new(text, Options::default(), Box::new(InProcessClipboard))
     }
 
+    /// A state that highlights Rhai, for the token-sync tests.
+    #[cfg(feature = "rhai-syntax")]
+    fn rhai_state(text: &str) -> EditorState {
+        EditorState::with_highlighter(
+            text,
+            Options::default(),
+            Box::new(InProcessClipboard),
+            Box::new(crate::lexer::RhaiHighlighter),
+        )
+    }
+
     #[test]
     fn focus_and_capture_are_deferred_not_called_under_the_borrow() {
         // The canvas backend delivers SetFocus / CaptureChanged synchronously
@@ -643,6 +653,62 @@ mod tests {
         });
     }
 
+    /// A clipboard shared with the test, so it can see what was copied and
+    /// choose what is pasted.
+    #[derive(Clone, Default)]
+    struct Recording(Rc<RefCell<String>>);
+
+    impl crate::platform::Clipboard for Recording {
+        fn text(&self) -> Option<String> {
+            let text = self.0.borrow();
+            (!text.is_empty()).then(|| text.clone())
+        }
+
+        fn set_text(&self, text: &str) {
+            *self.0.borrow_mut() = text.to_owned();
+        }
+    }
+
+    fn ctrl(key: xui_core::message::Key) -> Event {
+        Event::KeyDown {
+            key,
+            modifiers: xui_core::message::Modifiers {
+                ctrl: true,
+                ..xui_core::message::Modifiers::NONE
+            },
+            repeat: 1,
+            system: false,
+        }
+    }
+
+    #[test]
+    fn copy_and_paste_go_through_an_injected_clipboard() {
+        use xui_core::message::Key;
+
+        with_ui(|ui, id| {
+            let clipboard = Recording::default();
+            let mut state =
+                EditorState::new("hello", Options::default(), Box::new(clipboard.clone()));
+            handle(&mut state, ui, id, &Event::SetFocus);
+            handle(&mut state, ui, id, &ctrl(Key::A));
+            handle(&mut state, ui, id, &ctrl(Key::C));
+            assert_eq!(
+                *clipboard.0.borrow(),
+                "hello",
+                "copy reached the injected clipboard"
+            );
+
+            *clipboard.0.borrow_mut() = "bye".to_owned();
+            handle(&mut state, ui, id, &ctrl(Key::A));
+            handle(&mut state, ui, id, &ctrl(Key::V));
+            assert_eq!(
+                state.buffer.text(),
+                "bye",
+                "paste read the injected clipboard"
+            );
+        });
+    }
+
     #[test]
     fn typing_while_focused_changes_the_text() {
         with_ui(|ui, id| {
@@ -654,12 +720,13 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "rhai-syntax")]
     #[test]
     fn typing_keeps_the_highlight_in_sync() {
         use crate::lexer::TokenClass;
 
         with_ui(|ui, id| {
-            let mut state = state("let x = 1;");
+            let mut state = rhai_state("let x = 1;");
             handle(&mut state, ui, id, &Event::SetFocus);
             handle(&mut state, ui, id, &Event::Char('/')).expect("first slash");
             handle(&mut state, ui, id, &Event::Char('/')).expect("second slash");

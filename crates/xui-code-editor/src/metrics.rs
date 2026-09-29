@@ -2,8 +2,8 @@
 
 //! Device-pixel metrics and viewport arithmetic for the monospace grid.
 //!
-//! The advance and line height are measured once per font and DPI (PLAN.md §5);
-//! every other position is arithmetic. Keeping this here, with no backend
+//! The advance and line height are measured once per font and DPI; every other
+//! position is arithmetic. Keeping this here, with no backend
 //! dependency, lets the hit-testing and scroll range be unit-tested.
 
 use xui_core::backend::TextMetrics;

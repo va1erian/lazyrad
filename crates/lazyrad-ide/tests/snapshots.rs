@@ -62,6 +62,14 @@ fn hello_project() -> PathBuf {
     workspace_root().join("examples").join("hello")
 }
 
+/// Default settings with `theme`. Defaults are never saved to disk, so the
+/// render cannot touch the user's real settings file.
+fn settings_with(theme: ThemeChoice) -> Settings {
+    let mut settings = Settings::default();
+    settings.theme = theme;
+    settings
+}
+
 /// Renders the IDE with `settings` and the hello project open.
 fn render_ide(settings: Settings, theme: Theme) -> Image {
     let hello = hello_project();
@@ -120,10 +128,7 @@ fn every_toolbar_cell_paints_its_icon_in_both_themes() {
         (Theme::light(), ThemeChoice::Light, "ide-light.png"),
         (Theme::dark(), ThemeChoice::Dark, "ide-dark.png"),
     ] {
-        let settings = Settings {
-            theme: choice,
-            ..Settings::default()
-        };
+        let settings = settings_with(choice);
         let image = render_ide(settings, theme);
         save(&image, name);
         assert_eq!((image.width(), image.height()), (1280, 800));
@@ -156,10 +161,7 @@ fn every_explorer_row_paints_its_icon_in_both_themes() {
         (Theme::light(), ThemeChoice::Light),
         (Theme::dark(), ThemeChoice::Dark),
     ] {
-        let settings = Settings {
-            theme: choice,
-            ..Settings::default()
-        };
+        let settings = settings_with(choice);
         // Only the toolbar test writes the PNGs, so parallel tests never race
         // on the same file; this one renders and inspects.
         let image = render_ide(settings, theme);
@@ -199,10 +201,7 @@ fn label_painted(image: &Image, pane_left: i32, pane_top: i32, rect: (i32, i32, 
 
 #[test]
 fn every_pane_shows_its_title() {
-    let settings = Settings {
-        theme: ThemeChoice::Light,
-        ..Settings::default()
-    };
+    let settings = settings_with(ThemeChoice::Light);
     let panes = settings.panes;
     let image = render_ide(settings, Theme::light());
 
@@ -230,19 +229,7 @@ fn every_pane_shows_its_title() {
 
 #[test]
 fn the_two_themes_differ() {
-    let light = render_ide(
-        Settings {
-            theme: ThemeChoice::Light,
-            ..Settings::default()
-        },
-        Theme::light(),
-    );
-    let dark = render_ide(
-        Settings {
-            theme: ThemeChoice::Dark,
-            ..Settings::default()
-        },
-        Theme::dark(),
-    );
+    let light = render_ide(settings_with(ThemeChoice::Light), Theme::light());
+    let dark = render_ide(settings_with(ThemeChoice::Dark), Theme::dark());
     assert_ne!(light.pixels(), dark.pixels(), "light and dark differ");
 }
