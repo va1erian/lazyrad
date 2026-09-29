@@ -15,7 +15,7 @@ xui gaps the project tracks.
 | `lazyrad-project` | project + form file model (`.lrp`/`.lfm`), load/save, validation |
 | `lazyrad-runtime` | Rhai engine setup, stdlib, form instantiation, event binding |
 | `lazyrad-player` (bin) | the runtime host: runs a project dir, a payload, or `--debug` |
-| `lazyrad-editor` | the custom xui code-editor widget |
+| `xui-code-editor` | the reusable xui code-editor widget (Rhai highlighting is an opt-in feature) |
 | `lazyrad-designer` | the xui form-designer surface, toolbox and property grid |
 | `lazyrad-ide` (bin) | the IDE shell |
 

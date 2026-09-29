@@ -4,8 +4,7 @@
 //! scrolling and edits.
 //!
 //! The mapper is generic over the app's message type for the [`Ui`] it needs to
-//! measure, focus and repaint; the widget wraps it and raises `on_change`
-//! (PLAN.md §5).
+//! measure, focus and repaint; the widget wraps it and raises `on_change`.
 
 use xui_core::app::Ui;
 use xui_core::backend::{Event, WidgetId};
@@ -615,6 +614,17 @@ mod tests {
         EditorState::new(text, Options::default(), Box::new(InProcessClipboard))
     }
 
+    /// A state that highlights Rhai, for the token-sync tests.
+    #[cfg(feature = "rhai-syntax")]
+    fn rhai_state(text: &str) -> EditorState {
+        EditorState::with_highlighter(
+            text,
+            Options::default(),
+            Box::new(InProcessClipboard),
+            Box::new(crate::lexer::RhaiHighlighter),
+        )
+    }
+
     #[test]
     fn focus_and_capture_are_deferred_not_called_under_the_borrow() {
         // The canvas backend delivers SetFocus / CaptureChanged synchronously
@@ -654,12 +664,13 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "rhai-syntax")]
     #[test]
     fn typing_keeps_the_highlight_in_sync() {
         use crate::lexer::TokenClass;
 
         with_ui(|ui, id| {
-            let mut state = state("let x = 1;");
+            let mut state = rhai_state("let x = 1;");
             handle(&mut state, ui, id, &Event::SetFocus);
             handle(&mut state, ui, id, &Event::Char('/')).expect("first slash");
             handle(&mut state, ui, id, &Event::Char('/')).expect("second slash");

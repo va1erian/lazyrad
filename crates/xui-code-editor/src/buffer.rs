@@ -5,7 +5,7 @@
 //!
 //! The buffer is deliberately free of UI code. Every operation works in *char*
 //! indices (not bytes), so a multi-byte character is one caret step, and the
-//! whole module is unit-tested without a backend (PLAN.md §5).
+//! whole module is unit-tested without a backend.
 //!
 //! The line index is rebuilt lazily after an edit and cached, so a burst of
 //! edits (a typing run) pays for it once, on the next read, rather than on every

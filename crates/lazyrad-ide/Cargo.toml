@@ -17,7 +17,6 @@ workspace = true
 [dependencies]
 directories.workspace = true
 lazyrad-designer.workspace = true
-lazyrad-editor.workspace = true
 lazyrad-project.workspace = true
 lazyrad-runtime.workspace = true
 rfd.workspace = true
@@ -25,6 +24,7 @@ serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 xui-canvas.workspace = true
+xui-code-editor = { workspace = true, features = ["rhai-syntax"] }
 xui-core.workspace = true
 xui-form.workspace = true
 

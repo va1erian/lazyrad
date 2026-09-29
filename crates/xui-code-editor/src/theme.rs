@@ -3,7 +3,7 @@
 //! The editor's palette, derived from xui's semantic [`Theme`] tokens.
 //!
 //! Deriving every colour from the theme means the editor gets light and dark
-//! mode for free, exactly as PLAN.md §5 wants.
+//! mode for free.
 
 use xui_core::Color;
 use xui_core::theme::Theme;

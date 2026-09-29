@@ -8,7 +8,7 @@ members = [
     "crates/lazyrad-project",
     "crates/lazyrad-runtime",
     "crates/lazyrad-player",
-    "crates/lazyrad-editor",
+    "crates/xui-code-editor",
     "crates/lazyrad-designer",
     "crates/lazyrad-ide",
 ]
@@ -64,7 +64,7 @@ rfd = "0.17"
 xui-form = { path = "crates/xui-form" }
 lazyrad-project = { path = "crates/lazyrad-project" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime" }
-lazyrad-editor = { path = "crates/lazyrad-editor" }
+xui-code-editor = { path = "crates/xui-code-editor" }
 lazyrad-designer = { path = "crates/lazyrad-designer" }
 
 # `#![forbid(unsafe_code)]` is also written at the top of every crate, so a

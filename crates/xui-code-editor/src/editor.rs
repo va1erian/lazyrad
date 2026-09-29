@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 //! The [`Editor`] widget: a single `NodeKind::Custom` xui node with a painter
-//! and an event mapper (PLAN.md §5).
+//! and an event mapper.
 //!
 //! The widget owns a [`Control`], the shared [`EditorState`] and the app's
 //! `on_change` mapper. Everything the app configures goes through this type;
@@ -18,6 +18,7 @@ use crate::buffer::Buffer;
 use crate::edit;
 use crate::events;
 use crate::find;
+use crate::lexer::Highlighter;
 use crate::markers::Marker;
 use crate::options::Options;
 use crate::paint;
@@ -129,6 +130,25 @@ impl<M: 'static> Editor<M> {
             state,
             on_change,
         })
+    }
+
+    /// Replaces the highlighter, re-lexing the whole buffer with it.
+    ///
+    /// [`Editor::new`] starts with [`PlainText`](crate::PlainText); pass a
+    /// language highlighter here to colour the text.
+    pub fn with_highlighter(self, highlighter: impl Highlighter + 'static) -> Editor<M> {
+        self.set_highlighter(highlighter);
+        self
+    }
+
+    /// Replaces the highlighter on a live editor, re-lexing the whole buffer.
+    pub fn set_highlighter(&self, highlighter: impl Highlighter + 'static) {
+        {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            state.set_highlighter(Box::new(highlighter));
+        }
+        self.control.invalidate();
     }
 
     /// Maps a text change to the app's message. The closure returns `Some(msg)`
@@ -419,14 +439,14 @@ mod tests {
             PlatformSpec::new("edits").size(Dip(300.0), Dip(200.0)),
             move |ui| {
                 let editor = crate::Editor::new(ui, Rect::new(0, 0, 300, 200)).expect("editor");
-                assert!(editor.insert_text("fn Form_Load() {\n}\n"));
-                assert_eq!(editor.text(), "fn Form_Load() {\n}\n");
+                assert!(editor.insert_text("fn form_load() {\n}\n"));
+                assert_eq!(editor.text(), "fn form_load() {\n}\n");
 
-                let query = Query::literal("Form_Load");
+                let query = Query::literal("form_load");
                 assert!(editor.find_next(&query, true, true).expect("valid query"));
                 assert_eq!(editor.selection(), Some((3, 12)));
-                assert!(editor.replace(3, 12, "Form_Resize"));
-                assert_eq!(editor.text(), "fn Form_Resize() {\n}\n");
+                assert!(editor.replace(3, 12, "form_resize"));
+                assert_eq!(editor.text(), "fn form_resize() {\n}\n");
 
                 editor.set_caret(0);
                 assert_eq!(editor.caret(), 0);
@@ -436,6 +456,53 @@ mod tests {
         )
         .expect("run_app");
         assert!(check.borrow().is_some());
+    }
+
+    #[cfg(feature = "rhai-syntax")]
+    #[test]
+    fn switching_the_highlighter_on_a_live_editor_relexes_the_whole_buffer() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use xui_canvas::OffscreenBackend;
+        use xui_core::backend::PlatformSpec;
+        use xui_core::geometry::Rect;
+        use xui_core::units::Dip;
+        use xui_core::{App, Image, run_app};
+
+        struct Empty;
+
+        impl App for Empty {
+            type Msg = ();
+            fn update(&mut self, _msg: (), _ui: &mut xui_core::Ui<()>) {}
+        }
+
+        let shots: Rc<RefCell<Vec<Image>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&shots);
+        run_app(
+            Rc::new(OffscreenBackend::new()),
+            PlatformSpec::new("switch").size(Dip(300.0), Dip(200.0)),
+            move |ui| {
+                let editor = crate::Editor::new(ui, Rect::new(0, 0, 300, 200)).expect("editor");
+                editor.set_text("let x = 1;\nlet y = 2;\n");
+                if let Ok(image) = ui.capture() {
+                    sink.borrow_mut().push(image);
+                }
+                editor.set_highlighter(crate::RhaiHighlighter);
+                if let Ok(image) = ui.capture() {
+                    sink.borrow_mut().push(image);
+                }
+                Empty
+            },
+        )
+        .expect("run_app");
+
+        let shots = shots.borrow();
+        assert_eq!(shots.len(), 2);
+        assert_ne!(
+            shots[0], shots[1],
+            "the plain and Rhai renders differ, so the whole buffer was re-lexed"
+        );
     }
 
     use crate::platform::Clipboard;
