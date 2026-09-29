@@ -196,10 +196,10 @@ fn paint_selection(
 
 /// The visible lines' text, coloured by lexical class.
 ///
-/// Each token is drawn as its own run, mapped from char offsets to display
-/// columns through the raw line (tabs expand to several cells). Runs entirely
-/// off-screen are skipped; a run that starts before the first visible column is
-/// drawn from its true x and clipped.
+/// Each token is mapped from char offsets to display columns through the raw
+/// line (tabs expand to several cells), then drawn one character per cell.
+/// Tokens entirely off-screen are skipped, and only a token's visible columns
+/// (plus one either side for overhang) are drawn; the text clip trims the rest.
 fn paint_lines(
     canvas: &mut dyn Canvas,
     state: &EditorState,
