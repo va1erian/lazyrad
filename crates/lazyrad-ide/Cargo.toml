@@ -37,3 +37,6 @@ dark-light.workspace = true
 
 [target."cfg(windows)".build-dependencies]
 embed-resource = "3.0.11"
+
+[dev-dependencies]
+serde_json.workspace = true

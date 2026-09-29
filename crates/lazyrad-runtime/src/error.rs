@@ -48,6 +48,10 @@ impl ScriptError {
     pub fn from_eval(file: impl Into<String>, error: &EvalAltResult) -> Self {
         let message = match error {
             EvalAltResult::ErrorTerminated(value, _) => value.to_string(),
+            // A runtime binding's own message: the position is already in the
+            // error's line and column, so Rhai's "Runtime error: ... (line ..)"
+            // wrapper would only repeat it.
+            EvalAltResult::ErrorRuntime(value, _) if value.is_string() => value.to_string(),
             _ => error.to_string(),
         };
         ScriptError::new(file, error.position(), message)

@@ -27,7 +27,7 @@
 //! pause) terminate a running script at the next progress check.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use rhai::{AST, Dynamic, Engine, Scope};
@@ -79,6 +79,9 @@ pub struct EngineHost {
     /// Every module registered through [`EngineHost::register_module`], so
     /// `import "name" as …` can resolve them again after a later registration.
     modules: rhai::module_resolvers::StaticModuleResolver,
+    /// Names bound by top-level `let`/`const` in the prepared script. Functions
+    /// cannot see them, so an unknown-variable error for one gets a hint.
+    top_level_vars: RefCell<BTreeSet<String>>,
 }
 
 impl EngineHost {
@@ -142,6 +145,7 @@ impl EngineHost {
             progress,
             globals,
             modules: rhai::module_resolvers::StaticModuleResolver::new(),
+            top_level_vars: RefCell::new(BTreeSet::new()),
         };
         stdlib::register(&mut host, &stdlib);
         host
@@ -207,6 +211,16 @@ impl EngineHost {
         self.engine
             .run_ast_with_scope(&mut Scope::new(), ast)
             .map_err(|error| ScriptError::from_eval(&self.file, &error))?;
+        // Replace, not extend: a host can prepare several scripts in turn, and
+        // the hint must only name the current script's top-level `let`s.
+        *self.top_level_vars.borrow_mut() = ast
+            .statements()
+            .iter()
+            .filter_map(|statement| match statement {
+                rhai::Stmt::Var(binding, ..) => Some(binding.0.name.to_string()),
+                _ => None,
+            })
+            .collect();
         let imports = ast
             .statements()
             .iter()
@@ -239,7 +253,26 @@ impl EngineHost {
         let mut scope = Scope::new();
         self.engine
             .call_fn::<Dynamic>(&mut scope, ast, function, args)
-            .map_err(|error| ScriptError::from_eval(&self.file, &error))
+            .map_err(|error| self.locate(&error))
+    }
+
+    /// Locates a runtime error from a handler, adding a hint when the missing
+    /// variable is one a top-level `let` declared (functions cannot see those).
+    fn locate(&self, error: &rhai::EvalAltResult) -> ScriptError {
+        let mut located = ScriptError::from_eval(&self.file, error);
+        let mut inner = error;
+        while let rhai::EvalAltResult::ErrorInFunctionCall(_, _, next, _) = inner {
+            inner = next;
+        }
+        if let rhai::EvalAltResult::ErrorVariableNotFound(name, _) = inner {
+            if self.top_level_vars.borrow().contains(name) {
+                located.message.push_str(&format!(
+                    "\n'{name}' is a top-level variable; functions can't see those. \
+                     Keep values between events in form.state (e.g. form.state.{name})."
+                ));
+            }
+        }
+        located
     }
 
     /// Compiles `source` into a Rhai module named `name` and registers it.

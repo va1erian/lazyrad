@@ -380,6 +380,11 @@ impl<M: 'static> LiveForm<M> {
         self.nodes.iter().map(|node| node.name.as_str())
     }
 
+    /// The catalog the form was built against.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
     /// The canonical widget kind of the node named `name`, if any.
     ///
     /// An alias resolves to the canonical kind, so a `CommandButton` node

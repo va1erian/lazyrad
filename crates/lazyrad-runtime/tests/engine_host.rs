@@ -314,3 +314,144 @@ fn a_registered_global_resolves_in_a_handler() {
     })
     .expect("run_app succeeds");
 }
+
+/// Runs `fn bad()` with `body` and returns the located error.
+fn bad_call(body: &str) -> lazyrad_runtime::ScriptError {
+    let doc = greeting_doc();
+    let source = format!(
+        "fn bad() {{
+    {body}
+}}"
+    );
+    run_form(&doc, |host, _form| {
+        let ast = host.compile(&source).expect("the handler compiles");
+        host.call(&ast, "bad").expect_err("the handler fails")
+    })
+}
+
+#[test]
+fn a_wrong_case_set_suggests_the_script_name() {
+    let error = bad_call("name_edit.Text = \"hello\";");
+    assert_eq!(
+        error.message,
+        "unknown property 'Text' on name_edit (Edit); did you mean 'text'?"
+    );
+    assert_eq!((error.file.as_str(), error.line), ("frmMain.rhai", 2));
+    assert!(error.column > 0);
+}
+
+#[test]
+fn a_wrong_case_get_suggests_the_script_name() {
+    let error = bad_call("let t = name_edit.TabIndex;");
+    assert_eq!(
+        error.message,
+        "unknown property 'TabIndex' on name_edit (Edit); did you mean 'tab_index'?"
+    );
+    assert_eq!(error.line, 2);
+}
+
+#[test]
+fn a_totally_unknown_property_lists_the_kinds_properties() {
+    let error = bad_call("result_label.Foo = 1;");
+    assert!(
+        error
+            .message
+            .starts_with("unknown property 'Foo' on result_label (Label); properties: text, "),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains(", left, top"), "{}", error.message);
+    assert_eq!(error.line, 2);
+}
+
+#[test]
+fn a_property_of_another_kind_lists_this_kinds_properties() {
+    let error = bad_call("let x = result_label.selected;");
+    assert!(
+        error
+            .message
+            .starts_with("unknown property 'selected' on result_label (Label); properties:"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn the_form_object_gets_the_same_friendly_errors() {
+    let error = bad_call("form.Title = \"x\";");
+    assert_eq!(
+        error.message,
+        "unknown property 'Title' on form; did you mean 'title'?"
+    );
+    let error = bad_call("let x = form.nope;");
+    assert_eq!(
+        error.message,
+        "unknown property 'nope' on form; properties: title, state"
+    );
+    assert_eq!(error.line, 2);
+}
+
+#[test]
+fn a_string_index_reads_and_writes_a_real_property() {
+    let doc = greeting_doc();
+    run_form(&doc, |host, form| {
+        let ast = host
+            .compile("fn copy_it() { result_label[\"text\"] = name_edit[\"text\"]; }")
+            .expect("compiles");
+        let _ = host.call(&ast, "copy_it").expect("indexing works");
+        assert_eq!(
+            form.get("result_label", "text"),
+            Some(Value::Text("Ada".to_owned()))
+        );
+    });
+}
+
+/// Compiles and prepares `source`, calls `bad`, and returns the error.
+fn prepared_error(source: &str) -> lazyrad_runtime::ScriptError {
+    let doc = greeting_doc();
+    run_form(&doc, |host, _form| {
+        let ast = host.compile(source).expect("compiles");
+        let ast = host.prepare(&ast).expect("top-level code runs");
+        host.call(&ast, "bad").expect_err("the handler fails")
+    })
+}
+
+#[test]
+fn a_top_level_let_used_in_a_handler_gets_a_form_state_hint() {
+    let error = prepared_error(
+        "let chiage = 0;
+fn bad() {
+    chiage += 1;
+}",
+    );
+    assert!(
+        error.message.contains("Variable not found: chiage"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains(
+            "'chiage' is a top-level variable; functions can't see those. \
+             Keep values between events in form.state (e.g. form.state.chiage)."
+        ),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.line, 3);
+}
+
+#[test]
+fn any_other_unknown_variable_keeps_the_plain_message() {
+    let error = prepared_error(
+        "let chiage = 0;
+fn bad() {
+    other += 1;
+}",
+    );
+    assert!(
+        error.message.contains("Variable not found: other"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains("top-level"), "{}", error.message);
+}

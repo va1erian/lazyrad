@@ -151,7 +151,8 @@ pub enum View {
 pub struct PropertyRow {
     /// The schema property name (`name` for the synthetic `(Name)` row).
     pub name: String,
-    /// The display label.
+    /// The label shown in the name column: the exact script name (`tab_index`),
+    /// or `(Name)` for the synthetic name row.
     pub label: String,
     /// The property's type.
     pub ty: ValueType,
@@ -227,22 +228,6 @@ fn category_rank(category: &str) -> u8 {
         "Data" => 4,
         _ => 5,
     }
-}
-
-/// A display label for a schema property name: `tab_index` becomes `Tab Index`
-/// and `text` becomes `Text`.
-fn display_label(name: &str) -> String {
-    name.split('_')
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// `value` rendered for the value cell and for a text editor.
@@ -364,7 +349,7 @@ fn row_for(
     let value = props.get(name).cloned().unwrap_or(spec.default);
     Some(PropertyRow {
         name: spec.name.clone(),
-        label: display_label(&spec.name),
+        label: spec.name.clone(),
         ty: spec.ty,
         value,
         access: spec.access,
@@ -1965,10 +1950,20 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_title_cased_words() {
-        assert_eq!(display_label("text"), "Text");
-        assert_eq!(display_label("tab_index"), "Tab Index");
-        assert_eq!(display_label("name"), "Name");
+    fn rows_are_labelled_with_the_script_name() {
+        let rows = property_rows(
+            &catalog(),
+            &doc(),
+            &Target::Node("ok_button".into()),
+            View::Alphabetic,
+        );
+        let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert!(labels.contains(&"text"), "{labels:?}");
+        assert!(labels.contains(&"tab_index"), "{labels:?}");
+        assert!(labels.contains(&"(Name)"), "{labels:?}");
+        for row in rows.iter().filter(|row| !row.is_name) {
+            assert_eq!(row.label, row.name, "label is the exact script name");
+        }
     }
 
     #[test]
