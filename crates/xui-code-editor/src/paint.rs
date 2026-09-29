@@ -230,7 +230,15 @@ fn paint_lines(
             // drawn at once drifts from the grid: its tail is clipped and the
             // next token covers it. The rect spans two cells so a glyph a
             // little wider than its rounded cell is not clipped either.
-            let cells = expanded.chars().enumerate().skip(start).take(end - start);
+            // Only the visible columns are drawn, plus one either side for a
+            // glyph that overhangs its cell, so a long token off to the side
+            // costs nothing on each repaint.
+            let drawn = drawn_cols(start..end, first_col, last_col);
+            let cells = expanded
+                .chars()
+                .enumerate()
+                .skip(drawn.start)
+                .take(drawn.len());
             for (col, character) in cells {
                 if character == ' ' {
                     continue;
@@ -242,6 +250,19 @@ fn paint_lines(
         }
     }
     canvas.pop_clip();
+}
+
+/// The columns of a token spanning `token` that are worth drawing when
+/// `first_col..last_col` is visible: the visible part, plus one column either
+/// side for a glyph that overhangs its cell. Empty when nothing is visible.
+fn drawn_cols(
+    token: std::ops::Range<usize>,
+    first_col: usize,
+    last_col: usize,
+) -> std::ops::Range<usize> {
+    let from = token.start.max(first_col.saturating_sub(1));
+    let to = token.end.min(last_col + 1);
+    from..to.max(from)
 }
 
 /// A fill behind the bracket pair at the caret, if any.
@@ -449,6 +470,18 @@ mod tests {
     use crate::state::EditorState;
     use crate::theme::EditorTheme;
     use xui_canvas::{RgbaImage, Surface};
+
+    #[test]
+    fn only_the_visible_columns_of_a_long_token_are_drawn() {
+        // A 10 000-column token with columns 100..180 on screen.
+        assert_eq!(drawn_cols(0..10_000, 100, 180), 99..181);
+        // A token entirely inside the view is drawn whole.
+        assert_eq!(drawn_cols(120..130, 100, 180), 120..130);
+        // At the left edge nothing underflows.
+        assert_eq!(drawn_cols(0..5, 0, 80), 0..5);
+        // A token past the view draws nothing.
+        assert!(drawn_cols(500..600, 100, 180).is_empty());
+    }
 
     fn render(state: &EditorState) -> RgbaImage {
         let xui_theme = Theme::light();
