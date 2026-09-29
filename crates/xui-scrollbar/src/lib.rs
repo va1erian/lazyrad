@@ -65,7 +65,8 @@ pub fn thumb(track: Rect, scroll: Scroll, orientation: Orientation, dpi: u32) ->
     let travel = length - thumb_len;
     let max = scroll.max_offset();
     let pos = if max > 0 {
-        travel * scroll.offset.clamp(0, max) / max
+        // i64: a long document's offset times the track can exceed i32.
+        (i64::from(travel) * i64::from(scroll.offset.clamp(0, max)) / i64::from(max)) as i32
     } else {
         0
     };
@@ -108,7 +109,11 @@ pub fn offset_from_drag(
     };
     let travel = (length - thumb_len).max(1);
     let max = scroll.max_offset();
-    (start_offset + (pointer - start_pointer) * max / travel).clamp(0, max)
+    // i64 throughout: the drag distance times a long document's range can
+    // exceed i32; the clamped result fits.
+    let delta =
+        (i64::from(pointer) - i64::from(start_pointer)) * i64::from(max) / i64::from(travel);
+    (i64::from(start_offset) + delta).clamp(0, i64::from(max)) as i32
 }
 
 /// The thumb's interaction state, for its colour.
@@ -369,5 +374,21 @@ mod tests {
             offset_from_drag(track, scroll, Orientation::Vertical, 100, 50, -5000, 96),
             0
         );
+    }
+
+    #[test]
+    fn huge_content_does_not_overflow() {
+        let scroll = Scroll {
+            viewport: 800,
+            content: 20_000_000,
+            offset: 19_999_000,
+        };
+        let track = Rect::new(0, 0, 12, 800);
+        let bar = thumb(track, scroll, Orientation::Vertical, 96).expect("scrolls");
+        assert!(bar.bottom <= 800, "the thumb stays in the track");
+        let max = scroll.max_offset();
+        // Dragging far past the end clamps instead of overflowing.
+        let dragged = offset_from_drag(track, scroll, Orientation::Vertical, 0, 0, 100_000, 96);
+        assert_eq!(dragged, max);
     }
 }
