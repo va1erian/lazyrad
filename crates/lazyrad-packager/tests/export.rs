@@ -277,6 +277,36 @@ fn duplicate_names_and_missing_or_extra_projects_are_refused() {
     ));
 }
 
+fn two_module_project(scratch: &Scratch, first: &str, second: &str) -> PathBuf {
+    let dir = scratch.path("proj");
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("Foo.rhai"), "").expect("code");
+    fs::write(
+        dir.join("app.lrp"),
+        format!(
+            "name = \"app\"\nversion = \"1\"\nstartup = \"a\"\n\n[[items]]\nkind = \"module\"\nname = \"a\"\ncode = \"{first}\"\n\n[[items]]\nkind = \"module\"\nname = \"b\"\ncode = \"{second}\"\n"
+        ),
+    )
+    .expect("lrp");
+    dir.join("app.lrp")
+}
+
+#[test]
+fn references_differing_only_by_case_are_a_clear_error() {
+    let scratch = Scratch::new("case");
+    let lrp = two_module_project(&scratch, "Foo.rhai", "foo.rhai");
+    let error = Payload::from_project(&lrp).expect_err("a case collision fails");
+    assert!(matches!(error, PayloadError::Duplicate(_)), "{error}");
+}
+
+#[test]
+fn an_exact_duplicate_reference_packs_once() {
+    let scratch = Scratch::new("exactdup");
+    let lrp = two_module_project(&scratch, "Foo.rhai", "Foo.rhai");
+    let payload = Payload::from_project(&lrp).expect("packs");
+    assert_eq!(payload.entries().len(), 2, "app.lrp and Foo.rhai");
+}
+
 #[test]
 fn an_export_replaces_an_existing_output() {
     let scratch = Scratch::new("replace");

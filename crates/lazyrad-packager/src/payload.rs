@@ -126,7 +126,7 @@ impl Payload {
         for item in &project.items {
             for relative in std::iter::once(item.code()).chain(item.layout()) {
                 let name = relative.to_string_lossy().into_owned();
-                if seen.insert(name.to_lowercase()) {
+                if seen.insert(name.clone()) {
                     entries.push(Entry {
                         data: read_regular(&dir.join(relative), MAX_ENTRY_BYTES)?,
                         name,
