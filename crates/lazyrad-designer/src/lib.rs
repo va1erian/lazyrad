@@ -84,6 +84,7 @@
 pub mod geometry;
 mod grid_nav;
 pub mod history;
+mod local_paint;
 pub mod property_grid;
 pub mod surface;
 pub mod toolbox;

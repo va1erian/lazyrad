@@ -91,6 +91,7 @@ use xui_core::widget::{CheckBox, ComboBox, Control};
 use xui_form::{Access, Catalog, FormDoc, Value, ValueType};
 
 use crate::grid_nav::{ObjectDropdown, RowMove, move_row};
+use crate::local_paint::paint_local;
 use crate::surface::Target;
 use crate::widget::Designer;
 
@@ -832,7 +833,9 @@ impl<M: 'static> PropertyGrid<M> {
             let state = Rc::clone(&state);
             let theme = ui.theme_handle();
             grid.control.set_painter(Rc::new(move |canvas| {
-                paint(canvas, &state.borrow(), &theme.get())
+                paint_local(canvas, |canvas, area| {
+                    paint(canvas, area, &state.borrow(), &theme.get());
+                });
             }));
         }
         {
@@ -1373,13 +1376,13 @@ fn objects_of(doc: &FormDoc) -> Vec<(String, Target)> {
     objects
 }
 
-/// Paints the combo, tabs, rows and any open dropdown.
-fn paint<M: 'static>(canvas: &mut dyn Canvas, state: &GridState<M>, theme: &Theme) {
+/// Paints the combo, tabs, rows and any open dropdown, over the grid's `area`
+/// in its own coordinates.
+fn paint<M: 'static>(canvas: &mut dyn Canvas, area: Rect, state: &GridState<M>, theme: &Theme) {
     let dpi = canvas.dpi();
-    let bounds = canvas.bounds();
-    let width = bounds.width();
-    let height = bounds.height();
-    canvas.clear(theme.surface);
+    let width = area.width();
+    let height = area.height();
+    canvas.fill_rect(area, theme.surface);
     let layout = Layout::new(width, height, dpi);
     let body = Rect::new(0, layout.body_top, width, layout.body_bottom);
 

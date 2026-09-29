@@ -366,6 +366,9 @@ pub struct IdeApp {
     output_panel: Panel<Msg>,
     project_panel: Panel<Msg>,
     _properties_panel: Panel<Msg>,
+    /// The pane titles and the toolbox entries. A dropped widget destroys its
+    /// node, so they live as long as the app.
+    _pane_labels: Vec<Label<Msg>>,
     /// The centre split's scoped UI, where document tabs are built.
     docs_ui: Ui<Msg>,
     /// The document tab container; `None` only while it is being rebuilt.
@@ -582,6 +585,7 @@ impl IdeApp {
             output_panel,
             project_panel,
             _properties_panel: properties_panel,
+            _pane_labels: labels,
             docs_ui,
             docs: None,
             start_label: None,
