@@ -58,11 +58,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     ));
     let proxy_cell = shortcuts.proxy_cell();
     let backend: Rc<dyn Backend> = shortcuts;
-    let backend_for_app = Rc::clone(&backend);
 
     run_app(backend, default_platform_spec(), move |ui| {
         *proxy_cell.borrow_mut() = Some(ui.proxy());
-        IdeApp::build(ui, settings, recent, backend_for_app).expect("the IDE widgets build")
+        IdeApp::build(ui, settings, recent).expect("the IDE widgets build")
     })?;
     Ok(())
 }
