@@ -144,6 +144,16 @@ impl<M: Send + 'static> Backend for ShortcutBackend<M> {
         self.inner.capture(window)
     }
 
+    // The clipboard has an in-process default, so a missing forward would
+    // compile yet cut the IDE off from the OS clipboard.
+    fn clipboard_text(&self) -> Option<String> {
+        self.inner.clipboard_text()
+    }
+
+    fn set_clipboard_text(&self, text: &str) {
+        self.inner.set_clipboard_text(text);
+    }
+
     fn run_modal(&self, window: WindowId) -> Result<()> {
         self.inner.run_modal(window)
     }
