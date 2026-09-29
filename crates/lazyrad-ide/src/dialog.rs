@@ -251,8 +251,12 @@ fn place<M: 'static>(
     let title_metrics = ui.measure_text(title, &TextStyle::new(theme.text, TITLE_SIZE).bold(), dpi);
     let message_metrics = ui.measure_text(message, &TextStyle::new(theme.text, MESSAGE_SIZE), dpi);
 
-    let avail = (client.width() - margin * 2).max(px(MIN_WIDTH));
-    let wanted = title_metrics.width.max(message_metrics.width) + pad * 2;
+    let count = buttons.len();
+    let row_w = row_width(count, button_w, gap);
+    // The card never grows past the window, but is never squeezed below the
+    // minimum width unless the window itself is narrower than that.
+    let avail = (client.width() - margin * 2).max(px(MIN_WIDTH).min(client.width()));
+    let wanted = title_metrics.width.max(message_metrics.width).max(row_w) + pad * 2;
     let card_w = wanted.clamp(px(MIN_WIDTH), px(MAX_WIDTH)).min(avail);
     let content_w = (card_w - pad * 2).max(1);
     let lines = if message_metrics.width > content_w {
@@ -280,8 +284,9 @@ fn place<M: 'static>(
     );
     let row_top = card.bottom - pad - button_h;
 
+    // A window narrower than the row shrinks the buttons to fit the card.
+    let (button_w, gap) = fitted_row(count, button_w, gap, content_w);
     let mut moves = vec![(scrim, client)];
-    let count = buttons.len();
     for (index, button) in buttons.iter().enumerate() {
         let offset = (count - 1 - index) as i32 * (button_w + gap);
         let right = card.right - pad - offset;
@@ -300,6 +305,28 @@ fn place<M: 'static>(
         },
         moves,
     }
+}
+
+/// The width of `count` buttons of `button_w` with `gap` between them.
+fn row_width(count: usize, button_w: i32, gap: i32) -> i32 {
+    count as i32 * button_w + count.saturating_sub(1) as i32 * gap
+}
+
+/// The button width and gap to use: the given ones, or smaller when the row
+/// would not fit in `content_w`. The buttons keep at least 1px each, and the
+/// gap gives way first so a hopelessly small card still holds the whole row.
+fn fitted_row(count: usize, button_w: i32, gap: i32, content_w: i32) -> (i32, i32) {
+    if row_width(count, button_w, gap) <= content_w {
+        return (button_w, gap);
+    }
+    let n = count.max(1) as i32;
+    let between = count.saturating_sub(1) as i32;
+    let gap = if between == 0 {
+        0
+    } else {
+        gap.min((content_w - n).max(0) / between)
+    };
+    (((content_w - gap * between) / n).max(1), gap)
 }
 
 /// Handles Escape and Enter while the dialog is open.
@@ -355,4 +382,111 @@ fn hide<M: 'static>(shared: &Shared<M>) {
 /// child window does not blend with the widgets behind it on every backend.
 fn scrim_color(theme: Theme) -> xui_core::Color {
     theme.background.lerp(xui_core::Color::rgb(0, 0, 0), 0.35)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xui_canvas::snapshot::{Snapshot, try_render};
+    use xui_core::app::App;
+    use xui_core::{Dip, Theme};
+
+    /// Keeps the dialog alive while the snapshot renders.
+    struct Host(#[allow(dead_code)] ChoiceDialog<()>);
+
+    impl App for Host {
+        type Msg = ();
+        fn update(&mut self, _msg: (), _ui: &mut Ui<()>) {}
+    }
+
+    /// The card and the button bounds a `labels` dialog gets in a window of
+    /// `width` x 600 DIP, opened with `message`.
+    fn placed(theme: Theme, width: f32, message: &str, labels: &[&str]) -> (Rect, Vec<Rect>) {
+        let out = Rc::new(RefCell::new(None));
+        let sink = Rc::clone(&out);
+        let message = message.to_string();
+        let labels: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+        try_render(
+            Snapshot::new(Dip(width), Dip(600.0)).theme(theme),
+            move |ui| -> Result<Host> {
+                let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+                let dialog =
+                    ChoiceDialog::new(ui, "Save changes?", &message, &names, 0, names.len() - 1)?;
+                dialog.open();
+                let bounds = dialog.buttons.iter().map(|b| ui.bounds(b.id())).collect();
+                *sink.borrow_mut() = Some((dialog.layout.get().card, bounds));
+                Ok(Host(dialog))
+            },
+        )
+        .expect("the dialog renders");
+        let placed = out.borrow_mut().take();
+        placed.expect("the build ran")
+    }
+
+    fn assert_inside(card: Rect, buttons: &[Rect], what: &str) {
+        for (index, button) in buttons.iter().enumerate() {
+            assert!(
+                button.left >= card.left
+                    && button.right <= card.right
+                    && button.top >= card.top
+                    && button.bottom <= card.bottom,
+                "{what}: button {index} {button:?} sticks out of the card {card:?}"
+            );
+            assert!(button.width() > 0, "{what}: button {index} has no width");
+        }
+        for pair in buttons.windows(2) {
+            assert!(pair[0].right <= pair[1].left, "{what}: buttons overlap");
+        }
+    }
+
+    const SAVE: [&str; 3] = ["Save", "Discard", "Cancel"];
+
+    #[test]
+    fn three_buttons_fit_a_card_sized_for_a_short_message() {
+        for (theme, name) in [(Theme::light(), "light"), (Theme::dark(), "dark")] {
+            let (card, buttons) = placed(theme, 1280.0, "Save changes to a?", &SAVE);
+            assert_eq!(buttons.len(), 3);
+            assert_inside(card, &buttons, name);
+            // The card grew to hold the row instead of the buttons shrinking.
+            assert!(buttons.iter().all(|b| b.width() == 88), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_narrow_window_shrinks_the_buttons_into_the_card() {
+        for (theme, name) in [(Theme::light(), "light"), (Theme::dark(), "dark")] {
+            let (card, buttons) = placed(theme, 360.0, "Save changes to a?", &SAVE);
+            assert_inside(card, &buttons, name);
+            assert!(card.width() <= 360, "{name}: the card fits the window");
+            // A very narrow window degrades the same way.
+            let (card, buttons) = placed(theme, 200.0, "Save changes to a?", &SAVE);
+            assert_inside(card, &buttons, name);
+            assert!(card.width() <= 200, "{name}: the card fits a tiny window");
+        }
+    }
+
+    #[test]
+    fn a_long_message_and_a_single_button_still_fit() {
+        let long = "Save changes to a rather long project name before continuing? ".repeat(6);
+        let (card, buttons) = placed(Theme::light(), 800.0, &long, &SAVE);
+        assert_inside(card, &buttons, "long message");
+        let (card, buttons) = placed(Theme::dark(), 360.0, "", &["OK"]);
+        assert_inside(card, &buttons, "one button, empty message");
+    }
+
+    #[test]
+    fn fitted_row_never_exceeds_the_content() {
+        for content in 0..400 {
+            for count in 1..=3usize {
+                let (w, gap) = fitted_row(count, 88, 12, content);
+                let row = row_width(count, w, gap);
+                assert!(w >= 1 && gap >= 0);
+                // Only the 1px-per-button floor may exceed a hopeless width.
+                assert!(
+                    row <= content.max(count as i32),
+                    "{count} in {content}: {row}"
+                );
+            }
+        }
+    }
 }
