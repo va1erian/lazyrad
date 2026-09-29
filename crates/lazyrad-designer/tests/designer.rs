@@ -17,7 +17,9 @@ use xui_core::message::{Modifiers, MouseButton};
 use xui_core::units::Dip;
 use xui_form::{FormDoc, Node, Value};
 
-use lazyrad_designer::{CONTROL_KINDS, Designer, DesignerMsg, Selection, Toolbox, ToolboxMsg};
+use lazyrad_designer::{
+    CONTROL_KINDS, Designer, DesignerMsg, Selection, Target, Toolbox, ToolboxMsg,
+};
 
 /// A handle the test keeps to the designer after `run_app` returns.
 type DesignerSlot = Rc<RefCell<Option<Rc<RefCell<Designer<Msg>>>>>>;
@@ -229,6 +231,124 @@ fn the_selection_sink_is_notified() {
         log.borrow().last(),
         Some(&Selection::Nodes(vec!["ok_button".to_owned()]))
     );
+}
+
+/// Builds a designer with a double-click sink, delivers a full double-click
+/// (down, up, double-click, up) at each local device-pixel point, and returns
+/// the targets the sink recorded.
+fn double_click_at(doc: FormDoc, points: Vec<(i32, i32)>) -> Vec<Target> {
+    let backend = Rc::new(OffscreenBackend::new());
+    let trait_backend: Rc<dyn Backend> = Rc::clone(&backend) as Rc<dyn Backend>;
+    let catalog = Rc::new(lazyrad_project::lazyrad_catalog());
+    let log: Rc<RefCell<Vec<Target>>> = Rc::new(RefCell::new(Vec::new()));
+    let log_for_sink = Rc::clone(&log);
+    let spec = PlatformSpec::new("designer").size(Dip(320.0), Dip(200.0));
+
+    run_app(trait_backend, spec, move |ui| {
+        let designer = Designer::new(ui, Rect::new(0, 0, 320, 200), doc, catalog, Msg::Designer)
+            .expect("the designer builds");
+        designer.set_double_click_sink(move |target| {
+            log_for_sink.borrow_mut().push(target.clone());
+        });
+        let designer = Rc::new(RefCell::new(designer));
+        let window = ui.window();
+        for (x, y) in &points {
+            let modifiers = Modifiers::NONE;
+            for event in [
+                Event::MouseDown {
+                    x: *x,
+                    y: *y,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+                Event::MouseUp {
+                    x: *x,
+                    y: *y,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+                Event::MouseDoubleClick {
+                    x: *x,
+                    y: *y,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+                Event::MouseUp {
+                    x: *x,
+                    y: *y,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+            ] {
+                backend.inject(window, event);
+            }
+        }
+        Editor { designer }
+    })
+    .expect("run_app succeeds");
+
+    log.borrow().clone()
+}
+
+#[test]
+fn double_clicking_a_control_reports_that_control() {
+    let targets = double_click_at(button_doc(), vec![(40, 20)]);
+    assert_eq!(targets, vec![Target::Node("ok_button".to_owned())]);
+}
+
+#[test]
+fn double_clicking_empty_form_area_reports_the_form() {
+    let targets = double_click_at(button_doc(), vec![(200, 150)]);
+    assert_eq!(targets, vec![Target::Form]);
+}
+
+#[test]
+fn a_double_click_does_not_move_the_control() {
+    // The first click of the pair starts a press/release on the overlay; it must
+    // not leave a half-finished drag or a moved control behind.
+    let moved = with_designer(
+        button_doc(),
+        |backend, window| {
+            let modifiers = Modifiers::NONE;
+            for event in [
+                Event::MouseDown {
+                    x: 40,
+                    y: 20,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+                Event::MouseUp {
+                    x: 40,
+                    y: 20,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+                Event::MouseDoubleClick {
+                    x: 40,
+                    y: 20,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+                Event::MouseUp {
+                    x: 40,
+                    y: 20,
+                    button: MouseButton::Left,
+                    modifiers,
+                },
+            ] {
+                backend.inject(window, event);
+            }
+        },
+        |designer| {
+            let doc = designer.doc();
+            let node = doc.node("ok_button").expect("the button survives");
+            (
+                node.prop("left").and_then(Value::as_int),
+                node.prop("top").and_then(Value::as_int),
+            )
+        },
+    );
+    assert_eq!(moved, (Some(16), Some(16)), "the control stayed put");
 }
 
 #[test]

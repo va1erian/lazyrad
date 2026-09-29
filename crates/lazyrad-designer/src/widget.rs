@@ -86,6 +86,16 @@ pub enum DesignerMsg {
         /// Whether Ctrl was held.
         ctrl: bool,
     },
+    /// The left button was double-clicked on the overlay; the host opens the
+    /// default event handler of whatever sits under the pointer (a control, or
+    /// the form). The designer hit-tests the model in [`Designer::update`] and
+    /// reports the target through the double-click sink.
+    DoubleClick {
+        /// The cursor x in design units.
+        x: i64,
+        /// The cursor y in design units.
+        y: i64,
+    },
     /// A relevant key was pressed.
     Key {
         /// The logical key.
@@ -125,6 +135,11 @@ type SelectionSink = Rc<dyn Fn(&Selection)>;
 /// form's `.rhai` handler names (see [`rename_handlers`](crate::rename_handlers)).
 type RenameSink = Rc<dyn Fn(&str, &str)>;
 
+/// A callback the host registers to observe a double-click on a control (or the
+/// form), so it can open that object's default event handler. It only reports
+/// the target; the host does the work on its own message path.
+type DoubleClickSink = Rc<dyn Fn(&Target)>;
+
 /// The binder used for the design preview; design mode never consults it.
 struct NoopBinder;
 
@@ -157,6 +172,7 @@ pub struct Designer<M: 'static> {
     wrap: Rc<dyn Fn(DesignerMsg) -> M>,
     on_selection: RefCell<Vec<SelectionSink>>,
     on_rename: RefCell<Option<RenameSink>>,
+    on_double_click: RefCell<Option<DoubleClickSink>>,
     design_mode: Cell<bool>,
 }
 
@@ -217,6 +233,7 @@ impl<M: 'static> Designer<M> {
             wrap: Rc::new(wrap),
             on_selection: RefCell::new(Vec::new()),
             on_rename: RefCell::new(None),
+            on_double_click: RefCell::new(None),
             design_mode: Cell::new(true),
         };
         designer.rebuild(ui).map_err(restore)?;
@@ -268,6 +285,18 @@ impl<M: 'static> Designer<M> {
     /// Removes the rename sink.
     pub fn clear_rename_sink(&self) {
         *self.on_rename.borrow_mut() = None;
+    }
+
+    /// Registers a sink called when a control (or the form) is double-clicked,
+    /// with the object that was hit. The host opens its default event handler
+    /// (issue #15). Replaces any previous sink.
+    pub fn set_double_click_sink(&self, sink: impl Fn(&Target) + 'static) {
+        *self.on_double_click.borrow_mut() = Some(Rc::new(sink));
+    }
+
+    /// Removes the double-click sink.
+    pub fn clear_double_click_sink(&self) {
+        *self.on_double_click.borrow_mut() = None;
     }
 
     /// Whether the window is in design mode, as the designer set it.
@@ -327,6 +356,19 @@ impl<M: 'static> Designer<M> {
             }
             DesignerMsg::PointerUp { x, y, ctrl } => {
                 self.surface.borrow_mut().pointer_up(x, y, ctrl)
+            }
+            DesignerMsg::DoubleClick { x, y } => {
+                // The first click of the pair already selected the control (or
+                // the form), so the target is whatever sits under the pointer
+                // now. The sink only reports it; the host opens the handler on
+                // its update path, never here while the surface is borrowed.
+                let target = self
+                    .surface
+                    .borrow()
+                    .hit_node(x, y)
+                    .map_or(Target::Form, Target::Node);
+                self.notify_double_click(&target);
+                Outcome::none()
             }
             DesignerMsg::Key { key, ctrl, shift } => {
                 self.surface.borrow_mut().key(KeyPress { key, ctrl, shift })
@@ -721,6 +763,13 @@ impl<M: 'static> Designer<M> {
             sink(old, new);
         }
     }
+
+    /// Calls the double-click sink, if any, with the hit target.
+    fn notify_double_click(&self, target: &Target) {
+        if let Some(sink) = self.on_double_click.borrow().as_ref() {
+            sink(target);
+        }
+    }
 }
 
 /// The node renames between two versions of a form: `(old, new)` for each node
@@ -770,6 +819,15 @@ fn designer_message<M: 'static>(event: &Event, ui: &Ui<M>) -> Option<DesignerMsg
             x: to(*x),
             y: to(*y),
             ctrl: modifiers.ctrl,
+        }),
+        Event::MouseDoubleClick {
+            x,
+            y,
+            button: MouseButton::Left,
+            ..
+        } => Some(DesignerMsg::DoubleClick {
+            x: to(*x),
+            y: to(*y),
         }),
         Event::KeyDown {
             key,

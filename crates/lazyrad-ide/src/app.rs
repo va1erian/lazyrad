@@ -20,8 +20,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use lazyrad_designer::{
-    Designer, DesignerMsg, PropertyGrid, PropertyGridMsg, Toolbox, ToolboxMsg, handler_events,
-    rename_handlers,
+    Designer, DesignerMsg, PropertyGrid, PropertyGridMsg, Target, Toolbox, ToolboxMsg,
+    handler_events, rename_handlers,
 };
 use lazyrad_project::Catalog;
 use xui_code_editor::{Editor, Marker, MarkerKind, Query, RhaiHighlighter};
@@ -132,6 +132,14 @@ pub enum Msg {
         old: String,
         /// The control's new name.
         new: String,
+    },
+    /// A designer double-clicked a control (or the form); open its default
+    /// event handler in the form's code tab, creating the function if missing.
+    OpenDefaultHandler {
+        /// The form the designer belongs to.
+        form: String,
+        /// The object that was double-clicked.
+        target: Target,
     },
 }
 
@@ -1967,27 +1975,51 @@ impl IdeApp {
         let Some((signature, args, editor)) = self.procedure_target(name, index) else {
             return;
         };
-        if let Some(offset) = procedures::find_handler(&editor.text(), &signature) {
-            editor.set_caret(offset);
-            editor.focus();
-            return;
+        if reveal_or_insert_handler(&editor, &signature, &args) {
+            self.after_programmatic_edit(name, ui);
         }
-        let text = editor.text();
-        let end = text.chars().count();
-        let separator = if text.is_empty() || text.ends_with('\n') {
-            ""
-        } else {
-            "\n"
+    }
+
+    /// Opens a form's default event handler for a double-clicked control (or the
+    /// form itself), creating the function when it is missing.
+    ///
+    /// The default event comes from the catalog schema; the form's events use
+    /// the `form` prefix (`form_load`). Opening the code tab makes it the active
+    /// document, so the caret placed inside the handler is visible.
+    fn open_default_handler(&mut self, form: &str, target: &Target, ui: &mut Ui<Msg>) {
+        let Some((signature, args)) = self.default_handler(form, target) else {
+            // The form or control vanished between the double-click and this
+            // update (a closed tab, a queued message), so there is nothing to
+            // open.
+            return;
         };
-        let snippet = procedures::handler_snippet(&signature, &args);
-        let insert = format!("{separator}{snippet}");
-        // The caret lands just after the opening brace of the new handler.
-        let before_brace = format!("fn {signature}({args}) ").chars().count();
-        editor.set_caret(end);
-        editor.insert_text(&insert);
-        editor.set_caret(end + separator.chars().count() + before_brace + 1);
-        editor.focus();
-        self.after_programmatic_edit(name, ui);
+        self.open_code(form, ui);
+        let Some(editor) = self.code_editor(form) else {
+            return;
+        };
+        if reveal_or_insert_handler(&editor, &signature, &args) {
+            self.after_programmatic_edit(form, ui);
+        }
+    }
+
+    /// The signature and argument list of the default event handler for `target`
+    /// in `form`, from the catalog schema.
+    fn default_handler(&self, form: &str, target: &Target) -> Option<(String, String)> {
+        let form_doc = self.session.as_ref()?.form(form)?;
+        let (prefix, event) = match target {
+            Target::Form => (
+                procedures::FORM_PREFIX.to_owned(),
+                self.catalog.window_spec().default_event()?,
+            ),
+            Target::Node(name) => {
+                let node = form_doc.node(name)?;
+                (name.clone(), self.catalog.get(&node.kind)?.default_event()?)
+            }
+        };
+        Some((
+            procedures::signature(&prefix, &event.name),
+            procedures::argument_list(event),
+        ))
     }
 
     /// The signature, argument list and editor for a procedure selection.
@@ -2297,6 +2329,17 @@ impl IdeApp {
                         new: new.to_owned(),
                     });
                 });
+                // Double-clicking a control (or the form) opens its default
+                // handler. The sink only raises a message; opening the code tab
+                // and inserting happen on the update path.
+                let doubled = name.to_owned();
+                let ui_for_double = designer_ui.clone();
+                designer.set_double_click_sink(move |target| {
+                    ui_for_double.emit(Msg::OpenDefaultHandler {
+                        form: doubled.clone(),
+                        target: target.clone(),
+                    });
+                });
                 let id = page.id();
                 Ok((
                     DocumentView::Designer {
@@ -2526,8 +2569,42 @@ impl App for IdeApp {
             Msg::RenamedControl { form, old, new } => {
                 self.rename_control(&form, &old, &new, ui);
             }
+            Msg::OpenDefaultHandler { form, target } => {
+                self.open_default_handler(&form, &target, ui);
+            }
         }
     }
+}
+
+/// Finds the handler `signature` in `editor` and places the caret inside its
+/// body, or appends it as one undoable edit when it is missing.
+///
+/// Returns whether text was inserted, so the caller mirrors the editor into the
+/// session and schedules a compile (a found handler changes no text). This is
+/// the shared insertion path for the procedure combo and a designer
+/// double-click (issue #15).
+fn reveal_or_insert_handler(editor: &Editor<Msg>, signature: &str, args: &str) -> bool {
+    if let Some(offset) = procedures::find_handler(&editor.text(), signature) {
+        editor.set_caret(offset);
+        editor.focus();
+        return false;
+    }
+    let text = editor.text();
+    let end = text.chars().count();
+    let separator = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let snippet = procedures::handler_snippet(signature, args);
+    let insert = format!("{separator}{snippet}");
+    // The caret lands just after the opening brace of the new handler.
+    let before_brace = format!("fn {signature}({args}) ").chars().count();
+    editor.set_caret(end);
+    editor.insert_text(&insert);
+    editor.set_caret(end + separator.chars().count() + before_brace + 1);
+    editor.focus();
+    true
 }
 
 /// A split's extent along its split axis: height for a column, width for a row.
@@ -2712,6 +2789,7 @@ pub fn default_platform_spec() -> PlatformSpec {
 mod tests {
     use super::*;
     use crate::project::SessionError;
+    use lazyrad_designer::Tool;
     use xui_canvas::OffscreenBackend;
     use xui_core::Key;
     use xui_core::backend::Backend;
@@ -3191,6 +3269,204 @@ mod tests {
             // Renaming a control that does not exist is a no-op.
             app.rename_control(crate::project::DEFAULT_FORM, "ghost", "still_ghost", ui);
             assert_eq!(editor.text(), "fn button1_click() {\n}\n");
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn double_clicking_a_control_opens_its_handler_once() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-dblclick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Designer)
+                .expect("the form opens in a designer");
+
+            // Add a Button through the toolbox, as a user would.
+            app.update(
+                Msg::Toolbox(ToolboxMsg::Activate(Tool::control("Button"))),
+                ui,
+            );
+            assert!(
+                app.session
+                    .as_ref()
+                    .and_then(|session| session.form(crate::project::DEFAULT_FORM))
+                    .is_some_and(|form| form.node("button1").is_some()),
+                "the toolbox dropped a button1"
+            );
+
+            let form = crate::project::DEFAULT_FORM.to_owned();
+            // Double-click the button.
+            app.update(
+                Msg::OpenDefaultHandler {
+                    form: form.clone(),
+                    target: Target::Node("button1".to_owned()),
+                },
+                ui,
+            );
+
+            // The code tab is active, the handler is present once, and the
+            // caret sits inside its body.
+            assert_eq!(
+                app.active_code_editor().map(|(name, _)| name),
+                Some(form.clone()),
+                "the form's code tab is in front"
+            );
+            let editor = app
+                .code_editor(&form)
+                .expect("the code tab opened with the handler");
+            let text = editor.text();
+            assert_eq!(
+                text.matches("fn button1_click() {").count(),
+                1,
+                "text was: {text}"
+            );
+            let body = text
+                .find("fn button1_click() {")
+                .expect("the handler is present")
+                + "fn button1_click() {".len();
+            // The editor's caret is a char offset, so convert the byte index.
+            let body = text[..body].chars().count();
+            assert_eq!(editor.caret(), body, "the caret is inside the body");
+
+            // A second double-click finds the handler rather than duplicating it.
+            app.update(
+                Msg::OpenDefaultHandler {
+                    form: form.clone(),
+                    target: Target::Node("button1".to_owned()),
+                },
+                ui,
+            );
+            assert_eq!(
+                editor.text().matches("fn button1_click() {").count(),
+                1,
+                "the handler is not duplicated"
+            );
+
+            // Double-clicking the form opens `form_load`, which the default
+            // template already declares, so it too is found, not duplicated.
+            app.update(
+                Msg::OpenDefaultHandler {
+                    form: form.clone(),
+                    target: Target::Form,
+                },
+                ui,
+            );
+            assert_eq!(
+                editor.text().matches("fn form_load() {").count(),
+                1,
+                "text was: {}",
+                editor.text()
+            );
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn a_double_click_message_for_another_form_is_dropped() {
+        // A queued double-click for a form that is not open must not open, or
+        // edit, the active form's code.
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-ghost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Designer)
+                .expect("the form opens in a designer");
+
+            app.update(
+                Msg::OpenDefaultHandler {
+                    form: "ghost_form".to_owned(),
+                    target: Target::Form,
+                },
+                ui,
+            );
+
+            assert!(
+                app.active_code_editor().is_none(),
+                "no code tab was opened for a missing form"
+            );
+            assert!(
+                app.code_editor(crate::project::DEFAULT_FORM).is_none(),
+                "the active form's code was left untouched"
+            );
+            app
+        })
+        .expect("the offscreen backend runs to completion");
+
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    #[test]
+    fn deleting_a_control_leaves_its_handlers_in_place() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-ide-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cleanup = dir.clone();
+
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            let mut session = ProjectSession::create("MyApp", &dir).expect("create");
+            let mut form = session
+                .form(crate::project::DEFAULT_FORM)
+                .cloned()
+                .expect("a form");
+            form.insert(lazyrad_project::Node::new("Button", "button1"));
+            session.set_form(crate::project::DEFAULT_FORM, form);
+            session.set_code(
+                crate::project::DEFAULT_FORM,
+                "fn button1_click() {\n}\n".to_owned(),
+            );
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.refresh_explorer(ui);
+            app.open_document(crate::project::DEFAULT_FORM, DocKind::Designer)
+                .expect("the form opens in a designer");
+
+            // Select the control and delete it through the designer's edit path.
+            {
+                let (_, designer, designer_ui) =
+                    app.active_designer().expect("the designer is active");
+                assert!(designer.borrow().select_node("button1", &designer_ui));
+            }
+            app.dispatch_edit(Command::Delete, ui);
+
+            assert!(
+                app.session
+                    .as_ref()
+                    .and_then(|session| session.form(crate::project::DEFAULT_FORM))
+                    .is_some_and(|form| form.node("button1").is_none()),
+                "the control is gone from the form"
+            );
+            assert_eq!(
+                app.session
+                    .as_ref()
+                    .and_then(|session| session.code(crate::project::DEFAULT_FORM)),
+                Some("fn button1_click() {\n}\n"),
+                "deleting the control leaves its handler in place (VB behaviour)"
+            );
             app
         })
         .expect("the offscreen backend runs to completion");
