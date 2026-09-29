@@ -34,3 +34,6 @@ xui-form.workspace = true
 # theme resolves to light.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 dark-light.workspace = true
+
+[target."cfg(windows)".build-dependencies]
+embed-resource = "3.0.11"

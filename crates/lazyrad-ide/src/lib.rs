@@ -26,6 +26,7 @@ pub mod project;
 pub mod run;
 pub mod settings;
 pub mod shortcut_backend;
+pub mod start_page;
 pub mod theme;
 
 use std::error::Error;
@@ -63,9 +64,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     ));
     let proxy_cell = shortcuts.proxy_cell();
     let backend: Rc<dyn Backend> = shortcuts;
+    let icon_backend = Rc::clone(&backend);
 
     run_app(backend, default_platform_spec(), move |ui| {
         *proxy_cell.borrow_mut() = Some(ui.proxy());
+        start_page::install_window_icon(icon_backend.as_ref(), ui.window());
         IdeApp::build(ui, settings, recent).expect("the IDE widgets build")
     })?;
     Ok(())

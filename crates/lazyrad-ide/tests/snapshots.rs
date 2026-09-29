@@ -101,6 +101,16 @@ fn render_ide(settings: Settings, theme: Theme) -> Image {
     .expect("the IDE snapshots")
 }
 
+/// Renders the IDE with no project open, so the Start Page is the selected tab.
+fn render_start_page(settings: Settings, theme: Theme) -> Image {
+    render_with(
+        Snapshot::new(WIDTH, HEIGHT).theme(theme).title("LazyRAD"),
+        move |ui| -> Result<IdeApp, BackendError> { IdeApp::build(ui, settings, Vec::new()) },
+        |_stage| {},
+    )
+    .expect("the IDE snapshots")
+}
+
 /// Writes `image` under `target/snapshots/`, creating the directory.
 fn save(image: &Image, name: &str) {
     let dir = workspace_root().join("target").join("snapshots");
@@ -331,4 +341,59 @@ fn the_two_themes_differ() {
     let light = render_ide(settings_with(ThemeChoice::Light), Theme::light());
     let dark = render_ide(settings_with(ThemeChoice::Dark), Theme::dark());
     assert_ne!(light.pixels(), dark.pixels(), "light and dark differ");
+}
+
+/// Whether `pixel` is the logo's wheat gold, which nothing else in the IDE uses.
+fn is_wheat(pixel: &[u8]) -> bool {
+    let (red, green, blue) = (
+        i32::from(pixel[0]),
+        i32::from(pixel[1]),
+        i32::from(pixel[2]),
+    );
+    pixel[3] >= 250
+        && red >= 180
+        && red > green + 25
+        && green > 120
+        && green > blue + 45
+        && blue < 110
+}
+
+/// How many pixels of `image` are wheat gold.
+fn wheat_pixels(image: &Image) -> usize {
+    image
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| is_wheat(pixel))
+        .count()
+}
+
+#[test]
+fn the_start_page_paints_the_logo_in_both_themes() {
+    // The logo as the page draws it: 96 design units square at 96 dpi.
+    let logo = Image::decode_png(include_bytes!("../../../assets/rye-shades.png"))
+        .expect("the logo decodes")
+        .resized(96, 96)
+        .expect("the logo scales");
+    let expected = wheat_pixels(&logo);
+    assert!(
+        expected > 300,
+        "the logo has wheat to look for, found {expected}"
+    );
+
+    for (theme, choice, name) in [
+        (Theme::light(), ThemeChoice::Light, "ide-start-light.png"),
+        (Theme::dark(), ThemeChoice::Dark, "ide-start-dark.png"),
+    ] {
+        let image = render_start_page(settings_with(choice), theme);
+        save(&image, name);
+        let found = wheat_pixels(&image);
+        assert!(
+            found * 10 >= expected * 8,
+            "the Start Page painted {found} wheat pixels, the logo has {expected}, in {name}"
+        );
+        assert!(
+            found * 10 <= expected * 12,
+            "{found} wheat pixels in {name} is more than one logo ({expected}) can paint"
+        );
+    }
 }

@@ -154,6 +154,12 @@ impl<M: Send + 'static> Backend for ShortcutBackend<M> {
         self.inner.set_clipboard_text(text);
     }
 
+    // Also defaulted (a no-op), so a missing forward would silently drop the
+    // IDE's window icon.
+    fn set_window_icon(&self, window: WindowId, icon: &Image) {
+        self.inner.set_window_icon(window, icon);
+    }
+
     fn run_modal(&self, window: WindowId) -> Result<()> {
         self.inner.run_modal(window)
     }
@@ -374,6 +380,22 @@ mod tests {
         let down = key(Key::F5);
         assert!(probe.sink.deliver(WidgetId::NONE, &down));
         assert_eq!(*probe.seen.borrow(), vec![down]);
+    }
+
+    #[test]
+    fn the_wrapper_forwards_the_window_icon() {
+        let inner = Rc::new(xui_canvas::OffscreenBackend::new());
+        let inner_dyn: Rc<dyn Backend> = inner.clone();
+        let backend = ShortcutBackend::<u32>::new(inner_dyn, |_| None);
+        let window = backend
+            .open_window(&PlatformSpec::new("icon"))
+            .expect("the offscreen window opens");
+        let icon = Image::from_rgba(2, 2, vec![255; 16]).expect("a 2x2 image");
+        backend.set_window_icon(window, &icon);
+        assert!(
+            inner.window_icon(window).is_some(),
+            "the wrapped backend received the icon"
+        );
     }
 
     #[test]
