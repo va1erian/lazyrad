@@ -18,6 +18,7 @@ lazyrad-project.workspace = true
 thiserror.workspace = true
 xui-core.workspace = true
 xui-form.workspace = true
+xui-scrollbar.workspace = true
 
 [dev-dependencies]
 xui-canvas.workspace = true

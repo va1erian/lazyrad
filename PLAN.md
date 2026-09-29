@@ -46,6 +46,7 @@ lazyrad/
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
 │  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (JSON lines over stdio)
 │  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir, a payload, or --debug
+│  ├─ xui-scrollbar/          scrollbar geometry and painting shared by the editor and property grid
 │  ├─ xui-code-editor/        xui code-editor widget (buffer, view, highlight, completion)
 │  ├─ lazyrad-designer/       xui form-designer surface, toolbox, property grid
 │  ├─ lazyrad-packager/       exe export: stub + payload, icon/metadata where possible

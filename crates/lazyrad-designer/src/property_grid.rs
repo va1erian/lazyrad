@@ -89,6 +89,7 @@ use xui_core::message::{Key, MouseButton};
 use xui_core::units::Dip;
 use xui_core::widget::{CheckBox, ComboBox, Control};
 use xui_form::{Access, Catalog, FormDoc, Value, ValueType};
+use xui_scrollbar::{Orientation, Scroll, ThumbState, TrackHit};
 
 use crate::grid_nav::{ObjectDropdown, RowMove, move_row};
 use crate::local_paint::paint_local;
@@ -132,6 +133,8 @@ fn wheel_entries(delta: i16) -> i32 {
 const HEADER_HEIGHT: Dip = Dip(22.0);
 /// The text size for labels and values, in design units.
 const TEXT_SIZE: Dip = Dip(12.0);
+/// The width of the vertical scrollbar, in design units.
+const SCROLLBAR_WIDTH: Dip = Dip(12.0);
 
 /// Which view the grid shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -201,6 +204,9 @@ pub enum PropertyGridMsg {
     /// The user scrolled the rows by this many pixels (positive moves the
     /// content up, showing later rows).
     Scroll(i32),
+    /// The user dragged the scrollbar thumb: scroll the rows to this offset in
+    /// pixels (0 is the top), clamped to the content.
+    ScrollTo(i32),
 }
 
 /// Why a [`PropertyGrid`] could not be built.
@@ -406,8 +412,12 @@ fn visual_lines(rows: &[PropertyRow], view: View) -> Vec<Line> {
 /// The device-pixel layout of a grid of `area` size.
 #[derive(Clone, Copy, Debug)]
 struct Layout {
+    /// The width rows, headers and value cells are laid out in: the grid's
+    /// width, less the scrollbar while it is shown.
     width: i32,
     height: i32,
+    /// The scrollbar's track, right of the rows, while they overflow the body.
+    bar: Option<Rect>,
     combo: Rect,
     tab_alpha: Rect,
     tab_cat: Rect,
@@ -420,8 +430,9 @@ struct Layout {
 
 impl Layout {
     /// The layout for a grid whose local area has width `width` and height
-    /// `height` at `dpi`.
-    fn new(width: i32, height: i32, dpi: u32) -> Layout {
+    /// `height` at `dpi`, showing `lines`. Painting and hit-testing both build
+    /// it, so the scrollbar's presence narrows the rows the same way for both.
+    fn new(width: i32, height: i32, dpi: u32, lines: &[Line]) -> Layout {
         let px = |dip: Dip| dip.to_px(dpi).value().max(1);
         let pad = PADDING.to_px(dpi).value().max(0);
         let combo_h = px(COMBO_HEIGHT);
@@ -436,18 +447,51 @@ impl Layout {
             (width - pad).max(pad),
             tabs_top + tab_h,
         );
+        let body_top = tabs_top + tab_h + pad;
+        let body_bottom = (height - pad).max(body_top);
+        let row_h = px(ROW_HEIGHT);
+        let header_h = px(HEADER_HEIGHT);
+        let content: i32 = lines
+            .iter()
+            .map(|line| match line {
+                Line::Header(_) => header_h,
+                Line::Row(_) => row_h,
+            })
+            .sum();
+        // A narrow grid keeps at least three quarters of its width for rows.
+        let bar_w = px(SCROLLBAR_WIDTH).min(width.max(0) / 4);
+        let overflows = content > body_bottom - body_top;
+        let bar = (overflows && bar_w > 0 && body_bottom > body_top)
+            .then(|| Rect::new(width - bar_w, body_top, width, body_bottom));
+        let rows_w = bar.map_or(width, |bar| bar.left);
         Layout {
-            width,
+            width: rows_w,
             height,
+            bar,
             combo,
             tab_alpha,
             tab_cat,
-            body_top: tabs_top + tab_h + pad,
-            body_bottom: (height - pad).max(tabs_top + tab_h + pad),
-            name_right: pad + ((width - 2 * pad) as f32 * 0.45) as i32,
-            row_h: px(ROW_HEIGHT),
-            header_h: px(HEADER_HEIGHT),
+            body_top,
+            body_bottom,
+            name_right: pad + ((rows_w - 2 * pad) as f32 * 0.45) as i32,
+            row_h,
+            header_h,
         }
+    }
+
+    /// The scrollbar's scroll state for `lines` at `offset`, in pixels.
+    fn scroll_state(&self, lines: &[Line], offset: i32) -> Scroll {
+        Scroll {
+            viewport: self.body_bottom - self.body_top,
+            content: lines.iter().map(|line| self.line_height(line)).sum(),
+            offset,
+        }
+    }
+
+    /// The offset a page click on the track scrolls by: the body less one row,
+    /// so consecutive pages overlap.
+    fn page_pixels(&self) -> i32 {
+        (self.body_bottom - self.body_top - self.row_h).max(self.row_h)
     }
 
     /// The top of each visual line, starting at the body top less `scroll`.
@@ -533,7 +577,7 @@ impl Layout {
 
     /// The row under local `(x, y)`, if any.
     fn row_at<M: 'static>(&self, state: &GridState<M>, x: i32, y: i32) -> Option<usize> {
-        if !(self.body_top..=self.body_bottom).contains(&y) {
+        if !(self.body_top..=self.body_bottom).contains(&y) || x >= self.width {
             return None;
         }
         let lines = visual_lines(&state.rows, state.view);
@@ -544,7 +588,6 @@ impl Layout {
                 Line::Row(_) => self.row_h,
             };
             if (top..top + height).contains(&y) {
-                let _ = x;
                 return match line {
                     Line::Row(index) => Some(*index),
                     Line::Header(_) => None,
@@ -589,6 +632,19 @@ struct GridState<M: 'static> {
     active_row: Option<usize>,
     error: Option<String>,
     editor: Option<Editor<M>>,
+    /// Whether the pointer is over the scrollbar.
+    bar_hover: bool,
+    /// The scrollbar thumb drag in progress, if any.
+    bar_drag: Option<BarDrag>,
+}
+
+/// Where a scrollbar thumb drag began.
+#[derive(Clone, Copy, Debug)]
+struct BarDrag {
+    /// The scroll offset when the thumb was pressed.
+    start_offset: i32,
+    /// The pointer's y when the thumb was pressed, in grid-local pixels.
+    start_pointer: i32,
 }
 
 impl<M: 'static> GridState<M> {
@@ -609,6 +665,8 @@ impl<M: 'static> GridState<M> {
             active_row: None,
             error: None,
             editor: None,
+            bar_hover: false,
+            bar_drag: None,
         }
     }
 }
@@ -948,10 +1006,28 @@ impl<M: 'static> PropertyGrid<M> {
         dropdown_pick(&state, &layout, Point::new(x, y))
     }
 
+    /// The vertical scrollbar's track in the grid's local pixels, or `None`
+    /// while every row fits. Rows and value cells are laid out left of it.
+    pub fn scrollbar_track(&self, ui: &Ui<M>) -> Option<Rect> {
+        self.layout(ui).bar
+    }
+
+    /// The scrollbar thumb in the grid's local pixels, or `None` while every
+    /// row fits. A press on it starts a drag.
+    pub fn scrollbar_thumb(&self, ui: &Ui<M>) -> Option<Rect> {
+        let layout = self.layout(ui);
+        let state = self.state.borrow();
+        let lines = visual_lines(&state.rows, state.view);
+        let scroll = layout.scroll_state(&lines, state.scroll);
+        xui_scrollbar::thumb(layout.bar?, scroll, Orientation::Vertical, ui.dpi())
+    }
+
     /// The grid's layout at its current bounds.
     fn layout(&self, ui: &Ui<M>) -> Layout {
         let bounds = ui.bounds(self.id());
-        Layout::new(bounds.width(), bounds.height(), ui.dpi())
+        let state = self.state.borrow();
+        let lines = visual_lines(&state.rows, state.view);
+        Layout::new(bounds.width(), bounds.height(), ui.dpi(), &lines)
     }
 
     /// Keeps the scroll offset inside the content after the rows changed.
@@ -1023,6 +1099,15 @@ impl<M: 'static> PropertyGrid<M> {
                 let mut state = self.state.borrow_mut();
                 let lines = visual_lines(&state.rows, state.view);
                 state.scroll = layout.clamp_scroll(&lines, state.scroll + delta);
+                drop(state);
+                ui.invalidate(self.id());
+            }
+            PropertyGridMsg::ScrollTo(offset) => {
+                self.close_editor(ui);
+                let layout = self.layout(ui);
+                let mut state = self.state.borrow_mut();
+                let lines = visual_lines(&state.rows, state.view);
+                state.scroll = layout.clamp_scroll(&lines, offset);
                 drop(state);
                 ui.invalidate(self.id());
             }
@@ -1185,7 +1270,7 @@ impl<M: 'static> PropertyGrid<M> {
             return;
         }
         let bounds = ui.bounds(self.id());
-        let layout = Layout::new(bounds.width(), bounds.height(), ui.dpi());
+        let layout = self.layout(ui);
         let cell = layout.value_cell(&self.state.borrow(), index);
         let Some(cell) = cell else {
             return;
@@ -1383,7 +1468,8 @@ fn paint<M: 'static>(canvas: &mut dyn Canvas, area: Rect, state: &GridState<M>, 
     let width = area.width();
     let height = area.height();
     canvas.fill_rect(area, theme.surface);
-    let layout = Layout::new(width, height, dpi);
+    let lines = visual_lines(&state.rows, state.view);
+    let layout = Layout::new(width, height, dpi, &lines);
     let body = Rect::new(0, layout.body_top, width, layout.body_bottom);
 
     paint_object_combo(canvas, state, theme, &layout);
@@ -1392,6 +1478,17 @@ fn paint<M: 'static>(canvas: &mut dyn Canvas, area: Rect, state: &GridState<M>, 
     canvas.push_clip(body);
     paint_rows(canvas, state, theme, &layout);
     canvas.pop_clip();
+    if let Some(bar) = layout.bar {
+        let thumb = if state.bar_drag.is_some() {
+            ThumbState::Pressed
+        } else if state.bar_hover {
+            ThumbState::Hover
+        } else {
+            ThumbState::Normal
+        };
+        let scroll = layout.scroll_state(&lines, state.scroll);
+        xui_scrollbar::paint_state(canvas, bar, scroll, Orientation::Vertical, *theme, thumb);
+    }
 
     if state.objects_open {
         paint_dropdown(canvas, state, theme, &layout, dpi);
@@ -1661,21 +1758,73 @@ fn grid_message<M: 'static>(
     wrap: &Rc<dyn Fn(PropertyGridMsg) -> M>,
 ) -> Option<M> {
     let bounds = ui.bounds(id);
-    let layout = Layout::new(bounds.width(), bounds.height(), ui.dpi());
+    let (layout, lines) = {
+        let state = shared.borrow();
+        let lines = visual_lines(&state.rows, state.view);
+        (
+            Layout::new(bounds.width(), bounds.height(), ui.dpi(), &lines),
+            lines,
+        )
+    };
     match event {
         Event::MouseMove { x, y, .. } => {
+            let dragging = shared.borrow().bar_drag;
+            if let Some(drag) = dragging {
+                // The thumb follows the pointer, even outside the grid.
+                let scroll = layout.scroll_state(&lines, drag.start_offset);
+                let bar = layout.bar?;
+                let offset = xui_scrollbar::offset_from_drag(
+                    bar,
+                    scroll,
+                    Orientation::Vertical,
+                    drag.start_offset,
+                    drag.start_pointer,
+                    *y,
+                    ui.dpi(),
+                );
+                return Some(wrap(PropertyGridMsg::ScrollTo(offset)));
+            }
             let row = layout.row_at(&shared.borrow(), *x, *y);
+            let over_bar = layout
+                .bar
+                .is_some_and(|bar| bar.contains(Point::new(*x, *y)));
             let mut state = shared.borrow_mut();
-            if state.hover != row {
+            if state.hover != row || state.bar_hover != over_bar {
                 state.hover = row;
+                state.bar_hover = over_bar;
                 drop(state);
                 ui.invalidate(id);
             }
             None
         }
-        Event::MouseLeave | Event::CaptureChanged => {
+        Event::MouseUp {
+            button: MouseButton::Left,
+            ..
+        } => {
+            let dragging = shared.borrow_mut().bar_drag.take().is_some();
+            if dragging {
+                // The release can deliver CaptureChanged: no borrow is held.
+                ui.release_capture();
+                ui.invalidate(id);
+            }
+            None
+        }
+        Event::MouseLeave => {
             let mut state = shared.borrow_mut();
-            if state.hover.take().is_some() {
+            let hovered = state.hover.take().is_some();
+            let bar_hovered = std::mem::take(&mut state.bar_hover);
+            if hovered || bar_hovered {
+                drop(state);
+                ui.invalidate(id);
+            }
+            None
+        }
+        Event::CaptureChanged => {
+            let mut state = shared.borrow_mut();
+            let hovered = state.hover.take().is_some();
+            let bar_hovered = std::mem::take(&mut state.bar_hover);
+            let dragged = state.bar_drag.take().is_some();
+            if hovered || bar_hovered || dragged {
                 drop(state);
                 ui.invalidate(id);
             }
@@ -1712,6 +1861,29 @@ fn grid_message<M: 'static>(
             }
             if layout.tab_cat.contains(point) {
                 return Some(wrap(PropertyGridMsg::SetView(View::Categorized)));
+            }
+            if let Some(bar) = layout.bar.filter(|bar| bar.contains(point)) {
+                let offset = shared.borrow().scroll;
+                let scroll = layout.scroll_state(&lines, offset);
+                let dpi = ui.dpi();
+                let hit = xui_scrollbar::hit(bar, scroll, Orientation::Vertical, *y, dpi)?;
+                let direction = match hit {
+                    TrackHit::Thumb => {
+                        shared.borrow_mut().bar_drag = Some(BarDrag {
+                            start_offset: offset,
+                            start_pointer: *y,
+                        });
+                        // No borrow is held: capturing can deliver events.
+                        ui.set_capture(id);
+                        ui.invalidate(id);
+                        return None;
+                    }
+                    TrackHit::Before => -1,
+                    TrackHit::After => 1,
+                };
+                let page = layout.page_pixels();
+                let target = xui_scrollbar::paged_offset(scroll, direction, page);
+                return Some(wrap(PropertyGridMsg::ScrollTo(target)));
             }
             let row = layout.row_at(&shared.borrow(), *x, *y)?;
             Some(wrap(PropertyGridMsg::BeginEdit(row)))
@@ -2046,7 +2218,7 @@ mod tests {
             })
             .collect();
         state.objects_open = true;
-        let layout = Layout::new(200, 110, 96);
+        let layout = Layout::new(200, 110, 96, &[]);
         for first in [0, 3, 99] {
             state.dropdown_first = first;
             let dropdown = layout.dropdown(state.objects.len(), state.dropdown_first);
@@ -2092,5 +2264,93 @@ mod wheel_tests {
         // A touchpad reports pixel-sized deltas; a third of a notch is a row.
         assert_eq!(wheel_scroll(-40, 22), 22);
         assert_eq!(wheel_scroll(0, 22), 0);
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use super::*;
+
+    /// `count` property rows, as visual lines.
+    fn lines(count: usize) -> Vec<Line> {
+        (0..count).map(Line::Row).collect()
+    }
+
+    fn state_with_rows(count: usize) -> GridState<()> {
+        let mut state = GridState::<()>::new();
+        state.rows = (0..count)
+            .map(|index| PropertyRow {
+                name: format!("row_{index}"),
+                label: format!("Row {index}"),
+                category: "Misc".into(),
+                ty: ValueType::Bool,
+                value: Value::Bool(false),
+                access: Access::ReadWrite,
+                is_name: false,
+            })
+            .collect();
+        state
+    }
+
+    #[test]
+    fn the_bar_shows_only_when_the_rows_overflow_the_body() {
+        // Body: 200 - 58 - 4 = 138px, six 22px rows.
+        let fits = Layout::new(200, 200, 96, &lines(6));
+        assert!(fits.bar.is_none());
+        assert_eq!(fits.width, 200);
+        let overflows = Layout::new(200, 200, 96, &lines(7));
+        let bar = overflows.bar.expect("seven rows overflow six rows of body");
+        assert_eq!(bar.width(), 12);
+        assert_eq!(
+            (bar.top, bar.bottom),
+            (overflows.body_top, overflows.body_bottom)
+        );
+        assert_eq!(bar.right, 200);
+        // Rows, headers and value cells stop where the bar starts.
+        assert_eq!(overflows.width, bar.left);
+        assert!(overflows.name_right < fits.name_right);
+    }
+
+    #[test]
+    fn empty_content_and_degenerate_sizes_have_no_bar() {
+        assert!(Layout::new(200, 200, 96, &[]).bar.is_none());
+        // No body at all: the track would be empty.
+        assert!(Layout::new(200, 40, 96, &lines(50)).bar.is_none());
+        assert!(Layout::new(200, 0, 96, &lines(50)).bar.is_none());
+        // A sliver of a grid keeps most of its width for the rows.
+        for width in [0, 1, 3, 30] {
+            let layout = Layout::new(width, 200, 96, &lines(50));
+            if let Some(bar) = layout.bar {
+                assert!(bar.width() <= width / 4, "{width}: {bar:?}");
+                assert!(layout.width >= width - width / 4, "{width}");
+            }
+            assert!(layout.width >= 0);
+        }
+    }
+
+    #[test]
+    fn rows_are_not_hit_under_the_bar() {
+        let state = state_with_rows(20);
+        let layout = Layout::new(200, 200, 96, &visual_lines(&state.rows, state.view));
+        let bar = layout.bar.expect("twenty rows overflow");
+        let y = layout.body_top + 5;
+        assert_eq!(layout.row_at(&state, bar.left - 1, y), Some(0));
+        assert_eq!(layout.row_at(&state, bar.left, y), None);
+        assert_eq!(layout.row_at(&state, bar.right - 1, y), None);
+        // The value cell ends where the bar starts.
+        let cell = layout.value_cell(&state, 0).expect("row 0 is visible");
+        assert_eq!(cell.right, bar.left);
+    }
+
+    #[test]
+    fn the_scroll_state_spans_the_body_and_the_content() {
+        let layout = Layout::new(200, 200, 96, &lines(20));
+        let scroll = layout.scroll_state(&lines(20), 44);
+        assert_eq!(scroll.viewport, layout.body_bottom - layout.body_top);
+        assert_eq!(scroll.content, 20 * 22);
+        assert_eq!(scroll.offset, 44);
+        assert_eq!(scroll.max_offset(), layout.max_scroll(&lines(20)));
+        assert!(layout.page_pixels() > 0);
+        assert!(layout.page_pixels() < scroll.viewport);
     }
 }

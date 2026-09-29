@@ -70,7 +70,6 @@ mod metrics;
 pub mod options;
 mod paint;
 pub mod platform;
-mod scrollbar;
 mod state;
 mod text;
 pub mod theme;

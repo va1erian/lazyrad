@@ -14,11 +14,11 @@ use xui_core::theme::Theme;
 
 use crate::markers::MarkerKind;
 use crate::metrics::{CELL_PROBE, Metrics, Viewport};
-use crate::scrollbar::{self, Orientation, Scroll};
 use crate::state::EditorState;
 use crate::text::{display_col, expand_tabs};
 use crate::theme::EditorTheme;
 use crate::view::caret_display_col;
+use xui_scrollbar::{self as scrollbar, Orientation, Scroll};
 
 /// Draws `state` into `canvas`.
 ///

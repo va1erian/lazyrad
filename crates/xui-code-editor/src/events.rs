@@ -13,10 +13,10 @@ use xui_core::message::{Key, MouseButton};
 
 use crate::edit;
 use crate::metrics::{CELL_PROBE, Metrics, Viewport};
-use crate::scrollbar::{self, Orientation, Scroll};
 use crate::state::{Drag, EditorState, Effect};
 use crate::text::char_col_for_display;
 use crate::view::word_range_at;
+use xui_scrollbar::{self as scrollbar, Orientation, Scroll};
 
 /// Rows a wheel notch scrolls.
 const WHEEL_ROWS: i32 = 3;

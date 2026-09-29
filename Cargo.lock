@@ -1156,6 +1156,7 @@ dependencies = [
  "xui-canvas",
  "xui-core",
  "xui-form",
+ "xui-scrollbar",
 ]
 
 [[package]]
@@ -3299,6 +3300,7 @@ dependencies = [
  "ropey",
  "xui-canvas",
  "xui-core",
+ "xui-scrollbar",
 ]
 
 [[package]]
@@ -3328,6 +3330,13 @@ version = "0.1.0"
 source = "git+https://github.com/va1erian/xui?rev=ba4b2c91f6d0bb1757ba66f17939a347ff78386e#ba4b2c91f6d0bb1757ba66f17939a347ff78386e"
 dependencies = [
  "glow",
+ "xui-core",
+]
+
+[[package]]
+name = "xui-scrollbar"
+version = "0.1.0"
+dependencies = [
  "xui-core",
 ]
 
