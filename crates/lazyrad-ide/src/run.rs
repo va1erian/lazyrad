@@ -73,6 +73,11 @@ pub trait ChildProcess {
     fn kill(&mut self);
     /// Whether the process is still alive.
     fn is_running(&mut self) -> bool;
+    /// Gives a launcher without worker threads its turn on the window's timer:
+    /// drain the pipes, reap an exited child and report through the sink. The
+    /// threaded [`PlayerLauncher`] needs nothing here. LazyOS cannot share a
+    /// pipe descriptor with another thread, so its launcher polls instead.
+    fn poll(&mut self) {}
 }
 
 /// Spawns the player and streams its output back through an [`EventSink`].
@@ -234,11 +239,68 @@ fn read_stdout(pipe: ChildStdout, run: RunId, sink: EventSink) {
 /// [`RunEvent::Diagnostic`] and anything else as output.
 fn read_stderr(pipe: ChildStderr, run: RunId, sink: EventSink) {
     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-        let event = match Report::from_json(&line) {
-            Some(report) => RunEvent::Diagnostic(report),
-            None => RunEvent::Output(line),
-        };
-        sink(run, event);
+        sink(run, stderr_event(line));
+    }
+}
+
+/// How a line the player wrote on stderr is reported: a JSON diagnostic as
+/// [`RunEvent::Diagnostic`], anything else as plain output.
+pub fn stderr_event(line: String) -> RunEvent {
+    match Report::from_json(&line) {
+        Some(report) => RunEvent::Diagnostic(report),
+        None => RunEvent::Output(line),
+    }
+}
+
+/// Splits a byte stream read in arbitrary chunks into lines, for launchers that
+/// poll a non-blocking pipe instead of blocking a reader thread.
+///
+/// A partial line is held until its newline arrives (or [`LineBuffer::finish`]).
+/// Invalid UTF-8 is replaced, never an error, and a line longer than
+/// [`LineBuffer::MAX_LINE`] is cut there, so a runaway program cannot make the
+/// IDE buffer without bound.
+#[derive(Debug, Default)]
+pub struct LineBuffer {
+    pending: Vec<u8>,
+}
+
+impl LineBuffer {
+    /// The longest line kept, in bytes; the rest of a longer line starts a new one.
+    pub const MAX_LINE: usize = 64 * 1024;
+
+    /// An empty buffer.
+    pub fn new() -> LineBuffer {
+        LineBuffer::default()
+    }
+
+    /// Adds `chunk` and returns every line it completed (without the newline,
+    /// and without a trailing carriage return).
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for &byte in chunk {
+            if byte == b'\n' {
+                lines.push(self.take_line());
+            } else {
+                self.pending.push(byte);
+                if self.pending.len() >= Self::MAX_LINE {
+                    lines.push(self.take_line());
+                }
+            }
+        }
+        lines
+    }
+
+    /// The held partial line at end of stream, if any.
+    pub fn finish(&mut self) -> Option<String> {
+        (!self.pending.is_empty()).then(|| self.take_line())
+    }
+
+    fn take_line(&mut self) -> String {
+        let mut bytes = std::mem::take(&mut self.pending);
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
 
@@ -337,6 +399,13 @@ impl RunState {
         self.next += 1;
         self.active = Some(Active { id, child });
         Ok(id)
+    }
+
+    /// Lets the running child do its polling work (see [`ChildProcess::poll`]).
+    pub fn poll(&mut self) {
+        if let Some(active) = self.active.as_mut() {
+            active.child.poll();
+        }
     }
 
     /// Kills the running child, if any, and returns to idle.
@@ -460,6 +529,38 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_line_buffer_joins_chunks_and_splits_lines() {
+        let mut buffer = LineBuffer::new();
+        assert!(buffer.push(b"hel").is_empty());
+        assert_eq!(buffer.push(b"lo\nwor"), ["hello"]);
+        assert_eq!(buffer.push(b"ld\r\n\nx"), ["world", ""]);
+        assert_eq!(buffer.finish().as_deref(), Some("x"));
+        assert_eq!(buffer.finish(), None);
+    }
+
+    #[test]
+    fn a_line_buffer_survives_hostile_input() {
+        let mut buffer = LineBuffer::new();
+        let huge = vec![b'a'; LineBuffer::MAX_LINE * 3 + 5];
+        let lines = buffer.push(&huge);
+        assert_eq!(lines.len(), 3, "a runaway line is cut, not buffered");
+        assert!(lines.iter().all(|l| l.len() == LineBuffer::MAX_LINE));
+        let lines = buffer.push(&[0xff, 0xfe, b'\n']);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains('\u{fffd}'), "invalid UTF-8 is replaced");
+    }
+
+    #[test]
+    fn stderr_lines_are_diagnostics_only_when_they_parse() {
+        let report = Report::from_json(r#"{"kind":"runtime","message":"boom"}"#).unwrap();
+        assert_eq!(stderr_event(report.to_json()), RunEvent::Diagnostic(report));
+        assert_eq!(
+            stderr_event("plain text".to_owned()),
+            RunEvent::Output("plain text".to_owned())
+        );
+    }
+
     /// The events a fake child delivered, in order, paired with their run id.
     type CapturedEvents = Arc<Mutex<Vec<(RunId, RunEvent)>>>;
 
@@ -570,6 +671,48 @@ mod tests {
             launcher.calls.borrow()[0],
             (PathBuf::from("player"), PathBuf::from("proj"), id)
         );
+    }
+
+    #[test]
+    fn polling_reaches_the_active_child_and_is_harmless_when_idle() {
+        struct Polled(Rc<Cell<u32>>);
+        impl ChildProcess for Polled {
+            fn kill(&mut self) {}
+            fn is_running(&mut self) -> bool {
+                true
+            }
+            fn poll(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        struct PolledLauncher(Rc<Cell<u32>>);
+        impl Launcher for PolledLauncher {
+            fn launch(
+                &self,
+                _: &Path,
+                _: &Path,
+                _: RunId,
+                _: EventSink,
+            ) -> Result<Box<dyn ChildProcess>, LaunchError> {
+                Ok(Box::new(Polled(Rc::clone(&self.0))))
+            }
+        }
+        let polls = Rc::new(Cell::new(0));
+        let mut state = RunState::new();
+        state.poll();
+        assert_eq!(polls.get(), 0, "nothing to poll while idle");
+        let (sink, _) = collector();
+        state
+            .start(
+                &PolledLauncher(Rc::clone(&polls)),
+                Path::new("p"),
+                Path::new("d"),
+                sink,
+            )
+            .unwrap();
+        state.poll();
+        state.poll();
+        assert_eq!(polls.get(), 2);
     }
 
     #[test]

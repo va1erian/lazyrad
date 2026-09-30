@@ -445,8 +445,27 @@ impl Document {
     }
 }
 
+/// A milestone the IDE reports to its host (see [`IdeApp::set_observer`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IdeEvent {
+    /// A project finished opening; carries its name.
+    ProjectOpened(String),
+    /// The player was started on the project (Run / F5); carries its name.
+    RunStarted(String),
+    /// The player process ended, with its exit code when known.
+    RunExited(Option<i32>),
+    /// A code document changed; carries its item name and new length in
+    /// characters (LazyOS's typing-latency benchmark watches this).
+    DocumentEdited(String, usize),
+}
+
+/// The callback type for [`IdeEvent`]s.
+pub type IdeObserver = Rc<dyn Fn(&IdeEvent)>;
+
 /// The IDE shell's application state.
 pub struct IdeApp {
+    /// Told about project and run milestones (LazyOS prints serial markers).
+    observer: Option<IdeObserver>,
     settings: Settings,
     dispatcher: Dispatcher,
     /// Every menu entry that dispatches a command, for enabling/disabling.
@@ -732,6 +751,7 @@ impl IdeApp {
             prompt: None,
             save_prompt: None,
             pending: None,
+            observer: None,
             output,
             output_lines: Vec::new(),
             error_list,
@@ -1277,6 +1297,7 @@ impl IdeApp {
                 self.update_title(ui);
                 self.update_status(ui);
                 self.log(ui, format!("Running {name}..."));
+                self.notify(&IdeEvent::RunStarted(name.clone()));
             }
             Err(error) => self.log(ui, format!("The program could not start: {error}")),
         }
@@ -1417,6 +1438,9 @@ impl IdeApp {
         if !self.run.accepts(run) {
             return;
         }
+        if let RunEvent::Exited(code) = &event {
+            self.notify(&IdeEvent::RunExited(*code));
+        }
         match event {
             RunEvent::Output(line) => self.log(ui, line),
             RunEvent::Diagnostic(report) => self.on_run_diagnostic(report, ui),
@@ -1497,6 +1521,24 @@ impl IdeApp {
         self.open_replacing(dir.to_path_buf(), ui);
     }
 
+    /// Replaces how the player is started (LazyOS installs a launcher that polls
+    /// its pipes on the window timer instead of using reader threads).
+    pub fn set_launcher(&mut self, launcher: Rc<dyn run::Launcher>) {
+        self.launcher = launcher;
+    }
+
+    /// Installs the observer told about [`IdeEvent`]s.
+    pub fn set_observer(&mut self, observer: IdeObserver) {
+        self.observer = Some(observer);
+    }
+
+    /// Tells the observer, if any.
+    fn notify(&self, event: &IdeEvent) {
+        if let Some(observer) = &self.observer {
+            observer(event);
+        }
+    }
+
     /// Opens the project in `dir` in place of the current one, asking to save
     /// unsaved changes first.
     fn open_replacing(&mut self, dir: PathBuf, ui: &mut Ui<Msg>) {
@@ -1518,9 +1560,13 @@ impl IdeApp {
     }
 
     /// Opens the project in `dir`.
-    fn open_dir(&mut self, dir: PathBuf, ui: &mut Ui<Msg>) {
+    pub(crate) fn open_dir(&mut self, dir: PathBuf, ui: &mut Ui<Msg>) {
         match ProjectSession::open(&dir) {
-            Ok(session) => self.adopt_project(session, ui),
+            Ok(session) => {
+                let name = session.name().to_owned();
+                self.adopt_project(session, ui);
+                self.notify(&IdeEvent::ProjectOpened(name));
+            }
             Err(error) => self.log(ui, format!("Could not open {}: {error}", dir.display())),
         }
     }
@@ -3064,7 +3110,11 @@ impl App for IdeApp {
         match msg {
             Msg::Command(command) => self.run_command(command, ui),
             Msg::Shortcut(command) => self.run_shortcut(command, ui),
-            Msg::RefreshEdit => self.refresh_edit_availability(),
+            Msg::RefreshEdit => {
+                // The window timer also gives a polling launcher (LazyOS) its turn.
+                self.run.poll();
+                self.refresh_edit_availability();
+            }
             Msg::Relayout => self.layout_frame(ui),
             Msg::PaneMoved(slot, position) => self.on_pane_moved(slot, position, ui),
             Msg::ExplorerSelected(node) => self.on_explorer_selected(node, ui),
@@ -3076,6 +3126,12 @@ impl App for IdeApp {
             }
             Msg::SaveChoice(choice) => self.resolve_save_prompt(choice, ui),
             Msg::DocumentEdited(name, text) => {
+                if self.observer.is_some() {
+                    self.notify(&IdeEvent::DocumentEdited(
+                        name.clone(),
+                        text.chars().count(),
+                    ));
+                }
                 self.schedule_compile(&name, &text);
                 if let Some(session) = self.session.as_mut() {
                     session.set_code(&name, text);
