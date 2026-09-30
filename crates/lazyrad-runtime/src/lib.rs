@@ -20,6 +20,7 @@
 pub mod check;
 pub mod engine;
 pub mod form;
+pub mod fs_policy;
 pub mod shell;
 pub mod stdlib;
 
