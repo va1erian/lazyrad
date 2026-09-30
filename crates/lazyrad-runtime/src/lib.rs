@@ -28,8 +28,8 @@ pub mod stdlib;
 pub use check::{CheckReport, check_project, check_runtime};
 pub use engine::{EngineHost, new_engine};
 pub use form::{
-    FormApp, FormRuntime, FormSource, ModuleSource, Msg, RuntimeError, run_project_with,
-    run_runtime_with,
+    FormApp, FormRuntime, FormSource, HandlerObserver, ModuleSource, Msg, RuntimeError,
+    run_project_with, run_runtime_with,
 };
 #[cfg(feature = "desktop")]
 pub use form::{run_project, run_runtime};

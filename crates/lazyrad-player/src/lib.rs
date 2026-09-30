@@ -55,10 +55,15 @@ pub const EXIT_RUNTIME: i32 = 2;
 /// project has been checked. Failing to create it (no display server to talk
 /// to) is reported as a fatal runtime problem rather than a panic.
 ///
+/// The factory is handed the loaded runtime (`None` for the empty-window shell)
+/// so a host can attach to it before the window opens, for example with
+/// [`FormRuntime::set_handler_observer`].
+///
 /// This is the seam that keeps the player platform-neutral: the desktop binary
 /// passes the `winit` backend ([`run_cli`]), LazyOS passes
 /// `LazyOSBackend::connect` (issue: LazyRAD on LazyOS, plan P1).
-pub type BackendFactory<'a> = &'a mut dyn FnMut() -> Result<Rc<dyn Backend>, String>;
+pub type BackendFactory<'a> =
+    &'a mut dyn FnMut(Option<&Rc<FormRuntime>>) -> Result<Rc<dyn Backend>, String>;
 
 /// Reads the command line and runs the program on the desktop `winit` backend,
 /// returning the process exit code.
@@ -69,7 +74,7 @@ pub type BackendFactory<'a> = &'a mut dyn FnMut() -> Result<Rc<dyn Backend>, Str
 #[cfg(feature = "desktop")]
 pub fn run_cli() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    run_with_backend(&args, &mut || {
+    run_with_backend(&args, &mut |_runtime| {
         Ok(Rc::new(xui_canvas::WinitBackend::new()) as Rc<dyn Backend>)
     })
 }
@@ -123,16 +128,18 @@ fn backend_error(message: String) -> RuntimeError {
 
 /// Creates the backend and runs `runtime`'s startup form on it.
 fn run_on(runtime: Rc<FormRuntime>, make_backend: BackendFactory<'_>) -> Result<(), RuntimeError> {
-    let backend = make_backend().map_err(backend_error)?;
+    let backend = make_backend(Some(&runtime)).map_err(backend_error)?;
     run_runtime_with(backend, runtime)
 }
 
 /// Opens the empty-window shell (no project was named).
 fn run_empty_window(make_backend: BackendFactory<'_>) -> i32 {
-    let result = make_backend().map_err(backend_error).and_then(|backend| {
-        lazyrad_runtime::shell::run_empty_window_with(backend, "LazyRAD Player")
-            .map_err(RuntimeError::from)
-    });
+    let result = make_backend(None)
+        .map_err(backend_error)
+        .and_then(|backend| {
+            lazyrad_runtime::shell::run_empty_window_with(backend, "LazyRAD Player")
+                .map_err(RuntimeError::from)
+        });
     match result {
         Ok(()) => EXIT_OK,
         Err(error) => {

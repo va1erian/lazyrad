@@ -18,7 +18,8 @@ fn sample(name: &str) -> String {
 #[test]
 fn a_sample_runs_on_a_caller_supplied_backend() {
     let mut created = 0;
-    let code = run_with_backend(&[sample("hello")], &mut || {
+    let code = run_with_backend(&[sample("hello")], &mut |runtime| {
+        assert!(runtime.is_some(), "a project run hands over its runtime");
         created += 1;
         Ok(Rc::new(OffscreenBackend::new()) as Rc<dyn Backend>)
     });
@@ -28,7 +29,7 @@ fn a_sample_runs_on_a_caller_supplied_backend() {
 
 #[test]
 fn a_backend_that_cannot_connect_is_a_runtime_failure() {
-    let code = run_with_backend(&[sample("hello")], &mut || {
+    let code = run_with_backend(&[sample("hello")], &mut |_| {
         Err("no display server".to_owned())
     });
     assert_eq!(code, EXIT_RUNTIME);
@@ -36,7 +37,7 @@ fn a_backend_that_cannot_connect_is_a_runtime_failure() {
 
 #[test]
 fn a_bad_project_fails_before_any_backend_is_created() {
-    let code = run_with_backend(&[sample("does-not-exist")], &mut || {
+    let code = run_with_backend(&[sample("does-not-exist")], &mut |_| {
         panic!("the backend must not be created for a project that does not load")
     });
     assert_eq!(code, EXIT_COMPILE);
@@ -44,7 +45,7 @@ fn a_bad_project_fails_before_any_backend_is_created() {
 
 #[test]
 fn extra_arguments_are_a_usage_error() {
-    let code = run_with_backend(&["a".to_owned(), "b".to_owned()], &mut || {
+    let code = run_with_backend(&["a".to_owned(), "b".to_owned()], &mut |_| {
         panic!("no backend for a usage error")
     });
     assert_eq!(code, EXIT_COMPILE);
