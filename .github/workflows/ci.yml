@@ -52,3 +52,39 @@ jobs:
         run: cargo check --workspace --all-targets
       - name: Test
         run: cargo test --workspace
+
+  # LazyOS runs LazyRAD as static musl binaries with no windowing system. This
+  # job keeps that target building (the player, the runtime and the IDE library
+  # without their `desktop` features) and keeps every windowing crate out of the
+  # graph, so a regression shows up here instead of at integration time.
+  musl:
+    name: Check (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check
+        run: >
+          cargo check --target x86_64-unknown-linux-musl --no-default-features
+          -p lazyrad-runtime -p lazyrad-player -p lazyrad-ide -p lazyrad-designer
+          -p lazyrad-project -p lazyrad-packager -p xui-form -p xui-rhai
+      - name: No windowing crates in the player graph
+        run: |
+          tree=$(cargo tree --target x86_64-unknown-linux-musl --no-default-features \
+            -p lazyrad-player -p lazyrad-ide -e normal --prefix none)
+          if echo "$tree" | grep -E '^(winit|softbuffer|glutin|glow|arboard|xui-gpu|rfd|directories|dark-light) '; then
+            echo "a desktop-only crate leaked into the musl graph" >&2
+            exit 1
+          fi
+      - name: One Rhai, pinned
+        run: |
+          versions=$(cargo tree -p lazyrad-player --no-default-features -e normal --prefix none | grep -E '^rhai ' | sort -u)
+          echo "$versions"
+          test "$(echo "$versions" | wc -l)" -eq 1
+          echo "$versions" | grep -q 'rhai v1.26.1'

@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use rhai::{Dynamic, FnPtr};
+#[cfg(feature = "desktop")]
 use xui_canvas::WinitBackend;
 use xui_core::app::{App, Ui, WindowHandle, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
@@ -54,6 +55,8 @@ use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
+use crate::fs_policy_stub::FsPolicy;
+use crate::platform;
 use crate::stdlib::StdlibContext;
 use xui_rhai::form::{FormError, ScriptForm, ScriptSource};
 use xui_rhai::message::Pending;
@@ -166,6 +169,9 @@ pub struct FormRuntime {
     /// Each built form's window, so a message addressed to a form (a message
     /// box and its result) reaches that window whichever window flushes it.
     inboxes: RefCell<BTreeMap<String, Ui<Msg>>>,
+    /// Which paths scripts may touch, fixed when the runtime is built from
+    /// the installed platform's policy.
+    fs: Rc<FsPolicy>,
 }
 
 impl FormRuntime {
@@ -246,6 +252,7 @@ impl FormRuntime {
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
             inboxes: RefCell::new(BTreeMap::new()),
+            fs: Rc::new(platform::current().fs_policy()),
         }))
     }
 
@@ -268,6 +275,7 @@ impl FormRuntime {
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
             inboxes: RefCell::new(BTreeMap::new()),
+            fs: Rc::new(platform::current().fs_policy()),
         })
     }
 
@@ -389,6 +397,7 @@ impl FormInstance {
             pending: Rc::clone(&runtime.pending),
             app_title: runtime.project().name.clone(),
             app_path: runtime.path().display().to_string(),
+            fs: Rc::clone(&runtime.fs),
         };
         let runtime_for_setup = Rc::clone(runtime);
         let script = ScriptForm::build(
@@ -746,6 +755,7 @@ pub(crate) fn open_project(path: &Path) -> Result<(PathBuf, Project), RuntimeErr
 }
 
 /// Runs the project in `dir` on the portable `winit` backend.
+#[cfg(feature = "desktop")]
 pub fn run_project(dir: impl AsRef<Path>) -> Result<(), RuntimeError> {
     let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
     run_project_with(backend, dir)
@@ -764,6 +774,7 @@ pub fn run_project_with(
 }
 
 /// Runs an already-loaded project on the portable `winit` backend.
+#[cfg(feature = "desktop")]
 pub fn run_runtime(runtime: Rc<FormRuntime>) -> Result<(), RuntimeError> {
     let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
     run_runtime_with(backend, runtime)

@@ -16,4 +16,7 @@ xui-form.workspace = true
 rhai.workspace = true
 
 [dev-dependencies]
-xui-canvas.workspace = true
+# The scripted-form example opens a desktop window; the tests use the offscreen
+# backend. `metadata` is checked by the engine tests.
+rhai = { workspace = true, features = ["metadata", "internals"] }
+xui-canvas = { workspace = true, features = ["winit-backend"] }

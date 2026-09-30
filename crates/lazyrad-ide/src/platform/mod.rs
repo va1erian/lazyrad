@@ -2,6 +2,11 @@
 
 //! The IDE's platform seam (PLAN.md §12, "Porting LazyRAD").
 //!
+//! Since the LazyOS plan (P0) these modules are thin: they ask
+//! [`lazyrad_runtime::platform::current`], and the desktop answers live in
+//! [`host`] (feature `desktop`). A new platform implements
+//! [`lazyrad_runtime::platform::Platform`] and installs it before the IDE starts.
+//!
 //! Everything the IDE needs from the operating system that xui cannot provide
 //! lives behind this module, and no other IDE source file uses `cfg(target_os)`
 //! or `cfg(windows)` (only `build.rs` may, for the Windows icon resource). A new
@@ -22,6 +27,8 @@
 
 pub mod config;
 pub mod dialogs;
+#[cfg(feature = "desktop")]
+pub mod host;
 pub mod process;
 pub mod theme;
 

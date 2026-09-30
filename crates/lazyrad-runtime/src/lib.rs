@@ -20,15 +20,20 @@
 pub mod check;
 pub mod engine;
 pub mod form;
+pub mod fs_policy_stub;
+pub mod platform;
 pub mod shell;
 pub mod stdlib;
 
 pub use check::{CheckReport, check_project, check_runtime};
 pub use engine::{EngineHost, new_engine};
 pub use form::{
-    FormApp, FormRuntime, FormSource, ModuleSource, Msg, RuntimeError, run_project,
-    run_project_with, run_runtime, run_runtime_with,
+    FormApp, FormRuntime, FormSource, ModuleSource, Msg, RuntimeError, run_project_with,
+    run_runtime_with,
 };
+#[cfg(feature = "desktop")]
+pub use form::{run_project, run_runtime};
+pub use fs_policy_stub::{Access, FsError, FsPolicy, Sandbox};
 pub use stdlib::StdlibContext;
 pub use xui_rhai::message::{MsgBoxButtons, Pending};
 pub use xui_rhai::{FormHost, ScriptError};

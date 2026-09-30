@@ -44,7 +44,7 @@ use std::time::Duration;
 use lazyrad_player::Report;
 use lazyrad_runtime::check_project;
 
-use crate::platform;
+use lazyrad_runtime::platform;
 
 /// How long the exit watcher sleeps between polls of the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
@@ -129,7 +129,7 @@ impl Launcher for PlayerLauncher {
         // The IDE is a GUI-subsystem app, so Windows would give the
         // console-subsystem player a console window of its own; its output is
         // piped back to the IDE instead, so don't create one.
-        platform::process::hide_console_window(&mut command);
+        platform::current().prepare_player_command(&mut command);
         let mut child = command
             .spawn()
             .map_err(|source| LaunchError::new(player, source))?;
@@ -422,10 +422,8 @@ pub enum PlayerError {
     /// The `player_path` setting names a file that does not exist.
     #[error("the configured player `{0}` does not exist")]
     OverrideMissing(PathBuf),
-    /// The IDE's own executable location could not be read.
-    #[error("the IDE executable location could not be read: {0}")]
-    Exe(std::io::Error),
-    /// The IDE executable has no folder to look in.
+    /// The platform has no place to look for the player (the IDE's own
+    /// executable location is unknown or has no folder).
     #[error("the IDE executable has no folder, so the player cannot be located")]
     NoExeDir,
     /// No player sits next to the IDE, and none was configured.
@@ -443,11 +441,11 @@ pub fn resolve_player(override_path: Option<&Path>) -> Result<PathBuf, PlayerErr
             Err(PlayerError::OverrideMissing(path.to_path_buf()))
         };
     }
-    let exe = std::env::current_exe().map_err(PlayerError::Exe)?;
-    let Some(dir) = exe.parent() else {
-        return Err(PlayerError::NoExeDir);
-    };
-    let candidate = dir.join(platform::process::executable_file_name("lazyrad-player"));
+    // The platform knows where its player lives: next to the IDE on the
+    // desktop, a fixed path on LazyOS.
+    let candidate = platform::current()
+        .player_executable()
+        .ok_or(PlayerError::NoExeDir)?;
     if candidate.is_file() {
         Ok(candidate)
     } else {

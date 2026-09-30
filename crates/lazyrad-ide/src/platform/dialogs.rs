@@ -1,13 +1,15 @@
 #![forbid(unsafe_code)]
 
-//! Native file and folder dialogs.
+//! File and folder dialogs, through the installed platform.
 //!
-//! xui has none (PLAN.md §10, gap G4), so on the desktop they are `rfd`'s OS
-//! dialogs, behind the default `native-dialogs` feature. Without it every
-//! request is answered as if the user cancelled, which is the seam a painted
-//! in-app dialog (LazyOS) replaces.
+//! xui has none (PLAN.md §10, gap G4), so the IDE asks
+//! [`lazyrad_runtime::platform::Platform::dialogs`]: on the desktop that is
+//! `rfd` (see [`super::host`]), and with no platform installed every request is
+//! answered as if the user cancelled.
 
 use std::path::{Path, PathBuf};
+
+use lazyrad_runtime::platform::{self, Filter};
 
 /// The file name filter for a LazyRAD project file.
 const PROJECT_FILTER: Filter<'static> = ("LazyRAD project", &["lrp"]);
@@ -16,28 +18,32 @@ const PROJECT_FILTER: Filter<'static> = ("LazyRAD project", &["lrp"]);
 /// native message box. The IDE is a GUI-subsystem app on Windows, so there is
 /// no console to print to.
 pub fn show_fatal_error(message: &str) {
-    backend::show_error("LazyRAD", message);
+    platform::current().dialogs().show_error("LazyRAD", message);
 }
 
 /// Asks for an existing `.lrp` project file.
 ///
 /// `None` when the user cancels (or no dialog is available).
 pub fn open_project_file() -> Option<PathBuf> {
-    backend::open_file("Open Project", Some(PROJECT_FILTER))
+    platform::current()
+        .dialogs()
+        .open_file("Open Project", Some(PROJECT_FILTER))
 }
 
 /// Asks for a folder, for example the one a new project is created in.
 ///
 /// `None` when the user cancels (or no dialog is available).
 pub fn choose_folder(title: &str) -> Option<PathBuf> {
-    backend::choose_folder(title)
+    platform::current().dialogs().choose_folder(title)
 }
 
 /// Asks where to save the project, suggesting `file_name` (`<name>.lrp`).
 ///
 /// `None` when the user cancels (or no dialog is available).
 pub fn save_project_file(file_name: &str) -> Option<PathBuf> {
-    backend::save_file("Save Project As", file_name, Some(PROJECT_FILTER))
+    platform::current()
+        .dialogs()
+        .save_file("Save Project As", file_name, Some(PROJECT_FILTER))
 }
 
 /// Asks where to write the exported executable, suggesting `file_name`.
@@ -47,7 +53,9 @@ pub fn save_exe_file(file_name: &str) -> Option<PathBuf> {
     let extension = std::env::consts::EXE_EXTENSION;
     let extensions = [extension];
     let filter = (!extension.is_empty()).then_some(("Program", &extensions[..]));
-    backend::save_file("Make Executable", file_name, filter)
+    platform::current()
+        .dialogs()
+        .save_file("Make Executable", file_name, filter)
 }
 
 /// The folder a chosen file lives in, or the file itself when it has no
@@ -65,82 +73,6 @@ pub fn project_name_of(path: &Path) -> String {
     path.file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-#[cfg(not(feature = "native-dialogs"))]
-use headless as backend;
-#[cfg(feature = "native-dialogs")]
-use native as backend;
-
-/// `(description, extensions)` of a file name filter.
-type Filter<'a> = (&'a str, &'a [&'a str]);
-
-/// The OS dialogs, through `rfd`.
-#[cfg(feature = "native-dialogs")]
-mod native {
-    use std::path::PathBuf;
-
-    use rfd::FileDialog;
-
-    use super::Filter;
-
-    pub fn show_error(title: &str, message: &str) {
-        let _ = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Error)
-            .set_title(title)
-            .set_description(message)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show();
-    }
-
-    pub fn open_file(title: &str, filter: Option<Filter<'_>>) -> Option<PathBuf> {
-        let mut dialog = FileDialog::new().set_title(title);
-        if let Some((name, extensions)) = filter {
-            dialog = dialog.add_filter(name, extensions);
-        }
-        dialog.pick_file()
-    }
-
-    pub fn choose_folder(title: &str) -> Option<PathBuf> {
-        FileDialog::new().set_title(title).pick_folder()
-    }
-
-    pub fn save_file(title: &str, file_name: &str, filter: Option<Filter<'_>>) -> Option<PathBuf> {
-        let mut dialog = FileDialog::new().set_title(title).set_file_name(file_name);
-        if let Some((name, extensions)) = filter {
-            dialog = dialog.add_filter(name, extensions);
-        }
-        dialog.save_file()
-    }
-}
-
-/// The portable fallback: no dialog can be shown, so every request is a
-/// cancel and errors go to stderr. Always compiled so it is tested everywhere.
-#[cfg_attr(feature = "native-dialogs", allow(dead_code))]
-mod headless {
-    use std::path::PathBuf;
-
-    use super::Filter;
-
-    pub fn show_error(title: &str, message: &str) {
-        eprintln!("{title}: {message}");
-    }
-
-    pub fn open_file(_title: &str, _filter: Option<Filter<'_>>) -> Option<PathBuf> {
-        None
-    }
-
-    pub fn choose_folder(_title: &str) -> Option<PathBuf> {
-        None
-    }
-
-    pub fn save_file(
-        _title: &str,
-        _file_name: &str,
-        _filter: Option<Filter<'_>>,
-    ) -> Option<PathBuf> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -164,10 +96,11 @@ mod tests {
     }
 
     #[test]
-    fn the_headless_fallback_answers_every_request_as_a_cancel() {
-        assert_eq!(headless::open_file("t", Some(PROJECT_FILTER)), None);
-        assert_eq!(headless::choose_folder("t"), None);
-        assert_eq!(headless::save_file("t", "a.lrp", None), None);
-        headless::show_error("t", "message goes to stderr");
+    fn without_an_installed_platform_every_request_is_a_cancel() {
+        // No test installs a platform, so the portable fallback answers.
+        assert_eq!(open_project_file(), None);
+        assert_eq!(choose_folder("t"), None);
+        assert_eq!(save_project_file("a.lrp"), None);
+        assert_eq!(save_exe_file("a"), None);
     }
 }
