@@ -1188,7 +1188,11 @@ version = "0.1.0"
 dependencies = [
  "editpe",
  "lazyrad-project",
+ "lazyrad-runtime",
+ "miniz_oxide 0.8.9",
+ "serde",
  "thiserror 2.0.21",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

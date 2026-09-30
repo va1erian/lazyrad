@@ -12,6 +12,9 @@
 //!   untrusted: a truncated, corrupted, oversized or wrong-version payload is
 //!   an error value, never a panic.
 //! * [`export`] builds the output and writes it atomically.
+//! * [`lzp`] packages a project as a LazyOS application package (`.lzp`): a
+//!   standard zip with a generated manifest, the LazyOS player, icons and the
+//!   project. It is the format `pkgd` installs; see that module.
 //! * [`pe`] patches a Windows stub: the GUI subsystem (so no console window
 //!   appears), the project's icon and its version resources.
 //!
@@ -22,6 +25,7 @@
 
 pub mod error;
 pub mod export;
+pub mod lzp;
 pub mod payload;
 pub mod pe;
 pub mod platform;

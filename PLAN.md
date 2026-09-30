@@ -342,7 +342,20 @@ IDE  ──spawn── lazyrad-player --debug <project dir>
      temporary file and renames it into place.
    - Code signing is out of scope, but note in the docs that an appended overlay
      invalidates any existing signature.
-5. **Where stubs live:** the IDE ships with its stubs in `stubs/<target>/`. Picking
+5. **LazyOS packages (`.lzp`).** For LazyOS the export is not a stub with an appended
+   payload but a standard application package (`docs/packages.md` in the LazyOS
+   repo): a zip with a generated `manifest.toml`, the LazyOS player as
+   `bin/lrplay.elf`, `icons/app-{16,32,128}.png` and the project under
+   `resources/project/`. `lazyrad_packager::lzp` writes it (`build_package`, a zip
+   writer that emits exactly the subset LazyOS's `lazypkg` reads, default icons,
+   permissions derived from the scripts) and the `lazyrad-pack` command wraps it:
+   `lazyrad-pack <project> --player lrplay.elf --out dist`. Installing goes through
+   the `Installer` trait: `pkgd` when LazyOS has it, otherwise `DevInstaller` saves
+   the package ("saved, not installed"). The manifest's `entry.args` is
+   `["--project", "resources/project"]`, which the player resolves against its own
+   install directory. `lazyrad-packager` tests re-read every package with an
+   independent verifier; LazyOS's tests re-open the same packages with `lazypkg`.
+6. **Where stubs live:** the IDE ships with its stubs in `stubs/<target>/`. Picking
    another target in *File → Make EXE* is how cross-export works.
 
 ---

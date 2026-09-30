@@ -10,7 +10,24 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["check"]
+# The `lazyrad-pack` command runs the runtime's compile check before packing.
+# Library users pass their own `Check` (or none) and can leave this off.
+check = ["dep:lazyrad-runtime"]
+
+[[bin]]
+name = "lazyrad-pack"
+path = "src/bin/lazyrad-pack.rs"
+
 [dependencies]
 editpe = { version = "0.2", default-features = false, features = ["std"] }
 lazyrad-project.workspace = true
+lazyrad-runtime = { workspace = true, optional = true }
+# Pure-Rust deflate for the `.lzp` zip writer and the default icons; same crate
+# and version `lazypkg` uses to inflate.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+serde.workspace = true
 thiserror.workspace = true
+toml.workspace = true
+
