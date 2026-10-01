@@ -129,7 +129,9 @@ mod tests {
     #[test]
     fn the_config_directory_is_named_after_the_app() {
         if let Some(dir) = HostPlatform.config_dir() {
-            assert!(dir.to_string_lossy().contains(APP));
+            // `directories` lowercases the name on Linux (`~/.config/lazyrad`).
+            let name = dir.to_string_lossy().to_lowercase();
+            assert!(name.contains(&APP.to_lowercase()));
         }
     }
 }

@@ -74,7 +74,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
             "--no-check" => options.check = false,
             "--install-dev" => {
                 let dir = match args.peek() {
-                    Some(next) if !next.to_string_lossy().starts_with('-') => {
+                    // Only once the project is known: `--install-dev myproj` must
+                    // not swallow the project as the directory.
+                    Some(next) if project.is_some() && !next.to_string_lossy().starts_with('-') => {
                         args.next().map(PathBuf::from)
                     }
                     _ => None,
@@ -211,6 +213,13 @@ mod tests {
 
     fn parse_str(args: &[&str]) -> Result<Options, String> {
         parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn install_dev_before_the_project_does_not_take_it_as_its_directory() {
+        let options = parse_str(&["--player", "p.elf", "--install-dev", "proj"]).unwrap();
+        assert_eq!(options.project, Path::new("proj"));
+        assert_eq!(options.install_dev, Some(None));
     }
 
     #[test]

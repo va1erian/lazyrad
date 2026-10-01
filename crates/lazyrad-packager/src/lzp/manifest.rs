@@ -195,10 +195,13 @@ pub fn uses_private_storage(source: &str) -> bool {
             let name_len = after
                 .find(|c: char| !(c.is_ascii_lowercase() || c == '_'))
                 .unwrap_or(after.len());
-            let follows_paren = after[name_len..].trim_start().starts_with('(');
+            let rest = &after[name_len..];
+            let follows_paren = rest.trim_start().starts_with('(');
+            // `Fn("file_read_text").call(..)` reaches the same function by name.
+            let as_fn_pointer = before == Some('"') && rest.starts_with('"');
             // A call (`file_read_text(`) that is not the tail of a longer name.
             let boundary = !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-            boundary && name_len > 0 && follows_paren
+            boundary && name_len > 0 && (follows_paren || as_fn_pointer)
         })
     })
 }
@@ -350,6 +353,9 @@ mod tests {
         assert!(!uses_private_storage("let profile_path = 1;"));
         assert!(!uses_private_storage("my_file_read_text(1)"));
         assert!(!uses_private_storage("let file_ = 1;"));
+        // Reached by name through a function pointer.
+        assert!(uses_private_storage("Fn(\"file_read_text\").call([\"a\"])"));
+        assert!(!uses_private_storage("let s = \"my_file_read_text\";"));
         assert!(!uses_private_storage(
             "// file_read_text is documented elsewhere"
         ));

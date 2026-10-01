@@ -1608,6 +1608,12 @@ impl IdeApp {
             self.prepare_file_dialogs(ui);
         }
         if let Some(dialogs) = &self.file_dialogs {
+            // One question at a time: a second request would replace the first
+            // one's `file_request`, and its answer would then be applied to the
+            // wrong action (an export written over a chosen `.lrp`).
+            if dialogs.is_open() && self.file_request.is_some() {
+                return Asked::Later;
+            }
             dialogs.show(&request);
             self.file_request = Some(request);
             return Asked::Later;
@@ -1762,11 +1768,12 @@ impl IdeApp {
 
     /// Saves the project (already synced) to the chosen `.lrp` `file`.
     fn write_project_as(&mut self, file: PathBuf, ui: &mut Ui<Msg>) {
-        let result = self
-            .session
-            .as_mut()
-            .expect("the project was just borrowed")
-            .save_as(&file);
+        // The answer arrives later from the in-window dialog: the project may
+        // have been closed in between.
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let result = session.save_as(&file);
         match result {
             Ok(_) => {
                 self.mark_documents_saved();
@@ -3825,6 +3832,30 @@ mod tests {
         let player = dir.join("lazyrad-player-stub");
         std::fs::write(&player, b"stub").expect("write the stub");
         player
+    }
+
+    #[test]
+    fn a_second_file_request_does_not_replace_the_one_being_answered() {
+        let dir = run_scratch("onedialog");
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        let start = dir.clone();
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            app.set_file_system(Rc::new(xui_core::widget::StdFileSystem), start.clone());
+            app.update(Msg::Command(Command::OpenProject), ui);
+            assert_eq!(app.file_request, Some(FileRequest::OpenProject));
+
+            // Another menu command while the dialog is up must not retarget it:
+            // its answer would be applied to the wrong action.
+            let asked = app.ask_file(FileRequest::MakeExe("x.exe".into()), ui);
+            assert!(matches!(asked, Asked::Later));
+            assert_eq!(app.file_request, Some(FileRequest::OpenProject));
+            ui.quit();
+            app
+        })
+        .expect("the window runs");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

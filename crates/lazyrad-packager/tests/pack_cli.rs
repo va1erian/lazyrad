@@ -134,6 +134,7 @@ fn failures_exit_one_and_write_nothing() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+#[cfg(feature = "check")]
 #[test]
 fn a_project_with_a_script_error_is_stopped_by_the_check() {
     let dir = scratch("check");
