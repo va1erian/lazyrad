@@ -39,8 +39,8 @@ use lazyrad_project::Project;
 
 pub use error::LzpError;
 pub use install::{
-    DevInstaller, InstallError, InstallState, InstalledApp, Installer, PkgdInstaller,
-    install_with_fallback,
+    DevInstaller, InstallError, InstallState, InstalledApp, Installer, PackageReview,
+    PermissionNote, PkgdInstaller, install_with_fallback,
 };
 
 use crate::payload::Payload;

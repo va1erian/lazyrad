@@ -45,13 +45,13 @@ use crate::dialog::ChoiceDialog;
 use crate::edit_state::EditAvailability;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
 use crate::file_dialogs::{self, Asked, FileRequest, InWindowDialogs};
-use crate::make_exe;
 use crate::platform::dialogs;
 use crate::procedures::{self, ObjectEntry};
 use crate::project::{DEFAULT_PROJECT, ProjectSession};
 use crate::run::{self, RunEvent, RunId, RunState};
 use crate::settings::{Settings, ThemeChoice};
 use crate::start_page::StartPage;
+use crate::{make_app, make_exe};
 
 /// The menu bar's height.
 const MENU_HEIGHT: Dip = dip(24.0);
@@ -166,6 +166,10 @@ pub enum Msg {
     FileChosen(PathBuf),
     /// The in-window file dialog was cancelled.
     FileCancelled,
+    /// The Make LazyOS App consent dialog was answered (`true` = Install).
+    AppConsent(bool),
+    /// The "Run it now?" dialog was answered (`true` = Run).
+    AppRun(bool),
 }
 
 /// The Error List's rows: one line per diagnostic, each led by the error icon.
@@ -462,6 +466,22 @@ pub enum IdeEvent {
     /// A code document changed; carries its item name and new length in
     /// characters (LazyOS's typing-latency benchmark watches this).
     DocumentEdited(String, usize),
+    /// The installer reviewed a package; carries its system name and the number
+    /// of permissions it will show.
+    PackageReviewed(String, usize),
+    /// The package was installed (`true`) or only saved (`false`); carries its
+    /// system name.
+    PackageInstalled(String, bool),
+    /// Making or installing the app failed; carries the friendly message.
+    PackageFailed(String),
+    /// The installed app was started; carries its system name.
+    AppLaunched(String),
+}
+
+/// A built package waiting for the user's consent.
+struct PendingApp {
+    built: lazyrad_packager::lzp::BuiltPackage,
+    name: String,
 }
 
 /// The callback type for [`IdeEvent`]s.
@@ -471,6 +491,14 @@ pub type IdeObserver = Rc<dyn Fn(&IdeEvent)>;
 pub struct IdeApp {
     /// Told about project and run milestones (LazyOS prints serial markers).
     observer: Option<IdeObserver>,
+    /// The package installer, when the platform has one.
+    installer: Option<Rc<dyn lazyrad_packager::lzp::Installer>>,
+    /// The author the made apps declare.
+    author: String,
+    /// The consent or "run it" dialog that is open.
+    app_dialog: Option<ChoiceDialog<Msg>>,
+    /// The package the consent dialog is about.
+    pending_app: Option<PendingApp>,
     /// The in-window file dialogs, built on first use when the platform offers a
     /// filesystem for them.
     file_dialogs: Option<InWindowDialogs>,
@@ -588,7 +616,7 @@ impl IdeApp {
         let status_rect = status_band.bottom.unwrap_or_default();
         let main_rect = status_band.fill;
 
-        let (menu, menu_commands) = build_menu(ui, menu_rect, &recent, None)?;
+        let (menu, menu_commands) = build_menu(ui, menu_rect, &recent, None, false)?;
         let menu_id = menu.id().unwrap_or(WidgetId::NONE);
 
         let mut toolbar = Toolbar::empty(ui, toolbar_rect)?;
@@ -768,6 +796,10 @@ impl IdeApp {
             file_dialogs: None,
             file_request: None,
             dialog_fs: None,
+            installer: None,
+            author: String::new(),
+            app_dialog: None,
+            pending_app: None,
             output,
             output_lines: Vec::new(),
             error_list,
@@ -1029,6 +1061,7 @@ impl IdeApp {
             bounds,
             &self.settings.recent_projects,
             self.session.as_ref().map(ProjectSession::name),
+            self.installer.is_some(),
         ) {
             Ok((menu, commands)) => {
                 self.menu_commands = commands;
@@ -1157,6 +1190,7 @@ impl IdeApp {
             Command::Save | Command::SaveAll => self.save_project(ui),
             Command::SaveAs => self.save_project_as(ui),
             Command::MakeExe => self.make_exe(ui),
+            Command::MakeApp => self.make_app(ui),
             Command::AddForm => {
                 if let Some(name) = self.session.as_mut().map(ProjectSession::add_form) {
                     self.after_structure_change(ui);
@@ -1622,6 +1656,186 @@ impl IdeApp {
             FileRequest::NewProject(name) => self.create_project(&name, path, ui),
             FileRequest::SaveProjectAs(_) => self.write_project_as(path, ui),
             FileRequest::MakeExe(_) => self.write_exe(path, ui),
+        }
+    }
+
+    /// Gives the IDE a package installer: File then offers "Make LazyOS App…".
+    /// `author` is who the made apps declare; empty uses the `USER` or
+    /// `USERNAME` environment variable, else "unknown".
+    pub fn set_installer(
+        &mut self,
+        installer: Rc<dyn lazyrad_packager::lzp::Installer>,
+        author: &str,
+        ui: &Ui<Msg>,
+    ) {
+        self.installer = Some(installer);
+        self.author = if author.is_empty() {
+            ["USER", "USERNAME"]
+                .iter()
+                .find_map(|key| std::env::var(key).ok())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "unknown".to_owned())
+        } else {
+            author.to_owned()
+        };
+        self.rebuild_menu(ui);
+    }
+
+    /// Whether File shows Make LazyOS App.
+    pub fn can_make_app(&self) -> bool {
+        self.installer.is_some()
+    }
+
+    /// File → Make LazyOS App…: save, check, build the `.lzp`, ask the installer
+    /// what it would grant and show that for consent. Nothing is installed
+    /// until the user says so ([`Msg::AppConsent`]).
+    fn make_app(&mut self, ui: &mut Ui<Msg>) {
+        let Some(installer) = self.installer.clone() else {
+            self.log(ui, "This system cannot install LazyOS apps.");
+            return;
+        };
+        let Some((dir, project_file)) = self
+            .session
+            .as_ref()
+            .map(|session| (session.dir().to_path_buf(), session.project_file()))
+        else {
+            self.log(ui, "Open a project before making an app.");
+            return;
+        };
+        if let Err(error) = self.save_for_run(ui) {
+            self.log(
+                ui,
+                format!("Make cancelled: the project could not be saved ({error})."),
+            );
+            return;
+        }
+        if !self.check_for_run(&dir, "the app was not made", ui) {
+            return;
+        }
+        let built = match make_app::build(
+            &project_file,
+            self.settings.player_path.as_deref(),
+            &self.author,
+        ) {
+            Ok(built) => built,
+            Err(error) => {
+                self.package_failed(format!("Make failed: {error}"), ui);
+                return;
+            }
+        };
+        let name = self
+            .session
+            .as_ref()
+            .map_or_else(String::new, |session| session.name().to_owned());
+        match installer.review(&built) {
+            Err(error) => self.package_failed(error.to_string(), ui),
+            Ok(None) => {
+                self.pending_app = Some(PendingApp { built, name });
+                self.resolve_consent(true, ui);
+            }
+            Ok(Some(review)) if !review.problems.is_empty() => {
+                for line in make_app::problem_lines(&review) {
+                    self.log(ui, line);
+                }
+                self.package_failed("The installer refused the package.".to_owned(), ui);
+            }
+            Ok(Some(review)) => {
+                self.notify(&IdeEvent::PackageReviewed(
+                    review.system_name.clone(),
+                    review.permissions.len(),
+                ));
+                self.show_app_dialog(
+                    &make_app::consent_title(&review),
+                    &make_app::consent_text(&review),
+                    ["Install", "Cancel"],
+                    |index| Some(Msg::AppConsent(index == 0)),
+                    ui,
+                );
+                self.pending_app = Some(PendingApp { built, name });
+            }
+        }
+    }
+
+    /// Opens a two-button dialog; Enter picks the first button, Escape the second.
+    fn show_app_dialog(
+        &mut self,
+        title: &str,
+        message: &str,
+        labels: [&str; 2],
+        mapper: impl Fn(usize) -> Option<Msg> + 'static,
+        ui: &mut Ui<Msg>,
+    ) {
+        match ChoiceDialog::new(ui, title, message, &labels, 0, 1) {
+            Ok(dialog) => {
+                let dialog = dialog.on_action(mapper);
+                dialog.open();
+                self.app_dialog = Some(dialog);
+            }
+            Err(error) => self.log(ui, format!("the dialog could not open: {error}")),
+        }
+    }
+
+    /// Logs a failure and tells the observer.
+    fn package_failed(&mut self, message: String, ui: &mut Ui<Msg>) {
+        self.log(ui, message.clone());
+        self.notify(&IdeEvent::PackageFailed(message));
+    }
+
+    /// Applies the answer to the consent dialog.
+    fn resolve_consent(&mut self, install: bool, ui: &mut Ui<Msg>) {
+        self.app_dialog = None;
+        let (Some(pending), Some(installer)) = (self.pending_app.take(), self.installer.clone())
+        else {
+            return;
+        };
+        if !install {
+            self.log(ui, "Install cancelled.");
+            return;
+        }
+        match installer.install(&pending.built) {
+            Err(error) => self.package_failed(error.to_string(), ui),
+            Ok(app) => {
+                self.log(ui, app.summary());
+                let installed = app.state == lazyrad_packager::lzp::InstallState::Installed;
+                self.notify(&IdeEvent::PackageInstalled(
+                    app.system_name.clone(),
+                    installed,
+                ));
+                if installed {
+                    let system_name = app.system_name.clone();
+                    self.pending_app = Some(PendingApp {
+                        built: pending.built,
+                        name: pending.name.clone(),
+                    });
+                    self.show_app_dialog(
+                        &format!("{} is installed", pending.name),
+                        &format!("Run it now? It is also in the Start menu as {system_name}."),
+                        ["Run", "Not now"],
+                        |index| Some(Msg::AppRun(index == 0)),
+                        ui,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Applies the answer to the "run it now" dialog.
+    fn resolve_run_offer(&mut self, run: bool, ui: &mut Ui<Msg>) {
+        self.app_dialog = None;
+        let (Some(pending), Some(installer)) = (self.pending_app.take(), self.installer.clone())
+        else {
+            return;
+        };
+        if !run {
+            return;
+        }
+        let system_name = pending.built.system_name;
+        match installer.launch(&system_name) {
+            Ok(()) => {
+                self.log(ui, format!("Started {system_name}."));
+                self.notify(&IdeEvent::AppLaunched(system_name));
+            }
+            Err(error) => self.package_failed(error.to_string(), ui),
         }
     }
 
@@ -3285,6 +3499,8 @@ impl App for IdeApp {
                 }
             }
             Msg::FileCancelled => self.file_request = None,
+            Msg::AppConsent(install) => self.resolve_consent(install, ui),
+            Msg::AppRun(run) => self.resolve_run_offer(run, ui),
         }
     }
 }
@@ -3364,6 +3580,7 @@ fn build_menu(
     bounds: Rect,
     recent: &[PathBuf],
     project_name: Option<&str>,
+    make_app_item: bool,
 ) -> UiResult<(Menu<Msg>, MenuCommands)> {
     let mut ids = MenuIds::new();
     let menu = Menu::bar(ui, bounds)?.build(|bar| {
@@ -3393,7 +3610,11 @@ fn build_menu(
                     Command::MakeExe,
                     &make_exe::menu_label(project_name),
                 )
-                .separator()
+                .separator();
+            if make_app_item {
+                file.command(&mut ids, Command::MakeApp, make_app::MENU_LABEL);
+            }
+            file.separator()
                 .command(&mut ids, Command::CloseProject, "&Close Project")
                 .separator()
                 .command(&mut ids, Command::Exit, "E&xit");
@@ -3825,6 +4046,159 @@ mod tests {
         let player = dir.join("lazyrad-player-stub");
         std::fs::write(&player, b"stub").expect("write the stub");
         player
+    }
+
+    /// An installer that records what it was asked and answers from a script.
+    struct MockInstaller {
+        review: Option<lazyrad_packager::lzp::PackageReview>,
+        installs: std::cell::Cell<u32>,
+        launches: RefCell<Vec<String>>,
+    }
+
+    impl lazyrad_packager::lzp::Installer for MockInstaller {
+        fn review(
+            &self,
+            _: &lazyrad_packager::lzp::BuiltPackage,
+        ) -> Result<Option<lazyrad_packager::lzp::PackageReview>, lazyrad_packager::lzp::InstallError>
+        {
+            Ok(self.review.clone())
+        }
+
+        fn install(
+            &self,
+            package: &lazyrad_packager::lzp::BuiltPackage,
+        ) -> Result<lazyrad_packager::lzp::InstalledApp, lazyrad_packager::lzp::InstallError>
+        {
+            self.installs.set(self.installs.get() + 1);
+            Ok(lazyrad_packager::lzp::InstalledApp {
+                system_name: package.system_name.clone(),
+                version: package.version.clone(),
+                state: lazyrad_packager::lzp::InstallState::Installed,
+                location: None,
+            })
+        }
+
+        fn launch(&self, system_name: &str) -> Result<(), lazyrad_packager::lzp::InstallError> {
+            self.launches.borrow_mut().push(system_name.to_owned());
+            Ok(())
+        }
+    }
+
+    /// A player file that passes the ELF check.
+    fn elf_player(dir: &Path) -> PathBuf {
+        let mut elf = vec![0u8; 256];
+        elf[..4].copy_from_slice(b"ELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes());
+        let path = dir.join("player.elf");
+        std::fs::write(&path, elf).expect("write the player");
+        path
+    }
+
+    fn review_for(
+        system_name: &str,
+        problems: Vec<String>,
+    ) -> lazyrad_packager::lzp::PackageReview {
+        lazyrad_packager::lzp::PackageReview {
+            name: "MyApp".into(),
+            system_name: system_name.into(),
+            author: "Ada".into(),
+            version: "0.1.0".into(),
+            permissions: vec![lazyrad_packager::lzp::PermissionNote {
+                kind: "interface".into(),
+                value: "os.lazy.display.v1".into(),
+                risk: "low".into(),
+                explanation: "Show windows".into(),
+            }],
+            problems,
+        }
+    }
+
+    #[test]
+    fn make_app_asks_for_consent_installs_then_offers_to_run() {
+        let dir = run_scratch("makeapp");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            assert!(!app.can_make_app(), "no installer, no menu item");
+            let session = ProjectSession::create("MyApp", &dir).expect("create");
+            app.session = Some(session);
+            app.dispatcher.set_project_open(true);
+            app.settings.player_path = Some(elf_player(&dir));
+            let installer = Rc::new(MockInstaller {
+                review: Some(review_for("user.ada.myapp", Vec::new())),
+                installs: std::cell::Cell::new(0),
+                launches: RefCell::new(Vec::new()),
+            });
+            let events: Rc<RefCell<Vec<IdeEvent>>> = Rc::new(RefCell::new(Vec::new()));
+            let sink = Rc::clone(&events);
+            app.set_observer(Rc::new(move |event| sink.borrow_mut().push(event.clone())));
+            app.set_installer(installer.clone(), "Ada", ui);
+            assert!(app.can_make_app());
+
+            // Make shows the consent dialog and installs nothing yet.
+            app.update(Msg::Command(Command::MakeApp), ui);
+            assert!(app.app_dialog.is_some() && app.pending_app.is_some());
+            assert_eq!(
+                installer.installs.get(),
+                0,
+                "nothing installed before consent"
+            );
+
+            // Cancel: still nothing installed, the pending package is dropped.
+            app.update(Msg::AppConsent(false), ui);
+            assert_eq!(installer.installs.get(), 0);
+            assert!(app.pending_app.is_none());
+
+            // Make again and accept: installed, and Run is offered.
+            app.update(Msg::Command(Command::MakeApp), ui);
+            app.update(Msg::AppConsent(true), ui);
+            assert_eq!(installer.installs.get(), 1);
+            assert!(app.app_dialog.is_some(), "the run offer is showing");
+            app.update(Msg::AppRun(true), ui);
+            assert_eq!(*installer.launches.borrow(), ["user.ada.myapp"]);
+
+            let events = events.borrow();
+            assert!(events.contains(&IdeEvent::PackageReviewed("user.ada.myapp".into(), 1)));
+            assert!(events.contains(&IdeEvent::PackageInstalled("user.ada.myapp".into(), true)));
+            assert!(events.contains(&IdeEvent::AppLaunched("user.ada.myapp".into())));
+            ui.quit();
+            drop(events);
+            app
+        })
+        .expect("the window runs");
+        let _ = std::fs::remove_dir_all(cleanup);
+    }
+
+    #[test]
+    fn make_app_stops_when_the_installer_refuses_the_package() {
+        let dir = run_scratch("makeapp-refused");
+        let cleanup = dir.clone();
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            app.session = Some(ProjectSession::create("MyApp", &dir).expect("create"));
+            app.dispatcher.set_project_open(true);
+            app.settings.player_path = Some(elf_player(&dir));
+            let installer = Rc::new(MockInstaller {
+                review: Some(review_for("user.ada.myapp", vec!["bad manifest".into()])),
+                installs: std::cell::Cell::new(0),
+                launches: RefCell::new(Vec::new()),
+            });
+            app.set_installer(installer.clone(), "Ada", ui);
+            app.update(Msg::Command(Command::MakeApp), ui);
+            assert!(app.app_dialog.is_none(), "no consent for a refused package");
+            assert_eq!(installer.installs.get(), 0);
+            assert!(app.output_lines.iter().any(|l| l.contains("bad manifest")));
+            ui.quit();
+            app
+        })
+        .expect("the window runs");
+        let _ = std::fs::remove_dir_all(cleanup);
     }
 
     #[test]
