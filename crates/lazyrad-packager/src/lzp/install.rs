@@ -29,6 +29,40 @@ use crate::lzp::{BuiltPackage, LzpError, write_package};
 /// Where the dev fallback keeps packages on LazyOS.
 pub const DEV_PACKAGE_DIR: &str = "/data/packages";
 
+/// One permission the installer will grant, with the words to show the user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PermissionNote {
+    /// `interface`, `topic`, `file` or `network`.
+    pub kind: String,
+    /// The interface name, topic pattern, file rule or `outbound`.
+    pub value: String,
+    /// `low`, `medium` or `high`.
+    pub risk: String,
+    /// One friendly sentence.
+    pub explanation: String,
+}
+
+/// What the installer says it would do with a package, for a consent screen.
+///
+/// It comes from the installer (`pkgd`'s `Inspect`), not from LazyRAD's own
+/// reading of the manifest, so the words are the platform's and what is shown
+/// is what will be enforced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackageReview {
+    /// The display name.
+    pub name: String,
+    /// The reverse-DNS id.
+    pub system_name: String,
+    /// The author as declared.
+    pub author: String,
+    /// The version.
+    pub version: String,
+    /// The permissions requested.
+    pub permissions: Vec<PermissionNote>,
+    /// Every reason the package cannot be installed; empty when it can.
+    pub problems: Vec<String>,
+}
+
 /// What happened to the package.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InstallState {
@@ -89,11 +123,24 @@ pub enum InstallError {
 /// the dev fallback can name its file without parsing the archive; a `pkgd`
 /// client sends `package.bytes` and nothing else.
 pub trait Installer {
+    /// Asks the installer what it would grant, without changing anything.
+    /// `Ok(None)` means this installer has no consent step (the dev fallback).
+    fn review(&self, _package: &BuiltPackage) -> Result<Option<PackageReview>, InstallError> {
+        Ok(None)
+    }
+
+    /// Starts an installed app by its `system_name`.
+    fn launch(&self, _system_name: &str) -> Result<(), InstallError> {
+        Err(InstallError::Unavailable(
+            "this installer cannot start apps".to_owned(),
+        ))
+    }
+
     /// Installs `package`, or saves it when installing is not possible.
     fn install(&self, package: &BuiltPackage) -> Result<InstalledApp, InstallError>;
 }
 
-/// The fallback used until `pkgd` exists: writes the `.lzp` into a directory
+/// The fallback for a platform with no package manager: writes the `.lzp` into a directory
 /// and reports "saved, not installed".
 pub struct DevInstaller {
     dir: PathBuf,
