@@ -88,9 +88,6 @@ struct App<'a> {
 #[derive(Serialize)]
 struct Entry<'a> {
     binary: &'a str,
-    /// `linux`: the player is a static musl binary, started in the Linux
-    /// personality (`init` needs this; an ELF header cannot say).
-    abi: &'a str,
     args: Vec<&'a str>,
 }
 
@@ -169,7 +166,6 @@ pub fn build<'a>(
         },
         entry: Entry {
             binary: PLAYER_ENTRY,
-            abi: "linux",
             args: vec!["--project", PROJECT_DIR],
         },
         permissions: Permissions {
@@ -372,7 +368,6 @@ mod tests {
         assert_eq!(built.version, "1.0.0");
         assert!(built.files.is_empty());
         assert!(built.text.contains("binary = \"bin/lrplay.elf\""));
-        assert!(built.text.contains("abi = \"linux\""));
         assert!(built.text.contains("\"--project\""));
         assert!(built.text.contains("network = []"));
     }
