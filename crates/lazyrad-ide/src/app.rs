@@ -44,6 +44,7 @@ use crate::compile::{self, CodeDiagnostic, CompileScheduler};
 use crate::dialog::ChoiceDialog;
 use crate::edit_state::EditAvailability;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
+use crate::file_dialogs::{self, Asked, FileRequest, InWindowDialogs};
 use crate::make_exe;
 use crate::platform::dialogs;
 use crate::procedures::{self, ObjectEntry};
@@ -161,6 +162,10 @@ pub enum Msg {
     },
     /// A running program reported output, a diagnostic or its exit.
     Run(RunId, RunEvent),
+    /// The in-window file dialog was accepted with this path.
+    FileChosen(PathBuf),
+    /// The in-window file dialog was cancelled.
+    FileCancelled,
 }
 
 /// The Error List's rows: one line per diagnostic, each led by the error icon.
@@ -466,6 +471,14 @@ pub type IdeObserver = Rc<dyn Fn(&IdeEvent)>;
 pub struct IdeApp {
     /// Told about project and run milestones (LazyOS prints serial markers).
     observer: Option<IdeObserver>,
+    /// The in-window file dialogs, built on first use when the platform offers a
+    /// filesystem for them.
+    file_dialogs: Option<InWindowDialogs>,
+    /// What the open in-window file dialog is answering.
+    file_request: Option<FileRequest>,
+    /// A filesystem and start folder for the in-window dialogs that an embedder
+    /// set directly; it wins over the platform's.
+    dialog_fs: Option<(Rc<dyn xui_core::widget::FileSystem>, PathBuf)>,
     settings: Settings,
     dispatcher: Dispatcher,
     /// Every menu entry that dispatches a command, for enabling/disabling.
@@ -752,6 +765,9 @@ impl IdeApp {
             save_prompt: None,
             pending: None,
             observer: None,
+            file_dialogs: None,
+            file_request: None,
+            dialog_fs: None,
             output,
             output_lines: Vec::new(),
             error_list,
@@ -1129,8 +1145,8 @@ impl IdeApp {
                 }
             }
             Command::OpenProject => {
-                if let Some(file) = dialogs::open_project_file() {
-                    self.open_replacing(dialogs::containing_folder(&file), ui);
+                if let Asked::Now(Some(file)) = self.ask_file(FileRequest::OpenProject, ui) {
+                    self.file_chosen(FileRequest::OpenProject, file, ui);
                 }
             }
             Command::OpenRecent(index) => {
@@ -1307,13 +1323,11 @@ impl IdeApp {
     /// `<Project>`.exe…): saves, runs the same whole-project check as a run and
     /// refuses on any problem, then asks where to write the file and exports.
     fn make_exe(&mut self, ui: &mut Ui<Msg>) {
-        let Some((dir, name, project_file)) = self.session.as_ref().map(|session| {
-            (
-                session.dir().to_path_buf(),
-                session.name().to_owned(),
-                session.project_file(),
-            )
-        }) else {
+        let Some((dir, name)) = self
+            .session
+            .as_ref()
+            .map(|session| (session.dir().to_path_buf(), session.name().to_owned()))
+        else {
             self.log(ui, "Open a project before making an executable.");
             return;
         };
@@ -1328,15 +1342,27 @@ impl IdeApp {
         if !self.check_for_run(&dir, "the executable was not made", ui) {
             return;
         }
+        if let Err(error) = run::resolve_player(self.settings.player_path.as_deref()) {
+            self.log(ui, error.to_string());
+            return;
+        }
+        let request = FileRequest::MakeExe(make_exe::suggested_file_name(&name));
+        if let Asked::Now(Some(output)) = self.ask_file(request.clone(), ui) {
+            self.file_chosen(request, output, ui);
+        }
+    }
+
+    /// Exports the (already saved and checked) project to `output`.
+    fn write_exe(&mut self, output: PathBuf, ui: &mut Ui<Msg>) {
+        let Some(project_file) = self.session.as_ref().map(ProjectSession::project_file) else {
+            return;
+        };
         let stub = match run::resolve_player(self.settings.player_path.as_deref()) {
             Ok(stub) => stub,
             Err(error) => {
                 self.log(ui, error.to_string());
                 return;
             }
-        };
-        let Some(output) = dialogs::save_exe_file(&make_exe::suggested_file_name(&name)) else {
-            return;
         };
         match make_exe::export_project(&project_file, &stub, &output) {
             Ok(report) => self.log(
@@ -1506,9 +1532,18 @@ impl IdeApp {
 
     /// Prompts for a folder and creates a new "Standard EXE" project.
     fn new_project(&mut self, name: &str, ui: &mut Ui<Msg>) {
-        let Some(dir) = dialogs::choose_folder("Choose a folder for the project") else {
+        let request = FileRequest::NewProject(name.to_owned());
+        if let Asked::Now(Some(dir)) = self.ask_file(request.clone(), ui) {
+            self.file_chosen(request, dir, ui);
+        }
+    }
+
+    /// Creates the project `name` in `dir` (made when missing) and opens it.
+    fn create_project(&mut self, name: &str, dir: PathBuf, ui: &mut Ui<Msg>) {
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.log(ui, format!("The project could not be created: {error}"));
             return;
-        };
+        }
         match ProjectSession::create(name, &dir) {
             Ok(session) => self.adopt_project(session, ui),
             Err(error) => self.log(ui, format!("The project could not be created: {error}")),
@@ -1521,10 +1556,67 @@ impl IdeApp {
         self.open_replacing(dir.to_path_buf(), ui);
     }
 
+    /// Makes the IDE ask for files with the in-window dialog over `fs`, starting
+    /// in `start_dir`, instead of the platform's blocking dialogs.
+    pub fn set_file_system(
+        &mut self,
+        fs: Rc<dyn xui_core::widget::FileSystem>,
+        start_dir: PathBuf,
+    ) {
+        self.dialog_fs = Some((fs, start_dir));
+        self.file_dialogs = None;
+    }
+
+    /// Whether an in-window file dialog is showing.
+    pub fn file_dialog_open(&self) -> bool {
+        self.file_dialogs
+            .as_ref()
+            .is_some_and(InWindowDialogs::is_open)
+    }
+
     /// Replaces how the player is started (LazyOS installs a launcher that polls
     /// its pipes on the window timer instead of using reader threads).
     pub fn set_launcher(&mut self, launcher: Rc<dyn run::Launcher>) {
         self.launcher = launcher;
+    }
+
+    /// Asks for a file for `request`: through the blocking OS dialog (answered
+    /// now) or, when the platform offers a filesystem, through the in-window
+    /// dialog (answered later by [`Msg::FileChosen`]).
+    fn ask_file(&mut self, request: FileRequest, ui: &mut Ui<Msg>) -> Asked {
+        let platform = lazyrad_runtime::platform::current();
+        let source = self.dialog_fs.clone().or_else(|| {
+            platform
+                .file_system()
+                .map(|fs| (fs, platform.projects_dir()))
+        });
+        if let Some((fs, start_dir)) = source {
+            if self.file_dialogs.is_none() {
+                match InWindowDialogs::new(ui, fs, start_dir) {
+                    Ok(dialogs) => self.file_dialogs = Some(dialogs),
+                    Err(error) => {
+                        self.log(ui, format!("The file dialog could not be built: {error}"));
+                        return Asked::Now(None);
+                    }
+                }
+            }
+            if let Some(dialogs) = &self.file_dialogs {
+                dialogs.show(&request);
+                self.file_request = Some(request);
+                return Asked::Later;
+            }
+        }
+        Asked::Now(file_dialogs::ask_blocking(&request))
+    }
+
+    /// Continues what `request` was asking a file for, now that it has `path`.
+    fn file_chosen(&mut self, request: FileRequest, path: PathBuf, ui: &mut Ui<Msg>) {
+        match request {
+            FileRequest::OpenProject => self.open_replacing(dialogs::containing_folder(&path), ui),
+            FileRequest::NewProject(name) => self.create_project(&name, path, ui),
+            FileRequest::SaveProjectAs(_) => self.write_project_as(path, ui),
+            FileRequest::MakeExe(_) => self.write_exe(path, ui),
+        }
     }
 
     /// Installs the observer told about [`IdeEvent`]s.
@@ -1656,10 +1748,14 @@ impl IdeApp {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let file_name = session.project().file_name();
-        let Some(file) = dialogs::save_project_file(&file_name) else {
-            return;
-        };
+        let request = FileRequest::SaveProjectAs(session.project().file_name());
+        if let Asked::Now(Some(file)) = self.ask_file(request.clone(), ui) {
+            self.file_chosen(request, file, ui);
+        }
+    }
+
+    /// Saves the project (already synced) to the chosen `.lrp` `file`.
+    fn write_project_as(&mut self, file: PathBuf, ui: &mut Ui<Msg>) {
         let result = self
             .session
             .as_mut()
@@ -3177,6 +3273,12 @@ impl App for IdeApp {
                 self.open_default_handler(&form, &target, ui);
             }
             Msg::Run(run, event) => self.on_run_event(run, event, ui),
+            Msg::FileChosen(path) => {
+                if let Some(request) = self.file_request.take() {
+                    self.file_chosen(request, path, ui);
+                }
+            }
+            Msg::FileCancelled => self.file_request = None,
         }
     }
 }
@@ -3717,6 +3819,109 @@ mod tests {
         let player = dir.join("lazyrad-player-stub");
         std::fs::write(&player, b"stub").expect("write the stub");
         player
+    }
+
+    #[test]
+    fn open_project_asks_in_window_and_continues_when_answered() {
+        let dir = run_scratch("inwindow");
+        let session = ProjectSession::create("Picked", &dir).expect("create a project to pick");
+        drop(session);
+        let lrp = dir.join("Picked.lrp");
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        let start = dir.clone();
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            app.set_file_system(Rc::new(xui_core::widget::StdFileSystem), start.clone());
+            assert!(!app.file_dialog_open());
+
+            // Open Project does not block: it opens the dialog and waits.
+            app.update(Msg::Command(Command::OpenProject), ui);
+            assert!(app.file_dialog_open(), "the in-window dialog is showing");
+            assert_eq!(app.file_request, Some(FileRequest::OpenProject));
+            assert!(app.session.is_none(), "nothing opened yet");
+
+            // Cancelling forgets the question and opens nothing.
+            app.update(Msg::FileCancelled, ui);
+            assert_eq!(app.file_request, None);
+            assert!(app.session.is_none());
+
+            // Answering continues the same code the blocking dialog would.
+            app.update(Msg::Command(Command::OpenProject), ui);
+            app.update(Msg::FileChosen(lrp.clone()), ui);
+            assert_eq!(app.file_request, None);
+            let opened = app.session.as_ref().map(|s| s.name().to_owned());
+            assert_eq!(opened.as_deref(), Some("Picked"));
+
+            // A stray answer with no pending question is ignored.
+            app.update(Msg::FileChosen(lrp.clone()), ui);
+            ui.quit();
+            app
+        })
+        .expect("the window runs");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Typing a path into the in-window Open dialog, one character at a time,
+    /// must never panic (a double borrow inside xui's list view did on LazyOS).
+    #[test]
+    fn typing_a_path_into_the_in_window_dialog_is_safe() {
+        let dir = run_scratch("inwindow-typing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = ProjectSession::create("Typed", &dir).expect("create");
+        drop(session);
+        let typed = format!("{}/Typed.lrp", dir.display());
+        let backend = Rc::new(OffscreenBackend::new());
+        let injector = Rc::clone(&backend);
+        let start = dir.clone();
+        run_app(
+            backend as Rc<dyn Backend>,
+            default_platform_spec(),
+            move |ui| {
+                let mut app =
+                    IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+                app.set_file_system(Rc::new(xui_core::widget::StdFileSystem), start.clone());
+                app.update(Msg::Command(Command::OpenProject), ui);
+                for c in typed.chars() {
+                    let _ = injector.inject(ui.window(), Event::Char(c));
+                }
+                app
+            },
+        )
+        .expect("typing into the dialog does not panic");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_project_in_window_creates_the_chosen_folder() {
+        let dir = run_scratch("inwindow-new");
+        let target = dir.join("fresh").join("project");
+        let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+        let start = dir.clone();
+        let chosen = target.clone();
+        run_app(backend, default_platform_spec(), move |ui| {
+            let mut app =
+                IdeApp::build(ui, Settings::default(), Vec::new()).expect("the IDE builds");
+            app.set_file_system(Rc::new(xui_core::widget::StdFileSystem), start.clone());
+            app.new_project("Fresh", ui);
+            assert_eq!(
+                app.file_request,
+                Some(FileRequest::NewProject("Fresh".into()))
+            );
+            app.update(Msg::FileChosen(chosen.clone()), ui);
+            assert!(
+                chosen.join("Fresh.lrp").is_file(),
+                "the folder and project were made"
+            );
+            assert_eq!(
+                app.session.as_ref().map(|s| s.name().to_owned()).as_deref(),
+                Some("Fresh")
+            );
+            ui.quit();
+            app
+        })
+        .expect("the window runs");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

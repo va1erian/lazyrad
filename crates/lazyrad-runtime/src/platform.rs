@@ -80,6 +80,19 @@ pub trait Platform: Send + Sync {
         &HeadlessDialogs
     }
 
+    /// A filesystem to browse with xui's painted, in-window file dialog, for a
+    /// platform with no blocking native dialogs (LazyOS). When `Some`, the IDE
+    /// opens its own dialog on that filesystem and continues when the user
+    /// answers, instead of calling [`Dialogs`] (which would have to block).
+    fn file_system(&self) -> Option<std::rc::Rc<dyn xui_core::widget::FileSystem>> {
+        None
+    }
+
+    /// Where the in-window file dialog starts, and where new projects go.
+    fn projects_dir(&self) -> PathBuf {
+        PathBuf::from("/")
+    }
+
     /// The per-user directory for LazyRAD settings, if the platform has one.
     fn config_dir(&self) -> Option<PathBuf> {
         None
@@ -164,6 +177,10 @@ mod tests {
         assert_eq!(platform.config_dir(), None);
         assert!(!platform.default_monospace_font().is_empty());
         assert!(!platform.prefers_dark());
+        assert!(
+            platform.file_system().is_none(),
+            "no in-window dialogs by default"
+        );
         assert!(matches!(platform.fs_policy(), FsPolicy::Unrestricted));
     }
 

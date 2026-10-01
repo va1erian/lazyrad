@@ -22,6 +22,7 @@ pub mod compile;
 pub mod dialog;
 pub mod edit_state;
 pub mod explorer;
+pub mod file_dialogs;
 pub mod make_exe;
 pub mod platform;
 pub mod procedures;
