@@ -1580,31 +1580,37 @@ impl IdeApp {
         self.launcher = launcher;
     }
 
-    /// Asks for a file for `request`: through the blocking OS dialog (answered
-    /// now) or, when the platform offers a filesystem, through the in-window
-    /// dialog (answered later by [`Msg::FileChosen`]).
-    fn ask_file(&mut self, request: FileRequest, ui: &mut Ui<Msg>) -> Asked {
+    /// Builds the in-window file dialogs when the platform (or an embedder) offers
+    /// a filesystem for them. The embedder calls this once at start-up, so the
+    /// dialog widgets exist before the first event rather than being created in
+    /// the middle of one.
+    pub fn prepare_file_dialogs(&mut self, ui: &mut Ui<Msg>) {
         let platform = lazyrad_runtime::platform::current();
         let source = self.dialog_fs.clone().or_else(|| {
             platform
                 .file_system()
                 .map(|fs| (fs, platform.projects_dir()))
         });
-        if let Some((fs, start_dir)) = source {
-            if self.file_dialogs.is_none() {
-                match InWindowDialogs::new(ui, fs, start_dir) {
-                    Ok(dialogs) => self.file_dialogs = Some(dialogs),
-                    Err(error) => {
-                        self.log(ui, format!("The file dialog could not be built: {error}"));
-                        return Asked::Now(None);
-                    }
-                }
-            }
-            if let Some(dialogs) = &self.file_dialogs {
-                dialogs.show(&request);
-                self.file_request = Some(request);
-                return Asked::Later;
-            }
+        let Some((fs, start_dir)) = source else {
+            return;
+        };
+        match InWindowDialogs::new(ui, fs, start_dir) {
+            Ok(dialogs) => self.file_dialogs = Some(dialogs),
+            Err(error) => self.log(ui, format!("The file dialog could not be built: {error}")),
+        }
+    }
+
+    /// Asks for a file for `request`: through the blocking OS dialog (answered
+    /// now) or, when the platform offers a filesystem, through the in-window
+    /// dialog (answered later by [`Msg::FileChosen`]).
+    fn ask_file(&mut self, request: FileRequest, ui: &mut Ui<Msg>) -> Asked {
+        if self.file_dialogs.is_none() {
+            self.prepare_file_dialogs(ui);
+        }
+        if let Some(dialogs) = &self.file_dialogs {
+            dialogs.show(&request);
+            self.file_request = Some(request);
+            return Asked::Later;
         }
         Asked::Now(file_dialogs::ask_blocking(&request))
     }
