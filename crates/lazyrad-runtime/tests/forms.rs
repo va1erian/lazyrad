@@ -432,3 +432,37 @@ fn form_state_keeps_a_counter_between_two_clicks() {
         Some(Value::Text("Clicked 2 times".to_owned()))
     );
 }
+
+#[test]
+fn a_form_script_can_call_a_host_extension() {
+    // The LazyOS player registers its `msg` module this way; a plain function
+    // stands in for it here.
+    lazyrad_runtime::extensions::clear();
+    lazyrad_runtime::extensions::add(|engine| {
+        engine.register_fn("host_greeting", |name: &str| {
+            format!("hi {name} from the host")
+        });
+    });
+
+    let mut doc = FormDoc::new("main_form");
+    let mut label = Node::new("Label", "result_label");
+    label.set_prop("left", Value::Int(10));
+    label.set_prop("top", Value::Int(10));
+    label.set_prop("width", Value::Int(200));
+    doc.insert(label);
+    let runtime = FormRuntime::from_sources(
+        vec![FormSource::new(
+            "main_form",
+            doc,
+            "fn form_load() { result_label.text = host_greeting(\"form\"); }",
+        )],
+        Vec::new(),
+    );
+
+    let form = capture_form(runtime, "main_form");
+    lazyrad_runtime::extensions::clear();
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("hi form from the host".to_owned()))
+    );
+}
