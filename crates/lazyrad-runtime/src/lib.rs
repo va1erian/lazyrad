@@ -20,7 +20,7 @@
 pub mod check;
 pub mod engine;
 pub mod form;
-pub mod fs_policy_stub;
+pub mod fs_policy;
 pub mod platform;
 pub mod shell;
 pub mod stdlib;
@@ -33,7 +33,7 @@ pub use form::{
 };
 #[cfg(feature = "desktop")]
 pub use form::{run_project, run_runtime};
-pub use fs_policy_stub::{Access, FsError, FsPolicy, Sandbox};
+pub use fs_policy::{Access, FsError, FsPolicy, Sandbox};
 pub use stdlib::StdlibContext;
 pub use xui_rhai::message::{MsgBoxButtons, Pending};
 pub use xui_rhai::{FormHost, ScriptError};

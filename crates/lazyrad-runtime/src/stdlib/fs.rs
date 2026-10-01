@@ -21,7 +21,7 @@ use std::rc::Rc;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
 
 use super::script_error;
-use crate::fs_policy_stub::{Access, FsPolicy};
+use crate::fs_policy::{Access, FsPolicy};
 
 /// A script-visible result.
 type ScriptResult<T> = Result<T, Box<EvalAltResult>>;
@@ -133,7 +133,7 @@ mod tests {
     use rhai::Engine;
 
     use super::*;
-    use crate::fs_policy_stub::Sandbox;
+    use crate::fs_policy::Sandbox;
 
     fn engine(policy: FsPolicy) -> Engine {
         let mut engine = Engine::new();
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn a_sandboxed_script_round_trips_inside_its_root() {
         let root = scratch("rt");
-        let engine = engine(FsPolicy::Sandboxed(Sandbox::new(&root)));
+        let engine = engine(FsPolicy::Sandboxed(Sandbox::new(root.clone())));
         let out: String = engine
             .eval(
                 r#"
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn a_sandboxed_script_cannot_leave_its_root() {
         let root = scratch("esc");
-        let engine = engine(FsPolicy::Sandboxed(Sandbox::new(&root)));
+        let engine = engine(FsPolicy::Sandboxed(Sandbox::new(root.clone())));
         for code in [
             r#"file_read_text("../x")"#,
             r#"file_write_text("/etc/lazyrad-test", "x")"#,
@@ -182,7 +182,7 @@ mod tests {
             let error = engine.eval::<Dynamic>(code).expect_err(code);
             let text = error.to_string();
             assert!(
-                text.contains("not allowed") || text.contains("not a valid path"),
+                text.contains("access denied") || text.contains("invalid"),
                 "{code}: {text}"
             );
         }

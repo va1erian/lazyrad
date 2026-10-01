@@ -38,7 +38,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Position};
 use time::OffsetDateTime;
 
-use crate::fs_policy_stub::FsPolicy;
+use crate::fs_policy::FsPolicy;
 use xui_rhai::EngineHost;
 use xui_rhai::message::{Msg, MsgBoxButtons, Pending};
 

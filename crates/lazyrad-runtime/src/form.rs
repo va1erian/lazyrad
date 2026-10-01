@@ -55,7 +55,7 @@ use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
-use crate::fs_policy_stub::FsPolicy;
+use crate::fs_policy::FsPolicy;
 use crate::platform;
 use crate::stdlib::StdlibContext;
 use xui_rhai::form::{FormError, ScriptForm, ScriptSource};

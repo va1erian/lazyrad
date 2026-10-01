@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::fs_policy_stub::FsPolicy;
+use crate::fs_policy::FsPolicy;
 
 /// `(description, extensions)` of a file name filter.
 pub type Filter<'a> = (&'a str, &'a [&'a str]);
