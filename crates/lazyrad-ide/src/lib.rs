@@ -23,6 +23,7 @@ pub mod dialog;
 pub mod edit_state;
 pub mod explorer;
 pub mod file_dialogs;
+pub mod make_app;
 pub mod make_exe;
 pub mod platform;
 pub mod procedures;
@@ -69,6 +70,8 @@ pub fn run_with_backend(inner: Rc<dyn Backend>) -> Result<(), Box<dyn Error>> {
             open: None,
             observer: None,
             launcher: None,
+            installer: None,
+            author: String::new(),
         },
     )
 }
@@ -86,6 +89,11 @@ pub struct RunOptions {
     pub observer: Option<IdeObserver>,
     /// How the player is started, or `None` for the threaded default.
     pub launcher: Option<Rc<dyn run::Launcher>>,
+    /// The package installer, or `None`. With one, File shows
+    /// "Make LazyOS App…".
+    pub installer: Option<Rc<dyn lazyrad_packager::lzp::Installer>>,
+    /// Who the made apps say they are by; empty uses the environment's user.
+    pub author: String,
 }
 
 /// Like [`run_with_backend`] with explicit [`RunOptions`].
@@ -95,6 +103,8 @@ pub fn run_with_options(inner: Rc<dyn Backend>, options: RunOptions) -> Result<(
         open,
         observer,
         launcher,
+        installer,
+        author,
     } = options;
     let settings = Settings::load().unwrap_or_else(|error| {
         eprintln!("lazyrad-ide: {error}; using defaults");
@@ -123,6 +133,9 @@ pub fn run_with_options(inner: Rc<dyn Backend>, options: RunOptions) -> Result<(
         }
         if let Some(launcher) = launcher {
             app.set_launcher(launcher);
+        }
+        if let Some(installer) = installer {
+            app.set_installer(installer, &author, ui);
         }
         if let Some(dir) = open {
             app.open_dir(dir, ui);
