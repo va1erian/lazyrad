@@ -76,7 +76,7 @@ jobs:
           -p lazyrad-project -p lazyrad-packager -p xui-form -p xui-rhai
       - name: No windowing crates in the player graph
         run: |
-          tree=$(cargo tree --target x86_64-unknown-linux-musl --no-default-features \
+          tree=$(cargo tree --color never --target x86_64-unknown-linux-musl --no-default-features \
             -p lazyrad-player -p lazyrad-ide -e normal --prefix none)
           if echo "$tree" | grep -E '^(winit|softbuffer|glutin|glow|arboard|xui-gpu|rfd|directories|dark-light) '; then
             echo "a desktop-only crate leaked into the musl graph" >&2
@@ -84,7 +84,7 @@ jobs:
           fi
       - name: One Rhai, pinned
         run: |
-          versions=$(cargo tree -p lazyrad-player --no-default-features -e normal --prefix none | grep -E '^rhai ' | sed 's/ (\*)$//' | sort -u)
+          versions=$(cargo tree --color never -p lazyrad-player --no-default-features -e normal --prefix none | grep -E '^rhai ' | sed 's/ (\*)$//' | sort -u)
           echo "$versions"
           test "$(echo "$versions" | wc -l)" -eq 1
           echo "$versions" | grep -q 'rhai v1.26.1'

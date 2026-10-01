@@ -78,7 +78,8 @@ impl StdlibContext {
 ///
 /// This is the single place the stdlib is installed: the [`EngineSetup`] impl
 /// for [`StdlibContext`] calls it, so every engine (the player's, the designer
-/// preview's, the syntax checker's) sees the same functions and globals.
+/// preview's, the syntax checker's) sees the same functions and globals,
+/// followed by the host's [`crate::extensions`].
 ///
 /// [`EngineSetup`]: xui_rhai::EngineSetup
 pub fn register(host: &mut EngineHost, context: &StdlibContext) {
@@ -90,6 +91,7 @@ pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     register_app(engine);
     register_msg_box(engine, context);
     fs::register(engine, &context.fs);
+    crate::extensions::apply(engine);
     host.set_global("app", Dynamic::from(app_object(context)));
 }
 

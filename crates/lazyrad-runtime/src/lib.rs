@@ -13,12 +13,14 @@
 //! [`form`] loads a project's forms, builds them and wires `Control_Event`
 //! handlers, [`stdlib`] is the Iteration 1 standard library, [`check`] collects
 //! the problems that would stop a project from starting, and [`shell`] opens
-//! the toolkit window the player and IDE share. The Rhai engine host, the
+//! the toolkit window the player and IDE share. [`extensions`] lets a host
+//! add its own script functions to every engine (the LazyOS player's `msg`). The Rhai engine host, the
 //! control and form Rhai types, value conversion and error locating live in
 //! [`xui_rhai`] and are re-exported here so LazyRAD's callers see one crate.
 
 pub mod check;
 pub mod engine;
+pub mod extensions;
 pub mod form;
 pub mod fs_policy;
 pub mod platform;
