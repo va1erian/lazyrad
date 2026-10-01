@@ -1,19 +1,18 @@
 #![forbid(unsafe_code)]
 
-//! Where the IDE keeps per-user data, and the default monospace font.
+//! Where the IDE keeps per-user data, and the default monospace font, as the
+//! installed platform reports them.
 
 use std::path::{Path, PathBuf};
 
-/// The config directory's application name.
-const APP: &str = "LazyRAD";
+use lazyrad_runtime::platform;
 
 /// The per-user configuration directory for the IDE.
 ///
-/// `None` when the platform reports none (an unusual environment); the IDE
-/// then runs with in-memory settings.
+/// `None` when the platform reports none (an unusual environment, or no
+/// platform installed); the IDE then runs with in-memory settings.
 pub fn config_dir() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", APP)?;
-    Some(dirs.config_dir().to_path_buf())
+    platform::current().config_dir()
 }
 
 /// The settings file inside `dir`, or `None` when there is no directory.
@@ -26,19 +25,10 @@ pub fn settings_file() -> Option<PathBuf> {
     settings_file_in(config_dir().as_deref())
 }
 
-/// The portable fallback font family.
-const PORTABLE_MONOSPACE_FONT: &str = "DejaVu Sans Mono";
-
-/// The monospace family a platform ships with: Consolas on Windows, Menlo on
-/// macOS and DejaVu Sans Mono elsewhere (and on any new platform).
+/// The monospace family the platform ships with (Consolas on Windows, Menlo on
+/// macOS, DejaVu Sans Mono elsewhere and on any new platform).
 pub fn default_monospace_font() -> &'static str {
-    if cfg!(windows) {
-        "Consolas"
-    } else if cfg!(target_os = "macos") {
-        "Menlo"
-    } else {
-        PORTABLE_MONOSPACE_FONT
-    }
+    platform::current().default_monospace_font()
 }
 
 #[cfg(test)]

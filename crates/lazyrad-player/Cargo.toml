@@ -10,12 +10,16 @@ repository.workspace = true
 [[bin]]
 name = "lazyrad-player"
 path = "src/main.rs"
+required-features = ["desktop"]
 
 [lints]
 workspace = true
 
 [features]
-default = ["native-dialogs"]
+default = ["desktop", "native-dialogs"]
+# The desktop `winit` window backend ([`run_cli`]) and the local time zone. LazyOS
+# turns it off and calls `run_with_backend` with its own backend.
+desktop = ["lazyrad-runtime/desktop", "dep:xui-canvas"]
 # The native message box for an exported app that cannot start (`rfd`).
 # Without it the platform seam falls back to stderr.
 native-dialogs = ["dep:rfd"]
@@ -26,11 +30,12 @@ lazyrad-project.workspace = true
 lazyrad-runtime.workspace = true
 rfd = { workspace = true, optional = true }
 serde_json.workspace = true
+xui-canvas = { workspace = true, optional = true }
+xui-core.workspace = true
 
 [dev-dependencies]
 editpe = { version = "0.2", default-features = false, features = ["std"] }
 xui-canvas.workspace = true
-xui-core.workspace = true
 
 [target."cfg(windows)".build-dependencies]
 embed-resource = "3.0.11"

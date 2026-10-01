@@ -10,6 +10,17 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["desktop", "metadata"]
+# Everything that needs a desktop OS: the `winit` window backend (`run_project`,
+# `run_runtime`, `run_empty_window`) and the local time zone offset. A LazyOS
+# (musl, no windowing) build turns it off and passes its own backend to the
+# `*_with` entry points; `xui-canvas` then links only the software painter.
+desktop = ["xui-canvas/winit-backend", "time/local-offset"]
+# Rhai function metadata (parameter names, doc comments) for the IDE's
+# completion and signature help. The LazyOS player leaves it off.
+metadata = ["rhai/metadata"]
+
 [dependencies]
 lazyrad-project.workspace = true
 rhai.workspace = true
@@ -19,3 +30,4 @@ xui-canvas.workspace = true
 xui-core.workspace = true
 xui-form.workspace = true
 xui-rhai.workspace = true
+

@@ -434,6 +434,38 @@ fn form_state_keeps_a_counter_between_two_clicks() {
 }
 
 #[test]
+fn the_handler_observer_hears_each_successful_handler_once() {
+    let runtime = FormRuntime::load(sample_dir()).expect("the sample project loads");
+    let heard: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&heard);
+    runtime.set_handler_observer(Rc::new(move |form, control, event| {
+        sink.borrow_mut().push(format!("{form}.{control}.{event}"));
+    }));
+    let backend = Rc::new(OffscreenBackend::new());
+    let backend_for_click = Rc::clone(&backend);
+
+    run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+        let app = runtime
+            .build_app(ui, "main_form")
+            .expect("main_form builds");
+        let form = app.root_form().expect("the form is live").clone();
+        click(&backend_for_click, ui, &form, "hello_button");
+        app
+    })
+    .expect("the event loop runs");
+
+    let heard = heard.borrow();
+    assert_eq!(
+        heard
+            .iter()
+            .filter(|e| e.ends_with("hello_button.Click"))
+            .count(),
+        1,
+        "heard: {heard:?}"
+    );
+}
+
+#[test]
 fn a_form_script_can_call_a_host_extension() {
     // The LazyOS player registers its `msg` module this way; a plain function
     // stands in for it here.

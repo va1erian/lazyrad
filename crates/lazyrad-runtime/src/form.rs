@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use rhai::{Dynamic, FnPtr};
+#[cfg(feature = "desktop")]
 use xui_canvas::WinitBackend;
 use xui_core::app::{App, Ui, WindowHandle, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
@@ -54,6 +55,8 @@ use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
+use crate::fs_policy::FsPolicy;
+use crate::platform;
 use crate::stdlib::StdlibContext;
 use xui_rhai::form::{FormError, ScriptForm, ScriptSource};
 use xui_rhai::message::Pending;
@@ -166,9 +169,35 @@ pub struct FormRuntime {
     /// Each built form's window, so a message addressed to a form (a message
     /// box and its result) reaches that window whichever window flushes it.
     inboxes: RefCell<BTreeMap<String, Ui<Msg>>>,
+    /// Which paths scripts may touch, fixed when the runtime is built from
+    /// the installed platform's policy.
+    fs: Rc<FsPolicy>,
+    /// Told after every event handler that ran without error.
+    observer: RefCell<Option<HandlerObserver>>,
 }
 
+/// A callback told `(form, control, event)` after an event handler ran without
+/// error. The LazyOS player uses it to print its `LRPLAY:EVENT:PASS` serial
+/// marker; any host can use it for telemetry or tests.
+pub type HandlerObserver = Rc<dyn Fn(&str, &str, &str)>;
+
 impl FormRuntime {
+    /// Installs the observer told after each successful event handler,
+    /// replacing any earlier one.
+    pub fn set_handler_observer(&self, observer: HandlerObserver) {
+        *self.observer.borrow_mut() = Some(observer);
+    }
+
+    /// Tells the observer, if any, that a handler ran.
+    fn notify_handler(&self, form: &str, control: &str, event: &str) {
+        // Cloned out so an observer that re-enters the runtime cannot hit a
+        // held borrow.
+        let observer = self.observer.borrow().clone();
+        if let Some(observer) = observer {
+            observer(form, control, event);
+        }
+    }
+
     /// Loads the project in `dir`: its `.lrp`, every form's `.lfm` and `.rhai`,
     /// and every standard module.
     pub fn load(dir: impl AsRef<Path>) -> Result<Rc<FormRuntime>, RuntimeError> {
@@ -246,6 +275,8 @@ impl FormRuntime {
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
             inboxes: RefCell::new(BTreeMap::new()),
+            fs: Rc::new(platform::current().fs_policy()),
+            observer: RefCell::new(None),
         }))
     }
 
@@ -268,6 +299,8 @@ impl FormRuntime {
             opened: RefCell::new(BTreeSet::new()),
             windows: RefCell::new(BTreeMap::new()),
             inboxes: RefCell::new(BTreeMap::new()),
+            fs: Rc::new(platform::current().fs_policy()),
+            observer: RefCell::new(None),
         })
     }
 
@@ -389,6 +422,7 @@ impl FormInstance {
             pending: Rc::clone(&runtime.pending),
             app_title: runtime.project().name.clone(),
             app_path: runtime.path().display().to_string(),
+            fs: Rc::clone(&runtime.fs),
         };
         let runtime_for_setup = Rc::clone(runtime);
         let script = ScriptForm::build(
@@ -612,10 +646,11 @@ impl App for FormApp {
                 event,
                 args,
             } => {
-                if form.as_str() == root.name()
-                    && let Err(error) = root.run(&control, &event, &args)
-                {
-                    self.report_handler_error(ui, root.name(), error);
+                if form.as_str() == root.name() {
+                    match root.run(&control, &event, &args) {
+                        Ok(()) => self.runtime.notify_handler(root.name(), &control, &event),
+                        Err(error) => self.report_handler_error(ui, root.name(), error),
+                    }
                 }
                 self.flush(ui);
             }
@@ -746,6 +781,7 @@ pub(crate) fn open_project(path: &Path) -> Result<(PathBuf, Project), RuntimeErr
 }
 
 /// Runs the project in `dir` on the portable `winit` backend.
+#[cfg(feature = "desktop")]
 pub fn run_project(dir: impl AsRef<Path>) -> Result<(), RuntimeError> {
     let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
     run_project_with(backend, dir)
@@ -764,6 +800,7 @@ pub fn run_project_with(
 }
 
 /// Runs an already-loaded project on the portable `winit` backend.
+#[cfg(feature = "desktop")]
 pub fn run_runtime(runtime: Rc<FormRuntime>) -> Result<(), RuntimeError> {
     let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
     run_runtime_with(backend, runtime)

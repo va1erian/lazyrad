@@ -38,9 +38,11 @@ pub mod platform;
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;
+use std::rc::Rc;
 
 use lazyrad_project::Diagnostic;
-use lazyrad_runtime::{FormRuntime, RuntimeError, ScriptError, check_project, run_runtime};
+use lazyrad_runtime::{FormRuntime, RuntimeError, ScriptError, check_project, run_runtime_with};
+use xui_core::backend::{Backend, BackendError};
 
 /// The exit code for a normal run.
 pub const EXIT_OK: i32 = 0;
@@ -49,16 +51,44 @@ pub const EXIT_COMPILE: i32 = 1;
 /// The exit code for a fatal runtime error.
 pub const EXIT_RUNTIME: i32 = 2;
 
-/// Reads the command line and runs the program, returning the process exit code.
+/// A way to open the player's window: creates the xui [`Backend`] once the
+/// project has been checked. Failing to create it (no display server to talk
+/// to) is reported as a fatal runtime problem rather than a panic.
+///
+/// The factory is handed the loaded runtime (`None` for the empty-window shell)
+/// so a host can attach to it before the window opens, for example with
+/// [`FormRuntime::set_handler_observer`].
+///
+/// This is the seam that keeps the player platform-neutral: the desktop binary
+/// passes the `winit` backend ([`run_cli`]), LazyOS passes
+/// `LazyOSBackend::connect` (issue: LazyRAD on LazyOS, plan P1).
+pub type BackendFactory<'a> =
+    &'a mut dyn FnMut(Option<&Rc<FormRuntime>>) -> Result<Rc<dyn Backend>, String>;
+
+/// Reads the command line and runs the program on the desktop `winit` backend,
+/// returning the process exit code.
 ///
 /// `lazyrad-player <project dir | .lrp>` runs a project; with no argument the
 /// player opens an empty window, which is the shell M0 used to prove the
 /// windowed path works.
+#[cfg(feature = "desktop")]
 pub fn run_cli() -> i32 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    run_with_backend(&args, &mut |_runtime| {
+        Ok(Rc::new(xui_canvas::WinitBackend::new()) as Rc<dyn Backend>)
+    })
+}
+
+/// Runs the player with `args` (the command line without the program name) on
+/// the backend `make_backend` creates, returning the process exit code.
+///
+/// The exit codes, diagnostics and exported-app behaviour are exactly those of
+/// [`run_cli`]; only the window system differs.
+pub fn run_with_backend(args: &[String], make_backend: BackendFactory<'_>) -> i32 {
     // An exported app carries its project; it ignores the command line.
     if let Ok(exe) = std::env::current_exe() {
         match embedded::load_from_exe(&exe) {
-            Ok(Some(runtime)) => return run_embedded(runtime),
+            Ok(Some(runtime)) => return run_embedded(runtime, make_backend),
             Ok(None) => {}
             Err(reports) => {
                 emit(&reports);
@@ -67,10 +97,9 @@ pub fn run_cli() -> i32 {
             }
         }
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [] => run_empty_window(),
-        [path] => run_project(Path::new(path)),
+    match args {
+        [] => run_empty_window(make_backend),
+        [path] => run_project(Path::new(path), make_backend),
         _ => {
             eprintln!("usage: lazyrad-player <project dir | .lrp>");
             EXIT_COMPILE
@@ -80,8 +109,8 @@ pub fn run_cli() -> i32 {
 
 /// Runs the project an exported executable carries. A failure is shown in a
 /// message box too, since the exported app usually has no console.
-fn run_embedded(runtime: std::rc::Rc<FormRuntime>) -> i32 {
-    match run_runtime(runtime) {
+fn run_embedded(runtime: Rc<FormRuntime>, make_backend: BackendFactory<'_>) -> i32 {
+    match run_on(runtime, make_backend) {
         Ok(()) => EXIT_OK,
         Err(error) => {
             let reports = [Report::from_runtime_error(&error)];
@@ -92,10 +121,25 @@ fn run_embedded(runtime: std::rc::Rc<FormRuntime>) -> i32 {
     }
 }
 
+/// A backend that could not be created, as a runtime error.
+fn backend_error(message: String) -> RuntimeError {
+    RuntimeError::Backend(BackendError::Other(message))
+}
+
+/// Creates the backend and runs `runtime`'s startup form on it.
+fn run_on(runtime: Rc<FormRuntime>, make_backend: BackendFactory<'_>) -> Result<(), RuntimeError> {
+    let backend = make_backend(Some(&runtime)).map_err(backend_error)?;
+    run_runtime_with(backend, runtime)
+}
+
 /// Opens the empty-window shell (no project was named).
-fn run_empty_window() -> i32 {
-    let result =
-        lazyrad_runtime::shell::run_empty_window("LazyRAD Player").map_err(RuntimeError::from);
+fn run_empty_window(make_backend: BackendFactory<'_>) -> i32 {
+    let result = make_backend(None)
+        .map_err(backend_error)
+        .and_then(|backend| {
+            lazyrad_runtime::shell::run_empty_window_with(backend, "LazyRAD Player")
+                .map_err(RuntimeError::from)
+        });
     match result {
         Ok(()) => EXIT_OK,
         Err(error) => {
@@ -106,7 +150,7 @@ fn run_empty_window() -> i32 {
 }
 
 /// Checks, loads and runs the project named by `path`.
-fn run_project(path: &Path) -> i32 {
+fn run_project(path: &Path, make_backend: BackendFactory<'_>) -> i32 {
     let report = match check_project(path) {
         Ok(report) => report,
         Err(error) => {
@@ -134,7 +178,7 @@ fn run_project(path: &Path) -> i32 {
         }
     };
 
-    match run_runtime(runtime) {
+    match run_on(runtime, make_backend) {
         Ok(()) => EXIT_OK,
         Err(error) => {
             emit(&[Report::from_runtime_error(&error)]);

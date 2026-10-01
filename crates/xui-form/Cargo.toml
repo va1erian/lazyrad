@@ -17,5 +17,6 @@ toml.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-xui-canvas.workspace = true
+# The login example opens a desktop window.
+xui-canvas = { workspace = true, features = ["winit-backend"] }
 serde_json = "1"

@@ -2,13 +2,15 @@
 
 //! The toolkit window the player and the IDE share.
 //!
-//! [`run_empty_window`] opens a `winit`-backed xui window on an application
+//! [`run_empty_window`] (with the `desktop` feature) and
+//! [`run_empty_window_with`] opens a `winit`-backed xui window on an application
 //! that draws nothing but the theme background. M0 uses it to prove the
 //! windowed canvas path links and runs on both targets; the real widget trees
 //! replace it as the milestones land (PLAN.md §9, §11).
 
 use std::rc::Rc;
 
+#[cfg(feature = "desktop")]
 use xui_canvas::WinitBackend;
 use xui_core::app::{App, Ui, run_app};
 use xui_core::backend::{Backend, PlatformSpec, Result};
@@ -26,8 +28,15 @@ impl App for EmptyApp {
 ///
 /// The window uses the portable [`WinitBackend`], the same backend LazyOS
 /// builds on, so the code run here is the code that ships.
+#[cfg(feature = "desktop")]
 pub fn run_empty_window(title: &str) -> Result<()> {
     let backend: Rc<dyn Backend> = Rc::new(WinitBackend::new());
+    run_empty_window_with(backend, title)
+}
+
+/// Opens an empty xui window titled `title` on `backend` and runs until it
+/// closes. This is the entry a platform without `winit` (LazyOS) uses.
+pub fn run_empty_window_with(backend: Rc<dyn Backend>, title: &str) -> Result<()> {
     run_app(backend, PlatformSpec::new(title), |_ui| EmptyApp)
 }
 

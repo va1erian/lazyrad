@@ -10,23 +10,35 @@ repository.workspace = true
 [[bin]]
 name = "lazyrad-ide"
 path = "src/main.rs"
+required-features = ["desktop"]
 
 [lints]
 workspace = true
 
 [features]
-default = ["native-dialogs"]
-# OS file and message dialogs (`rfd`). Without it the platform seam's headless
-# fallback answers every dialog as a cancel (see `platform::dialogs`).
+default = ["desktop"]
+# Everything that needs a desktop OS: the `winit` window backend, the host
+# platform (`platform::host`: config directory, OS theme) and the native dialogs.
+# LazyOS builds with `default-features = false` and installs its own
+# `lazyrad_runtime::platform::Platform` before `run_with_backend`.
+desktop = [
+    "native-dialogs",
+    "dep:directories",
+    "dep:dark-light",
+    "lazyrad-runtime/desktop",
+    "xui-canvas/winit-backend",
+]
+# OS file and message dialogs (`rfd`). Without it the host platform answers
+# every dialog as a cancel (see `platform::dialogs`).
 native-dialogs = ["dep:rfd"]
 
 [dependencies]
-directories.workspace = true
+directories = { workspace = true, optional = true }
 lazyrad-designer.workspace = true
 lazyrad-packager.workspace = true
 lazyrad-player.workspace = true
 lazyrad-project.workspace = true
-lazyrad-runtime.workspace = true
+lazyrad-runtime = { workspace = true, features = ["metadata"] }
 rfd = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
@@ -40,7 +52,7 @@ xui-form.workspace = true
 # only used on the platforms the IDE actually queries; elsewhere the "system"
 # theme resolves to light.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
-dark-light.workspace = true
+dark-light = { workspace = true, optional = true }
 
 [target."cfg(windows)".build-dependencies]
 embed-resource = "3.0.11"

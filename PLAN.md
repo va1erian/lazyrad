@@ -342,7 +342,20 @@ IDE  ──spawn── lazyrad-player --debug <project dir>
      temporary file and renames it into place.
    - Code signing is out of scope, but note in the docs that an appended overlay
      invalidates any existing signature.
-5. **Where stubs live:** the IDE ships with its stubs in `stubs/<target>/`. Picking
+5. **LazyOS packages (`.lzp`).** For LazyOS the export is not a stub with an appended
+   payload but a standard application package (`docs/packages.md` in the LazyOS
+   repo): a zip with a generated `manifest.toml`, the LazyOS player as
+   `bin/lrplay.elf`, `icons/app-{16,32,128}.png` and the project under
+   `resources/project/`. `lazyrad_packager::lzp` writes it (`build_package`, a zip
+   writer that emits exactly the subset LazyOS's `lazypkg` reads, default icons,
+   permissions derived from the scripts) and the `lazyrad-pack` command wraps it:
+   `lazyrad-pack <project> --player lrplay.elf --out dist`. Installing goes through
+   the `Installer` trait: `pkgd` when LazyOS has it, otherwise `DevInstaller` saves
+   the package ("saved, not installed"). The manifest's `entry.args` is
+   `["--project", "resources/project"]`, which the player resolves against its own
+   install directory. `lazyrad-packager` tests re-read every package with an
+   independent verifier; LazyOS's tests re-open the same packages with `lazypkg`.
+6. **Where stubs live:** the IDE ships with its stubs in `stubs/<target>/`. Picking
    another target in *File → Make EXE* is how cross-export works.
 
 ---
@@ -460,6 +473,27 @@ time. CI checks Windows, Linux and macOS (`.github/workflows/ci.yml`).
 
 `--no-default-features` on `lazyrad-ide` and `lazyrad-player` builds without `rfd`, which
 exercises the fallbacks.
+
+**The `Platform` trait and the `desktop` features (LazyOS P0).** The seam modules
+above no longer hard-code the host: they ask `lazyrad_runtime::platform::current()`, a
+`Platform` trait (dialogs, config dir, default monospace font, theme preference, where
+the player lives and how its `Command` is prepared, and the script file-access
+policy). The desktop implementation is `lazyrad-ide/src/platform/host.rs`
+(`HostPlatform`, the only file that names `rfd`, `directories` and `dark-light`); a port
+installs its own with `platform::install` before starting. The system clipboard is not
+part of the trait: xui routes it through the window backend (`Ui::clipboard_text`).
+Everything that needs a desktop OS sits behind a `desktop` feature (default on) of
+`lazyrad-runtime`, `lazyrad-player` and `lazyrad-ide`: the `winit` window backend
+(`xui-canvas` is now `default-features = false`), `time`'s `local-offset`, `rfd`,
+`directories` and `dark-light`. Without it the crates build for
+`x86_64-unknown-linux-musl` and expose backend-taking entry points
+(`lazyrad_player::run_with_backend`, `lazyrad_ide::run_with_backend`,
+`lazyrad_runtime::shell::run_empty_window_with`). Rhai is pinned `=1.26.1` with
+`default-features = false` (the exact pin LazyOS's `rhai-lazy` uses); `metadata`
+(completion) is the runtime feature of that name and stays off in the LazyOS player.
+Scripts reach files only through the platform's `FsPolicy` (`file_*`/`dir_*` stdlib
+functions): unrestricted on the desktop, a sandbox on LazyOS. CI job `musl` checks all
+of this.
 
 **Inventory of platform-specific items**
 

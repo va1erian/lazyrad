@@ -38,6 +38,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Position};
 use time::OffsetDateTime;
 
+use crate::fs_policy::FsPolicy;
 use xui_rhai::EngineHost;
 use xui_rhai::message::{Msg, MsgBoxButtons, Pending};
 
@@ -55,6 +56,8 @@ pub struct StdlibContext {
     pub app_title: String,
     /// The value `app.path` reports.
     pub app_path: String,
+    /// Which paths the `file_*` and `dir_*` functions may touch.
+    pub fs: Rc<FsPolicy>,
 }
 
 impl StdlibContext {
@@ -66,6 +69,7 @@ impl StdlibContext {
             pending: Rc::new(RefCell::new(Vec::new())),
             app_title: "LazyRAD".to_owned(),
             app_path: String::new(),
+            fs: Rc::new(FsPolicy::Unrestricted),
         }
     }
 }
@@ -86,6 +90,7 @@ pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     register_time(engine);
     register_app(engine);
     register_msg_box(engine, context);
+    fs::register(engine, &context.fs);
     crate::extensions::apply(engine);
     host.set_global("app", Dynamic::from(app_object(context)));
 }
@@ -99,7 +104,10 @@ impl xui_rhai::EngineSetup for StdlibContext {
 }
 
 /// Registers a global native function with its Rhai parameter names and doc
-/// comment, so `metadata` can describe it.
+/// comment, so `metadata` can describe it. Without the `metadata` feature (the
+/// LazyOS player) the names and comments are dropped and only the function is
+/// registered, which keeps them out of the binary.
+#[cfg(feature = "metadata")]
 macro_rules! documented_fn {
     ($engine:expr, $name:literal, [$($param:literal),*], [$($comment:literal),*], $func:expr) => {{
         rhai::FuncRegistration::new($name)
@@ -108,6 +116,16 @@ macro_rules! documented_fn {
             .register_into_engine($engine, $func);
     }};
 }
+
+/// The player flavour of [`documented_fn`]: register the function alone.
+#[cfg(not(feature = "metadata"))]
+macro_rules! documented_fn {
+    ($engine:expr, $name:literal, [$($param:literal),*], [$($comment:literal),*], $func:expr) => {{
+        rhai::FuncRegistration::new($name).register_into_engine($engine, $func);
+    }};
+}
+
+mod fs;
 
 /// A Rhai runtime error with no position; the VM fills it in.
 fn script_error(message: impl Into<String>) -> Box<EvalAltResult> {
@@ -254,8 +272,18 @@ fn register_time(engine: &mut Engine) {
 
 /// The current time in the local zone, falling back to UTC when the offset is
 /// not available (a sandbox or a platform without a time zone database).
+///
+/// Without the `desktop` feature (LazyOS: no zone database, and `time`'s
+/// `local-offset` is not compiled in) the clock is always UTC.
+#[cfg(feature = "desktop")]
 fn local_now() -> OffsetDateTime {
     OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
+}
+
+/// The portable clock: UTC.
+#[cfg(not(feature = "desktop"))]
+fn local_now() -> OffsetDateTime {
+    OffsetDateTime::now_utc()
 }
 
 /// Formats a date and time as `YYYY-MM-DD HH:MM:SS`.
@@ -530,6 +558,7 @@ mod tests {
         assert!(matches!(context.pending.borrow().last(), Some(Msg::Quit)));
     }
 
+    #[cfg(feature = "metadata")]
     #[test]
     fn every_function_carries_a_doc_comment_for_completion() {
         let engine = engine_with(&StdlibContext::headless("main_form"));
