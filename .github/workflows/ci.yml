@@ -84,7 +84,7 @@ jobs:
           fi
       - name: One Rhai, pinned
         run: |
-          versions=$(cargo tree -p lazyrad-player --no-default-features -e normal --prefix none | grep -E '^rhai ' | sort -u)
+          versions=$(cargo tree -p lazyrad-player --no-default-features -e normal --prefix none | grep -E '^rhai ' | sed 's/ (\*)$//' | sort -u)
           echo "$versions"
           test "$(echo "$versions" | wc -l)" -eq 1
           echo "$versions" | grep -q 'rhai v1.26.1'
