@@ -114,6 +114,36 @@ fn check_layout(name: &str, is_dir: bool) -> Result<(), String> {
     }
 }
 
+/// LazyOS's `[permissions] files` grammar (`lazypkg::files`, filesystem plan
+/// F5): `read:` or `write:`, then a path that is absolute or starts with
+/// `$HOME/`; `$HOME` only as the first segment; segments `[A-Za-z0-9_.-]+` or
+/// `*`, no `..`; and no absolute path inside a home directory (`/home/...` or
+/// the legacy `/data/home/...`), which must be written with `$HOME`.
+fn files_rule_ok(rule: &str) -> bool {
+    let Some(path) = rule
+        .strip_prefix("read:")
+        .or_else(|| rule.strip_prefix("write:"))
+    else {
+        return false;
+    };
+    let (relative, rest) = match path.strip_prefix("$HOME") {
+        Some(rest) => (true, rest),
+        None => (false, path),
+    };
+    let Some(rest) = rest.strip_prefix('/') else {
+        return false;
+    };
+    let segments_ok = rest.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg != ".."
+            && seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-*".contains(&b))
+    });
+    let in_home = |root: &str| path == root || path.starts_with(&format!("{root}/"));
+    segments_ok && (relative || !(in_home("/home") || in_home("/data/home")))
+}
+
 /// Verifies `bytes` against every container, name, layout, limit and manifest
 /// rule, returning the contents.
 pub fn verify(bytes: &[u8]) -> Result<Verified, String> {
@@ -370,19 +400,7 @@ fn check_manifest(v: &Verified) -> Result<(), String> {
             .flatten()
         {
             let rule = file.as_str().ok_or("files rule is not a string")?;
-            let path = rule
-                .strip_prefix("read:")
-                .or_else(|| rule.strip_prefix("write:"))
-                .ok_or_else(|| format!("files rule {rule:?}"))?;
-            if !path.starts_with('/')
-                || path.split('/').skip(1).any(|seg| {
-                    seg.is_empty()
-                        || seg == ".."
-                        || !seg
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"_.-*".contains(&b))
-                })
-            {
+            if !files_rule_ok(rule) {
                 return Err(format!("files rule {rule:?}"));
             }
         }
@@ -406,4 +424,27 @@ fn check_manifest(v: &Verified) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn the_files_grammar_matches_lazyos() {
+    for good in [
+        "read:$HOME/.apps/user.ada.todo",
+        "write:$HOME/.apps/user.ada.todo",
+        "read:$HOME/Documents/*",
+        "read:/system/share/x",
+    ] {
+        assert!(files_rule_ok(good), "{good}");
+    }
+    for bad in [
+        "read:/home/*/.apps/user.ada.todo",
+        "write:/data/home/*/x",
+        "read:/home",
+        "read:$HOME",
+        "read:/x/$HOME/y",
+        "read:$HOME/../x",
+        "exec:$HOME/x",
+    ] {
+        assert!(!files_rule_ok(bad), "{bad}");
+    }
 }

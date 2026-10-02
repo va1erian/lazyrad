@@ -24,9 +24,12 @@ use crate::lzp::error::LzpError;
 
 /// Where an app's private data lives (plan D5): `<home>/.apps/<system_name>`
 /// in the home of whoever runs it, never inside the install tree (`/apps`
-/// belongs to LazyOS's `pkgd`). The `*` segment stands for the home, the form
-/// LazyOS's manifest grammar accepts for a per-user path (filesystem plan F4).
-pub const APP_DATA_ROOT: &str = "/home/*/.apps";
+/// belongs to LazyOS's `pkgd`). LazyOS's manifest grammar (filesystem plan
+/// F5) spells the running user's home `$HOME`, allowed only as a rule's first
+/// segment, and refuses absolute paths under `/home`. A rule naming a
+/// directory covers everything inside it, so `$HOME/.apps/<system_name>`
+/// grants the app's whole folder without a wildcard.
+pub const APP_DATA_ROOT: &str = "$HOME/.apps";
 
 /// The binary name inside the package.
 pub const PLAYER_ENTRY: &str = "bin/lrplay.elf";
@@ -390,8 +393,8 @@ mod tests {
         assert_eq!(
             built.files,
             vec![
-                "read:/home/*/.apps/user.ada.todo".to_owned(),
-                "write:/home/*/.apps/user.ada.todo".to_owned()
+                "read:$HOME/.apps/user.ada.todo".to_owned(),
+                "write:$HOME/.apps/user.ada.todo".to_owned()
             ]
         );
     }
