@@ -152,8 +152,8 @@ fn permissions_follow_what_the_scripts_use() {
     assert_eq!(
         uses.permission("files"),
         [
-            format!("read:/data/apps/{id}/data"),
-            format!("write:/data/apps/{id}/data")
+            format!("read:/home/*/.apps/{id}"),
+            format!("write:/home/*/.apps/{id}")
         ]
     );
 }

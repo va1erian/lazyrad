@@ -3,7 +3,7 @@
 //! Installing a built package: the [`Installer`] seam.
 //!
 //! Installing and registering apps belongs to LazyOS's package system (`pkgd`
-//! validates and unpacks into `/data/apps/<install_dir>`, `regd` registers the
+//! validates and unpacks into `/apps/<install_dir>`, `regd` registers the
 //! app so it appears in the Start menu and in `mimed`). LazyRAD consumes that
 //! service; it must not grow a second registry. Until `pkgd` exists, only the
 //! [`DevInstaller`] fallback is usable.
