@@ -108,7 +108,7 @@ mod tests {
             },
             PermissionNote {
                 kind: "file".into(),
-                value: "write:/home/*/.apps/user.ada.todo".into(),
+                value: "write:$HOME/.apps/user.ada.todo".into(),
                 risk: "medium".into(),
                 explanation: "Save files in its own folder".into(),
             },
