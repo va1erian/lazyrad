@@ -44,6 +44,7 @@ pub use install::{
 };
 
 use crate::payload::Payload;
+pub use manifest::HostPermissions;
 use manifest::{Identity, PLAYER_ENTRY, PROJECT_DIR};
 use zip::{MAX_ENTRY_UNCOMPRESSED, ZipWriter};
 
@@ -78,7 +79,14 @@ pub struct PackageRequest<'a> {
     pub icons: Option<&'a IconSet>,
     /// The check run before anything is packed (PLAN.md §8).
     pub check: Option<Check<'a>>,
+    /// Asks the host platform which interfaces and topics the scripts use.
+    /// `None` declares none beyond the packager's own.
+    pub permissions: Option<DerivePermissions<'a>>,
 }
+
+/// Called with every `.rhai` source in the package; returns what the host
+/// platform found they use ([`HostPermissions`]).
+pub type DerivePermissions<'a> = &'a dyn Fn(&[&str]) -> HostPermissions;
 
 /// A finished package.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +162,11 @@ pub fn build_package(request: &PackageRequest<'_>) -> Result<BuiltPackage, LzpEr
         .filter(|entry| entry.name.ends_with(".rhai"))
         .filter_map(|entry| std::str::from_utf8(&entry.data).ok())
         .collect();
-    let built = manifest::build(
+    let host = request
+        .permissions
+        .map(|derive| derive(&scripts))
+        .unwrap_or_default();
+    let built = manifest::build_with(
         &Identity {
             name: &project.name,
             author: request.author,
@@ -162,7 +174,8 @@ pub fn build_package(request: &PackageRequest<'_>) -> Result<BuiltPackage, LzpEr
             system_name: request.system_name,
             description: request.description,
         },
-        scripts,
+        scripts.iter().copied(),
+        &host,
     )?;
 
     let mut zip = ZipWriter::new();

@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lazyrad_packager::lzp::{
-    BuiltPackage, IconSet, LzpError, PackageRequest, build_package, check_player, icons,
-    write_package, zip::MAX_ENTRIES,
+    BuiltPackage, HostPermissions, IconSet, LzpError, PackageRequest, build_package, check_player,
+    icons, write_package, zip::MAX_ENTRIES,
 };
 
 use common::verify;
@@ -52,6 +52,7 @@ fn request<'a>(project: &'a Path, player: &'a [u8]) -> PackageRequest<'a> {
         description: None,
         icons: None,
         check: None,
+        permissions: None,
     }
 }
 
@@ -155,6 +156,43 @@ fn permissions_follow_what_the_scripts_use() {
             format!("read:/data/apps/{id}/data"),
             format!("write:/data/apps/{id}/data")
         ]
+    );
+}
+
+#[test]
+fn the_host_declares_the_services_the_scripts_use() {
+    let dir = scratch("host-perms");
+    let lrp = synthetic_project(&dir, "messenger", 1);
+    fs::write(
+        dir.join("m0.rhai"),
+        "fn f() { sys::confd::get(\"sys/x\"); }\n",
+    )
+    .unwrap();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let derive = |scripts: &[&str]| {
+        seen.borrow_mut()
+            .extend(scripts.iter().map(|s| s.to_string()));
+        HostPermissions {
+            interfaces: vec![
+                "os.lazy.confd.v1".to_owned(),
+                "os.lazy.display.v1".to_owned(),
+                "os.lazy.confd.v1".to_owned(),
+            ],
+            topics: vec!["subscribe:system/confd/changed/#".to_owned()],
+        }
+    };
+    let player = fake_player(0);
+    let mut req = request(&lrp, &player);
+    req.permissions = Some(&derive);
+    let package = verify(&build_package(&req).unwrap().bytes).unwrap();
+    assert!(seen.borrow().iter().any(|s| s.contains("sys::confd::get")));
+    assert_eq!(
+        package.permission("interfaces"),
+        ["os.lazy.display.v1", "os.lazy.confd.v1"]
+    );
+    assert_eq!(
+        package.permission("topics"),
+        ["subscribe:system/confd/changed/#"]
     );
 }
 

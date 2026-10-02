@@ -313,6 +313,23 @@ impl ScriptForm {
             .map(|_| ())
             .map_err(|error| ScriptError::from_eval(self.host.file(), &error))
     }
+
+    /// Calls a Rhai function pointer with `args` and returns its value, or the
+    /// engine's own error so the caller can inspect what was thrown (a host
+    /// turning a thrown value into a reply, for example). [`ScriptForm::locate`]
+    /// turns that error into a [`ScriptError`] for display.
+    pub fn call_fn(
+        &self,
+        callback: &FnPtr,
+        args: Vec<Dynamic>,
+    ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+        callback.call::<Dynamic>(self.host.engine(), &self.ast, args)
+    }
+
+    /// A script error located in this form's code file.
+    pub fn locate(&self, error: &rhai::EvalAltResult) -> ScriptError {
+        ScriptError::from_eval(self.host.file(), error)
+    }
 }
 
 #[cfg(test)]

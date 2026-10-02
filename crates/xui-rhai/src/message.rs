@@ -62,6 +62,10 @@ pub enum Msg {
         /// The button pressed: `"ok"`, `"cancel"`, `"yes"` or `"no"`.
         result: &'static str,
     },
+    /// The window's polling timer fired: run work that arrived outside the
+    /// window for its form (a host's event sources, such as Messenger events
+    /// on LazyOS).
+    Poll,
     /// `app.quit()`: end the application.
     Quit,
 }

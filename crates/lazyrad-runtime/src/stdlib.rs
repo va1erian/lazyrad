@@ -91,7 +91,12 @@ pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     register_app(engine);
     register_msg_box(engine, context);
     fs::register(engine, &context.fs);
-    crate::extensions::apply(engine);
+    crate::extensions::apply(
+        engine,
+        &crate::extensions::ExtensionScope {
+            form: &context.form,
+        },
+    );
     host.set_global("app", Dynamic::from(app_object(context)));
 }
 
