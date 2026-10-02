@@ -22,8 +22,11 @@ use serde::Serialize;
 
 use crate::lzp::error::LzpError;
 
-/// The app's private data directory under the install root (plan D5).
-pub const APPS_ROOT: &str = "/data/apps";
+/// Where an app's private data lives (plan D5): `<home>/.apps/<system_name>`
+/// in the home of whoever runs it, never inside the install tree (`/apps`
+/// belongs to LazyOS's `pkgd`). The `*` segment stands for the home, the form
+/// LazyOS's manifest grammar accepts for a per-user path (filesystem plan F4).
+pub const APP_DATA_ROOT: &str = "/home/*/.apps";
 
 /// The binary name inside the package.
 pub const PLAYER_ENTRY: &str = "bin/lrplay.elf";
@@ -150,7 +153,7 @@ pub fn build<'a>(
 
     let uses_files = scripts.into_iter().any(uses_private_storage);
     let files = if uses_files {
-        let data = format!("{APPS_ROOT}/{system_name}/data");
+        let data = format!("{APP_DATA_ROOT}/{system_name}");
         vec![format!("read:{data}"), format!("write:{data}")]
     } else {
         Vec::new()
@@ -387,8 +390,8 @@ mod tests {
         assert_eq!(
             built.files,
             vec![
-                "read:/data/apps/user.ada.todo/data".to_owned(),
-                "write:/data/apps/user.ada.todo/data".to_owned()
+                "read:/home/*/.apps/user.ada.todo".to_owned(),
+                "write:/home/*/.apps/user.ada.todo".to_owned()
             ]
         );
     }
