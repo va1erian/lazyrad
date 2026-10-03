@@ -109,6 +109,13 @@ pub trait Platform: Send + Sync {
         false
     }
 
+    /// The platform's own widget palette for the IDE's "System" theme, when
+    /// it has one (LazyOS: the desktop's theme and accent). `None` picks xui's
+    /// light or dark palette from [`Platform::prefers_dark`].
+    fn system_theme(&self) -> Option<xui_core::Theme> {
+        None
+    }
+
     /// The file-access policy scripts run under (LazyOS plan D5). The desktop
     /// default is unrestricted; LazyOS returns a sandbox rooted at the app's
     /// private data directory.
