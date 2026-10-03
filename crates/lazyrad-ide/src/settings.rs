@@ -122,7 +122,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
-            theme: ThemeChoice::Light,
+            // Follow the platform until the user picks a theme.
+            theme: ThemeChoice::System,
             editor_font_size: 12.0,
             editor_font_family: default_editor_font_family().to_owned(),
             recent_projects: Vec::new(),

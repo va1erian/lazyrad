@@ -13,6 +13,11 @@ pub fn system_prefers_dark() -> bool {
     platform::current().prefers_dark()
 }
 
+/// The platform's own palette for the "System" theme, if it has one.
+pub fn system_theme() -> Option<xui_core::Theme> {
+    platform::current().system_theme()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
