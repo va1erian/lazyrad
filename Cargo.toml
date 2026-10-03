@@ -24,13 +24,13 @@ repository = "https://github.com/va1erian/lazyrad"
 [workspace.dependencies]
 # The UI toolkit, pinned to the revision LazyOS builds against (PLAN.md §1).
 # A `[patch]` for local xui fixes is kept at the bottom of this file.
-xui-core = { git = "https://github.com/va1erian/xui", rev = "4c2a4fbb2b7420bc5f5fe77cc1ea84ad0468b7d9" }
-xui-code-editor = { git = "https://github.com/va1erian/xui", rev = "4c2a4fbb2b7420bc5f5fe77cc1ea84ad0468b7d9" }
+xui-core = { git = "https://github.com/va1erian/xui", rev = "bb14ce9f25c0f3d613ed88a345eeabcc29f5281c" }
+xui-code-editor = { git = "https://github.com/va1erian/xui", rev = "bb14ce9f25c0f3d613ed88a345eeabcc29f5281c" }
 # `default-features = false`: the pure tiny-skia software painter core only, so a
 # musl/LazyOS build links no windowing crate (winit, softbuffer, glutin, glow,
 # arboard, xui-gpu). Desktop binaries and examples opt in with the
 # `winit-backend` feature (see `lazyrad-runtime`'s `desktop` feature).
-xui-canvas = { git = "https://github.com/va1erian/xui", rev = "4c2a4fbb2b7420bc5f5fe77cc1ea84ad0468b7d9", default-features = false }
+xui-canvas = { git = "https://github.com/va1erian/xui", rev = "bb14ce9f25c0f3d613ed88a345eeabcc29f5281c", default-features = false }
 
 # The scripting language, pinned to the exact version LazyOS's `rhai-lazy` uses
 # so one Rhai is audited and linked everywhere. `default-features = false` drops
