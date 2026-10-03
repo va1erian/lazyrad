@@ -10,13 +10,15 @@ use crate::settings::ThemeChoice;
 
 /// Resolves `choice` to a palette.
 ///
-/// `System` asks the platform for its light/dark preference through
-/// [`platform::theme`]; a platform that cannot answer falls back to light.
+/// `System` uses the platform's own palette when it has one, and otherwise
+/// asks for its light/dark preference through [`platform::theme`]; a platform
+/// that cannot answer falls back to light.
 pub fn palette(choice: ThemeChoice) -> Palette {
     match choice {
         ThemeChoice::Light => Palette::light(),
         ThemeChoice::Dark => Palette::dark(),
-        ThemeChoice::System => palette_for_dark(platform::theme::system_prefers_dark()),
+        ThemeChoice::System => platform::theme::system_theme()
+            .unwrap_or_else(|| palette_for_dark(platform::theme::system_prefers_dark())),
     }
 }
 
