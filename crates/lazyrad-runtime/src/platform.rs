@@ -128,6 +128,23 @@ pub trait Platform: Send + Sync {
     /// Adjusts the player's [`Command`] before it is spawned with piped stdio
     /// (the Windows desktop hides the console window here).
     fn prepare_player_command(&self, _command: &mut Command) {}
+
+    /// The system services and topics `scripts` use, for a packaged app's
+    /// manifest. Only the platform knows its services (LazyOS answers from
+    /// the calls to its generated `sys::*` modules); the default is none.
+    fn script_permissions(&self, _scripts: &[&str]) -> ScriptPermissions {
+        ScriptPermissions::default()
+    }
+}
+
+/// What [`Platform::script_permissions`] found: entries in the package
+/// manifest's grammar (`os.lazy.confd.v1`, `subscribe:system/confd/changed/#`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScriptPermissions {
+    /// Interfaces the scripts call.
+    pub interfaces: Vec<String>,
+    /// `publish:`/`subscribe:` topic rules.
+    pub topics: Vec<String>,
 }
 
 /// The defaults: no dialogs, no config directory, unrestricted files.

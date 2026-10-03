@@ -55,6 +55,7 @@ use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
+use crate::events::Poller;
 use crate::fs_policy::FsPolicy;
 use crate::platform;
 use crate::stdlib::StdlibContext;
@@ -379,12 +380,15 @@ impl FormRuntime {
         self.inboxes
             .borrow_mut()
             .insert(form.to_owned(), ui.clone());
-        let app = FormApp {
+        let mut app = FormApp {
             root: Some(Rc::clone(&root)),
             runtime: Rc::clone(self),
             dialogs: Vec::new(),
+            poller: Poller::new(ui, form),
         };
         app.flush(ui);
+        // `form_load` may already have subscribed to something.
+        app.poller.sync(ui);
         Ok(app)
     }
 
@@ -451,6 +455,22 @@ impl FormInstance {
         Ok(FormInstance { script })
     }
 
+    /// Calls a function pointer the script handed to a host extension (a
+    /// Messenger event handler, say) with `args`, returning the engine's own
+    /// error so the extension can see what was thrown.
+    pub fn call_fn(
+        &self,
+        callback: &FnPtr,
+        args: Vec<Dynamic>,
+    ) -> Result<Dynamic, Box<rhai::EvalAltResult>> {
+        self.script.call_fn(callback, args)
+    }
+
+    /// An engine error located in this form's code, for display.
+    pub fn locate(&self, error: &rhai::EvalAltResult) -> ScriptError {
+        self.script.locate(error)
+    }
+
     /// The form's name.
     pub fn name(&self) -> &str {
         self.script.name()
@@ -492,12 +512,20 @@ pub struct FormApp {
     /// Every open message box. A [`Dialog`] destroys its nodes when dropped, so
     /// the application keeps each one alive until it closes.
     dialogs: Vec<Dialog<Msg>>,
+    /// Polls the host's event sources while the form has work pending, and
+    /// releases what the form registered when the window goes away.
+    poller: Poller,
 }
 
 impl FormApp {
     /// The live form this window drives, when it built successfully.
     pub fn root_form(&self) -> Option<&Rc<LiveForm<Msg>>> {
         self.root.as_ref().map(|instance| instance.live_form())
+    }
+
+    /// Whether the window is polling the host's event sources for its form.
+    pub fn is_polling(&self) -> bool {
+        self.poller.is_polling()
     }
 
     /// Moves every message a script left pending into the right window's queue.
@@ -542,6 +570,7 @@ impl FormApp {
                         root: None,
                         runtime: Rc::clone(&runtime),
                         dialogs: Vec::new(),
+                        poller: Poller::idle(),
                     }
                 }
             });
@@ -684,10 +713,19 @@ impl App for FormApp {
                 }
                 self.flush(ui);
             }
+            Msg::Poll => {
+                for error in self.poller.poll(&root) {
+                    self.report_handler_error(ui, root.name(), error);
+                }
+                self.flush(ui);
+            }
             Msg::Quit => ui.quit(),
         }
         // A closed dialog no longer needs its nodes kept alive.
         self.dialogs.retain(Dialog::is_open);
+        // A handler may have subscribed to something, or closed the last
+        // subscription: run the polling timer only while there is work.
+        self.poller.sync(ui);
     }
 }
 
@@ -842,6 +880,7 @@ pub fn run_runtime_with(
                     root: None,
                     runtime: Rc::clone(&runtime_for_app),
                     dialogs: Vec::new(),
+                    poller: Poller::idle(),
                 }
             }
         }

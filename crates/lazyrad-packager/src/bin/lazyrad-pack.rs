@@ -166,6 +166,7 @@ fn run(options: &Options) -> Result<(), String> {
         description: options.description.as_deref(),
         icons: None,
         check,
+        permissions: None,
     })
     .map_err(|e| e.to_string())?;
 

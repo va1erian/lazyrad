@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use lazyrad_packager::lzp::{
-    BuiltPackage, PackageRequest, PackageReview, build_package, read_player,
+    BuiltPackage, HostPermissions, PackageRequest, PackageReview, build_package, read_player,
 };
 
 use crate::run;
@@ -32,6 +32,16 @@ pub fn build(
 ) -> Result<BuiltPackage, String> {
     let player_path = run::resolve_player(player_override).map_err(|error| error.to_string())?;
     let player = read_player(&player_path).map_err(|error| error.to_string())?;
+    // The platform knows which system services the scripts call (LazyOS:
+    // `sys::confd::get(..)` needs `os.lazy.confd.v1`), so the app is granted
+    // exactly those and the consent screen lists them.
+    let permissions = |scripts: &[&str]| {
+        let found = lazyrad_runtime::platform::current().script_permissions(scripts);
+        HostPermissions {
+            interfaces: found.interfaces,
+            topics: found.topics,
+        }
+    };
     build_package(&PackageRequest {
         project: project_file,
         player: &player,
@@ -40,6 +50,7 @@ pub fn build(
         description: None,
         icons: None,
         check: None,
+        permissions: Some(&permissions),
     })
     .map_err(|error| error.to_string())
 }

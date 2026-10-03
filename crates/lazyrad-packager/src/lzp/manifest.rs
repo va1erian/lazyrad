@@ -16,7 +16,9 @@
 //!   `args` module in the LazyOS repo), because the install directory name
 //!   contains a per-version hash and cannot be written into the manifest;
 //! * `[permissions]` is derived from what the project's scripts use (LazyOS plan
-//!   P2.2): private storage only when a `file_*`/`dir_*` function appears.
+//!   P2.2): private storage only when a `file_*`/`dir_*` function appears, plus
+//!   the Messenger interfaces and topics the host platform finds in the scripts
+//!   ([`HostPermissions`]; LazyRAD itself cannot know which services exist).
 
 use serde::Serialize;
 
@@ -59,6 +61,18 @@ pub struct Identity<'a> {
     pub description: Option<&'a str>,
 }
 
+/// Interfaces and topics a host platform found the scripts use (the LazyOS
+/// player's `sys::*` and `msg::*` calls). Each entry must follow LazyOS's
+/// manifest grammar (`docs/packages.md`): an interface is `name.vN`, a topic
+/// `publish:`/`subscribe:` and a `/`-separated filter.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostPermissions {
+    /// Interfaces the scripts call, such as `os.lazy.confd.v1`.
+    pub interfaces: Vec<String>,
+    /// Topic rules, such as `subscribe:system/confd/changed/#`.
+    pub topics: Vec<String>,
+}
+
 /// The finished manifest: its text plus the fields callers report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltManifest {
@@ -72,6 +86,8 @@ pub struct BuiltManifest {
     pub files: Vec<String>,
     /// Interfaces the app declares.
     pub interfaces: Vec<String>,
+    /// Topic rules the app declares.
+    pub topics: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -114,7 +130,17 @@ pub fn build<'a>(
     identity: &Identity<'_>,
     scripts: impl IntoIterator<Item = &'a str>,
 ) -> Result<BuiltManifest, LzpError> {
+    build_with(identity, scripts, &HostPermissions::default())
+}
+
+/// [`build`], also declaring the interfaces and topics the host found.
+pub fn build_with<'a>(
+    identity: &Identity<'_>,
+    scripts: impl IntoIterator<Item = &'a str>,
+    host: &HostPermissions,
+) -> Result<BuiltManifest, LzpError> {
     let mut problems = Vec::new();
+    check_host_permissions(host, &mut problems);
     let system_name = match identity.system_name {
         Some(explicit) => explicit.to_owned(),
         None => derive_system_name(identity.author, identity.name).unwrap_or_else(|| {
@@ -163,7 +189,9 @@ pub fn build<'a>(
     };
     // Every xui app talks to the compositor; declaring it keeps the manifest an
     // honest summary of what the app touches.
-    let interfaces = vec!["os.lazy.display.v1".to_owned()];
+    let mut interfaces = vec![DISPLAY_INTERFACE.to_owned()];
+    interfaces.extend(sorted_unique(&host.interfaces).filter(|i| i != DISPLAY_INTERFACE));
+    let topics: Vec<String> = sorted_unique(&host.topics).collect();
 
     let manifest = Manifest {
         app: App {
@@ -180,7 +208,7 @@ pub fn build<'a>(
         },
         permissions: Permissions {
             interfaces: interfaces.clone(),
-            topics: Vec::new(),
+            topics: topics.clone(),
             files: files.clone(),
             network: Vec::new(),
         },
@@ -193,7 +221,82 @@ pub fn build<'a>(
         version,
         files,
         interfaces,
+        topics,
     })
+}
+
+/// The compositor interface every xui app uses.
+const DISPLAY_INTERFACE: &str = "os.lazy.display.v1";
+
+/// `items` sorted, without repeats.
+fn sorted_unique(items: &[String]) -> impl Iterator<Item = String> {
+    let set: std::collections::BTreeSet<&String> = items.iter().collect();
+    set.into_iter().cloned().collect::<Vec<_>>().into_iter()
+}
+
+/// Every host-supplied entry must pass the reader's grammar, so a bad one is
+/// reported here with the rest rather than refused at install time.
+fn check_host_permissions(host: &HostPermissions, problems: &mut Vec<String>) {
+    for interface in &host.interfaces {
+        if !valid_interface(interface) {
+            problems.push(format!(
+                "permissions.interfaces entry \"{interface}\" is not name.vN"
+            ));
+        }
+    }
+    for topic in &host.topics {
+        if !valid_topic_rule(topic) {
+            problems.push(format!(
+                "permissions.topics entry \"{topic}\" is not publish:/subscribe: and a filter"
+            ));
+        }
+    }
+}
+
+/// `[a-z0-9]+(\.[a-z0-9]+)*\.v[0-9]+`.
+pub fn valid_interface(name: &str) -> bool {
+    let labels: Vec<&str> = name.split('.').collect();
+    let Some((version, rest)) = labels.split_last() else {
+        return false;
+    };
+    let version_ok = version.len() > 1
+        && version.starts_with('v')
+        && version[1..].bytes().all(|b| b.is_ascii_digit());
+    version_ok
+        && !rest.is_empty()
+        && rest.iter().all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}
+
+/// `publish:` or `subscribe:`, then segments of `[a-z0-9_.-]+`, `+`, or a
+/// final `#`.
+pub fn valid_topic_rule(rule: &str) -> bool {
+    let Some(filter) = rule
+        .strip_prefix("publish:")
+        .or_else(|| rule.strip_prefix("subscribe:"))
+    else {
+        return false;
+    };
+    let segments: Vec<&str> = filter.split('/').collect();
+    segments
+        .iter()
+        .enumerate()
+        .all(|(index, segment)| match *segment {
+            "+" => true,
+            "#" => index + 1 == segments.len(),
+            literal => {
+                !literal.is_empty()
+                    && literal.bytes().all(|b| {
+                        b.is_ascii_lowercase()
+                            || b.is_ascii_digit()
+                            || matches!(b, b'_' | b'.' | b'-')
+                    })
+            }
+        })
 }
 
 /// Whether a script calls a function of the private-storage stdlib modules.
@@ -415,6 +518,71 @@ mod tests {
         assert!(build(&id, []).is_err());
         id.system_name = Some("org.example.todo");
         assert_eq!(build(&id, []).unwrap().system_name, "org.example.todo");
+    }
+
+    #[test]
+    fn host_permissions_are_declared_sorted_and_checked() {
+        let host = HostPermissions {
+            interfaces: vec!["os.lazy.timed.v1".into(), "os.lazy.confd.v1".into()],
+            topics: vec![
+                "subscribe:time/tick".into(),
+                "publish:app/user.ada.todo/#".into(),
+            ],
+        };
+        let built = build_with(&identity("Todo", "Ada", "1.0.0"), [], &host).unwrap();
+        assert_eq!(
+            built.interfaces,
+            ["os.lazy.display.v1", "os.lazy.confd.v1", "os.lazy.timed.v1"]
+        );
+        assert_eq!(
+            built.topics,
+            ["publish:app/user.ada.todo/#", "subscribe:time/tick"]
+        );
+        assert!(built.text.contains("subscribe:time/tick"));
+
+        let bad = HostPermissions {
+            interfaces: vec!["Confd".into()],
+            topics: vec!["listen:a/b".into(), "subscribe:a/#/b".into()],
+        };
+        let LzpError::Manifest(problems) =
+            build_with(&identity("Todo", "Ada", "1.0.0"), [], &bad).unwrap_err()
+        else {
+            panic!("expected manifest problems");
+        };
+        assert_eq!(problems.len(), 3, "{problems:?}");
+    }
+
+    #[test]
+    fn interface_and_topic_grammar_match_the_reader() {
+        for good in ["os.lazy.confd.v1", "a.v2", "org.x9.thing.v10"] {
+            assert!(valid_interface(good), "{good}");
+        }
+        for bad in [
+            "confd",
+            "os.lazy.confd",
+            "os.Lazy.x.v1",
+            "os..x.v1",
+            ".v1",
+            "os.x.v",
+        ] {
+            assert!(!valid_interface(bad), "{bad}");
+        }
+        for good in [
+            "subscribe:a/+/b",
+            "publish:a/#",
+            "subscribe:system/confd/changed/#",
+        ] {
+            assert!(valid_topic_rule(good), "{good}");
+        }
+        for bad in [
+            "a/b",
+            "subscribe:",
+            "subscribe:a//b",
+            "publish:a/#/b",
+            "subscribe:A/b",
+        ] {
+            assert!(!valid_topic_rule(bad), "{bad}");
+        }
     }
 
     #[test]
