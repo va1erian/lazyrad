@@ -1528,6 +1528,25 @@ mod tests {
         assert!(surface.selection().is_form());
     }
 
+    /// The designer repaints its overlay only for a change or a moved marquee
+    /// or outline (va1erian/lazyrad#98): a plain hover must report neither.
+    #[test]
+    fn a_hover_changes_nothing_the_overlay_draws_and_a_rubber_band_does() {
+        let mut surface = sample();
+        for (x, y) in [(20, 20), (60, 90), (250, 60)] {
+            let outcome = surface.pointer_move(x, y, false);
+            assert_eq!(outcome.change, Change::NONE);
+            assert_eq!((surface.marquee(), surface.preview()), (None, None));
+        }
+        surface.pointer_down(230, 50, false);
+        let outcome = surface.pointer_move(260, 70, false);
+        assert_eq!(outcome.change, Change::NONE);
+        assert_eq!(
+            surface.marquee(),
+            Some(DesignRect::from_points((230, 50), (260, 70)))
+        );
+    }
+
     #[test]
     fn dragging_moves_and_snaps_to_the_grid() {
         let mut surface = sample();

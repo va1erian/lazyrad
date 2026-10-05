@@ -363,6 +363,7 @@ impl<M: 'static> Designer<M> {
     /// Handles one designer message from the overlay.
     pub fn update(&self, msg: DesignerMsg, ui: &Ui<M>) {
         let overlay = self.id();
+        let before = gesture_marks(&self.surface.borrow());
         let outcome = match msg {
             DesignerMsg::PointerDown { x, y, ctrl } => {
                 ui.set_capture(overlay);
@@ -396,7 +397,14 @@ impl<M: 'static> Designer<M> {
             ui.release_capture();
         }
         ui.set_cursor(overlay, cursor_for(outcome.cursor));
+        let after = gesture_marks(&self.surface.borrow());
         self.refresh(ui, outcome.change);
+        // `refresh` repaints for a change to the form or the selection; a
+        // marquee or drag outline that moved on its own repaints too. A plain
+        // hover changes nothing the overlay draws, so it repaints nothing.
+        if !outcome.change.any() && after != before {
+            ui.invalidate(self.id());
+        }
     }
 
     /// Replaces the document and rebuilds the preview.
@@ -632,7 +640,11 @@ impl<M: 'static> Designer<M> {
 
     /// Applies a change to the live widgets: rebuild after a structural change,
     /// otherwise re-apply geometry; then notify the selection sink and repaint.
+    /// No change repaints nothing.
     fn refresh(&self, ui: &Ui<M>, change: Change) {
+        if !change.any() {
+            return;
+        }
         if change.structure {
             // A failed preview build keeps the overlay (so the user can undo
             // the edit that caused it); there is no caller to report to here.
@@ -973,6 +985,12 @@ fn paint(canvas: &mut dyn Canvas, surface: &Surface, theme: &Theme) {
     if let Some(preview) = surface.preview() {
         dashed_rect(canvas, px_rect(preview, dpi), theme.accent);
     }
+}
+
+/// What the overlay draws for a gesture in progress: the marquee and the drag
+/// (or new control) outline.
+fn gesture_marks(surface: &Surface) -> (Option<DesignRect>, Option<DesignRect>) {
+    (surface.marquee(), surface.preview())
 }
 
 /// Strokes a dashed rectangle, used for the marquee and the drag preview.
