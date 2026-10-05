@@ -29,7 +29,7 @@ use xui_core::geometry::Rect;
 use xui_core::icon::draw_icon;
 use xui_core::message::{Key, MouseButton};
 use xui_core::units::Dip;
-use xui_core::widget::Control;
+use xui_core::widget::{Control, Placeable};
 use xui_core::{Lucide, Theme};
 
 use crate::local_paint::paint_local;
@@ -297,6 +297,14 @@ impl<M: 'static> Toolbox<M> {
     /// Moves/resizes the toolbox.
     pub fn set_bounds(&self, bounds: Rect) {
         self.control.set_bounds(bounds);
+    }
+}
+
+/// The toolbox fills whatever a layout gives it; it paints its tiles over
+/// its whole node.
+impl<M: 'static> Placeable<M> for Toolbox<M> {
+    fn id(&self) -> WidgetId {
+        Toolbox::id(self)
     }
 }
 

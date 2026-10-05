@@ -83,17 +83,19 @@ use xui_code_editor::Clipboard;
 use xui_core::Lucide;
 use xui_core::Theme;
 use xui_core::app::Ui;
+use xui_core::arrange;
 use xui_core::backend::{BackendError, Canvas, Event, NodeKind, NodeSpec, TextStyle, WidgetId};
 use xui_core::geometry::{Point, Rect};
 use xui_core::icon::draw_icon;
 use xui_core::message::{Key, MouseButton};
 use xui_core::units::Dip;
 use xui_core::widget::scrollbar::{self, Orientation, Scroll, ThumbState, TrackHit};
-use xui_core::widget::{CheckBox, ComboBox, Control};
+use xui_core::widget::{CheckBox, ComboBox, Control, Placeable};
 use xui_form::{Access, Catalog, FormDoc, Value, ValueType};
 
 use crate::grid_nav::{ObjectDropdown, RowMove, move_row};
 use crate::local_paint::paint_local;
+use crate::pinned::Pinned;
 use crate::surface::Target;
 use crate::text_field::TextField;
 use crate::widget::Designer;
@@ -663,9 +665,9 @@ enum Editor<M: 'static> {
     /// A painted single-line text/number editor.
     Text(TextEditor<M>),
     /// An enum drop-down.
-    Choice(ComboBox<M>),
+    Choice(Pinned<ComboBox<M>, M>),
     /// A bool check box.
-    Bool(CheckBox<M>),
+    Bool(Pinned<CheckBox<M>, M>),
 }
 
 impl<M: 'static> Editor<M> {
@@ -673,8 +675,8 @@ impl<M: 'static> Editor<M> {
     fn id(&self) -> WidgetId {
         match self {
             Editor::Text(editor) => editor.id(),
-            Editor::Choice(combo) => combo.id(),
-            Editor::Bool(check) => check.id(),
+            Editor::Choice(combo) => combo.widget().id(),
+            Editor::Bool(check) => check.widget().id(),
         }
     }
 
@@ -1270,16 +1272,17 @@ impl<M: 'static> PropertyGrid<M> {
         );
 
         let editor: Result<Option<Editor<M>>, BackendError> = match &row.ty {
-            ValueType::Bool => CheckBox::new(ui, cell, "")
-                .map(|check| {
-                    if let Value::Bool(checked) = row.value {
-                        check.set_checked(checked);
-                    }
-                    let wrap = Rc::clone(&self.wrap);
-                    check.on_toggle(move |checked| Some(wrap(PropertyGridMsg::CommitBool(checked))))
-                })
-                .map(Editor::Bool)
-                .map(Some),
+            ValueType::Bool => {
+                let wrap = Rc::clone(&self.wrap);
+                let check = arrange::checkbox("")
+                    .checked(matches!(row.value, Value::Bool(true)))
+                    .then(move |check| {
+                        check.on_toggle(move |checked| {
+                            Some(wrap(PropertyGridMsg::CommitBool(checked)))
+                        })
+                    });
+                Pinned::new(ui, cell, check).map(|check| Some(Editor::Bool(check)))
+            }
             ValueType::Enum { variants } => {
                 let items: Vec<&str> = variants.iter().map(String::as_str).collect();
                 let wrap = Rc::clone(&self.wrap);
@@ -1287,22 +1290,15 @@ impl<M: 'static> PropertyGrid<M> {
                     Value::Enum(current) => Some(current.clone()),
                     _ => None,
                 };
-                let variants = variants.clone();
-                ComboBox::new(ui, cell, &items)
-                    .map(|combo| {
-                        if let Some(current) = current {
-                            if let Some(index) =
-                                variants.iter().position(|variant| variant == &current)
-                            {
-                                combo.select(index);
-                            }
-                        }
-                        combo.on_select(move |index| {
-                            Some(wrap(PropertyGridMsg::CommitChoice(index)))
-                        })
-                    })
-                    .map(Editor::Choice)
-                    .map(Some)
+                let selected = current
+                    .and_then(|current| variants.iter().position(|variant| variant == &current));
+                let combo = arrange::combo_box(&items).then(move |combo| {
+                    if let Some(index) = selected {
+                        combo.select(index);
+                    }
+                    combo.on_select(move |index| Some(wrap(PropertyGridMsg::CommitChoice(index))))
+                });
+                Pinned::new(ui, cell, combo).map(|combo| Some(Editor::Choice(combo)))
             }
             ValueType::Text { .. } | ValueType::Int { .. } | ValueType::Float { .. } => {
                 let wrap = Rc::clone(&self.wrap);
@@ -1390,6 +1386,14 @@ impl<M: 'static> PropertyGrid<M> {
             self.state.borrow_mut().error = Some(error.to_string());
             ui.invalidate(self.id());
         }
+    }
+}
+
+/// The grid fills whatever a layout gives it; it paints its rows over its
+/// whole node and scrolls what does not fit.
+impl<M: 'static> Placeable<M> for PropertyGrid<M> {
+    fn id(&self) -> WidgetId {
+        PropertyGrid::id(self)
     }
 }
 

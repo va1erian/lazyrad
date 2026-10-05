@@ -4,11 +4,14 @@
 //!
 //! The designer renders the form's **real** `xui-core` widgets (through
 //! [`xui_form::build_with`]) inside a [`Panel`], with
-//! [`BuildOptions::design_mode`] on and the window in
-//! [`Ui::set_design_mode(true)`](xui_core::app::Ui::set_design_mode). On top sits
-//! a transparent [`Custom`](xui_core::backend::NodeKind::Custom) overlay that
-//! receives all pointer and key input and paints the dot grid, the selection
-//! outline and handles, the marquee and the drag preview.
+//! [`BuildOptions::design_mode`] on and its host node in
+//! [`Ui::set_design_mode(true)`](xui_core::app::Ui::set_design_mode). The form
+//! is an `absolute()` layout in the panel: a drag, resize or undo pushes the
+//! document's rectangles into it through [`LiveForm::batch`], which places the
+//! same widgets again. On top sits a transparent
+//! [`Custom`](xui_core::backend::NodeKind::Custom) overlay that receives all
+//! pointer and key input and paints the dot grid, the selection outline and
+//! handles, the marquee and the drag preview.
 //!
 //! The overlay's event mapper only turns an input event into a [`DesignerMsg`]
 //! and hands it to the host's message type through the `wrap` closure. The host
@@ -21,17 +24,15 @@
 //! picks the topmost node for a hit-test by creation order, so a rebuilt control
 //! would otherwise land above the overlay and swallow input.
 //!
-//! **Design mode is per window.** `Ui::set_design_mode` is a flag on the window
-//! (`Core`), not on a `Ui` handle or a container, so a `Designer` turns design
-//! mode on for the whole window it is built in. A host that embeds a designer
-//! next to live widgets in one window (the IDE) would need the designer in its
-//! own child window, or an xui change to scope design mode to a subtree. See the
-//! crate docs.
+//! **Design mode is scoped to the designer.** It is switched on for the
+//! designer's host node, so a host can embed a designer next to live widgets
+//! in one window (the IDE). See the crate docs.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use xui_core::app::Ui;
+use xui_core::arrange::{self, Handle as Bound, LayoutExt, Mounted, absolute, column};
 use xui_core::backend::{
     BackendError, Canvas, Cursor, Dash, Event, NodeKind, NodeSpec, Rgba, Stroke, WidgetId,
 };
@@ -150,16 +151,21 @@ impl<M: 'static> Binder<M> for NoopBinder {
 }
 
 /// The form-designer surface: a live preview panel plus an input/painting
-/// overlay.
+/// overlay, both inside a host node of their own.
 pub struct Designer<M: 'static> {
-    /// The handle the designer was built with. It owns the design-mode scope
-    /// and the parent the preview panel and overlay belong to, so it is used
+    /// The handle scoped to the host node. It owns the design-mode scope and
+    /// is the parent the preview panel and overlay belong to, so it is used
     /// for every node the designer creates even when the host forwards an
     /// [`update`](Designer::update) with a different handle (the IDE edits a
     /// form from a property grid in another pane).
     ui: Ui<M>,
-    panel: Panel<M>,
-    panel_origin: Point,
+    /// The node holding the preview and the overlay, at the origin the
+    /// designer was built at and as large as the form.
+    host: Control<M>,
+    /// The preview panel, filling the host; the live form is built in it.
+    panel: Bound<Panel<M>>,
+    /// The host's layout, which keeps the panel filling it.
+    _frame: Mounted<M>,
     /// The overlay node, recreated after every rebuild. The `Control` destroys
     /// the node when it is replaced or dropped.
     overlay: RefCell<Option<Control<M>>>,
@@ -177,11 +183,13 @@ pub struct Designer<M: 'static> {
 }
 
 impl<M: 'static> Designer<M> {
-    /// Builds a designer showing `doc`, rooted at `bounds` in the host window.
+    /// Builds a designer showing `doc`, its top-left corner at `bounds`'
+    /// top-left in the container `ui` is scoped to (the designer is as large
+    /// as the form).
     ///
     /// `wrap` turns a [`DesignerMsg`] into the host's message type, so the
-    /// overlay can route input back to [`Designer::update`]. The designer turns
-    /// design mode on for the window (see the module docs).
+    /// overlay can route input back to [`Designer::update`]. The designer puts
+    /// its own nodes in design mode, leaving the rest of the window live.
     pub fn new(
         ui: &Ui<M>,
         bounds: Rect,
@@ -189,15 +197,6 @@ impl<M: 'static> Designer<M> {
         catalog: Rc<Catalog>,
         wrap: impl Fn(DesignerMsg) -> M + 'static,
     ) -> Result<Designer<M>, DesignerError> {
-        // Design mode is switched on for the build; a failed construction must
-        // put the window back as it was, or the host's controls stop working.
-        let previous_design_mode = ui.is_design_mode();
-        ui.set_design_mode(true);
-        let restore = |error: DesignerError| {
-            ui.set_design_mode(previous_design_mode);
-            error
-        };
-
         let surface = Rc::new(RefCell::new(Surface::new(
             doc,
             Rc::clone(&catalog),
@@ -205,24 +204,26 @@ impl<M: 'static> Designer<M> {
         )));
         let dpi = ui.dpi();
         let form = surface.borrow().form_rect();
-        let size = Rect::new(
-            0,
-            0,
-            Dip(form.right as f32).to_px(dpi).value(),
-            Dip(form.bottom as f32).to_px(dpi).value(),
-        );
-        let panel_bounds = Rect::new(
+        let host_bounds = Rect::new(
             bounds.left,
             bounds.top,
-            bounds.left + size.width(),
-            bounds.top + size.height(),
+            bounds.left + Dip(form.right as f32).to_px(dpi).value(),
+            bounds.top + Dip(form.bottom as f32).to_px(dpi).value(),
         );
-        let panel = Panel::new(ui, panel_bounds).map_err(|error| restore(error.into()))?;
+        let host = Control::new(ui, &NodeSpec::new(NodeKind::Container, host_bounds))?;
+        let scoped = ui.with_parent(host.id());
+        scoped.set_design_mode(true);
+        let panel = Bound::new();
+        let frame = scoped.mount_in(
+            host.id(),
+            column().child(arrange::panel(absolute()).bind(&panel).fill(1)),
+        )?;
 
         let designer = Designer {
-            ui: ui.clone(),
+            ui: scoped,
+            host,
             panel,
-            panel_origin: Point::new(bounds.left, bounds.top),
+            _frame: frame,
             overlay: RefCell::new(None),
             overlay_id: Cell::new(WidgetId::NONE),
             surface,
@@ -236,7 +237,7 @@ impl<M: 'static> Designer<M> {
             on_double_click: RefCell::new(None),
             design_mode: Cell::new(true),
         };
-        designer.rebuild(ui).map_err(restore)?;
+        designer.rebuild(ui)?;
         Ok(designer)
     }
 
@@ -247,7 +248,7 @@ impl<M: 'static> Designer<M> {
 
     /// The panel that hosts the live widgets.
     pub fn panel_id(&self) -> WidgetId {
-        self.panel.id()
+        self.panel.get().id()
     }
 
     /// The message wrapper the overlay uses, for a host that needs to route a
@@ -664,12 +665,15 @@ impl<M: 'static> Designer<M> {
     fn rebuild(&self, ui: &Ui<M>) -> Result<(), DesignerError> {
         let doc = self.surface.borrow().doc().clone();
         let form = build_with(
-            self.panel.ui(),
+            &self.ui,
             &doc,
             &self.catalog,
             &self.factories,
             &self.binder,
-            BuildOptions { design_mode: true },
+            BuildOptions {
+                design_mode: true,
+                container: Some(self.panel_id()),
+            },
         )?;
         // Create the new overlay before touching the current preview, so a
         // failure leaves the old preview and overlay in place.
@@ -690,8 +694,7 @@ impl<M: 'static> Designer<M> {
     /// re-parent the overlay out of its pane.
     fn create_overlay(&self) -> Result<Control<M>, BackendError> {
         let (width, height) = self.form_px(&self.ui);
-        let origin = self.panel_origin;
-        let bounds = Rect::new(origin.x, origin.y, origin.x + width, origin.y + height);
+        let bounds = Rect::new(0, 0, width, height);
         let overlay = Control::new(&self.ui, &NodeSpec::new(NodeKind::Custom, bounds))?;
 
         let surface = Rc::clone(&self.surface);
@@ -709,23 +712,29 @@ impl<M: 'static> Designer<M> {
         Ok(overlay)
     }
 
-    /// Pushes the document's geometry into the live widgets and resizes the
-    /// panel/overlay when the form's client area changed.
+    /// Pushes the document's geometry into the live widgets, which move
+    /// through the form's layout in one pass, and resizes the panel and the
+    /// overlay when the form's client area changed.
     fn sync_geometry(&self, ui: &Ui<M>) {
         {
             let surface = self.surface.borrow();
             if let Some(live) = self.live.borrow().as_ref() {
-                for node in &surface.doc().nodes {
-                    let rect = surface.node_local_rect(node);
-                    let _ = live.set(&node.name, "left", &Value::Int(rect.left));
-                    let _ = live.set(&node.name, "top", &Value::Int(rect.top));
-                    let _ = live.set(&node.name, "width", &Value::Int(rect.width()));
-                    let _ = live.set(&node.name, "height", &Value::Int(rect.height()));
-                }
+                live.batch(|live| {
+                    // The form's size is its layout's design size, so the
+                    // nodes stay where they were drawn as the form resizes.
+                    let form = surface.form_rect();
+                    live.set_design_size(form.width(), form.height());
+                    for node in &surface.doc().nodes {
+                        let rect = surface.node_local_rect(node);
+                        let _ = live.set(&node.name, "left", &Value::Int(rect.left));
+                        let _ = live.set(&node.name, "top", &Value::Int(rect.top));
+                        let _ = live.set(&node.name, "width", &Value::Int(rect.width()));
+                        let _ = live.set(&node.name, "height", &Value::Int(rect.height()));
+                    }
+                });
             }
         }
-        let bounds = self.resize_panel(ui);
-        ui.apply_moves(&[(self.id(), bounds)]);
+        self.resize_panel(ui);
     }
 
     /// Pushes every node's stored property into the live widgets, so a
@@ -745,15 +754,23 @@ impl<M: 'static> Designer<M> {
         }
     }
 
-    /// Sizes the preview panel to the document's client area and returns its
-    /// bounds. Called on geometry edits and on every rebuild, so an undo, redo
-    /// or `set_doc` that changes the form size keeps panel and overlay in step.
-    fn resize_panel(&self, ui: &Ui<M>) -> Rect {
+    /// Sizes the host (and so the preview panel filling it) and the overlay
+    /// to the document's client area. Called on geometry edits and on every
+    /// rebuild, so an undo, redo or `set_doc` that changes the form size keeps
+    /// panel and overlay in step.
+    fn resize_panel(&self, ui: &Ui<M>) {
         let (width, height) = self.form_px(ui);
-        let origin = self.panel_origin;
-        let bounds = Rect::new(origin.x, origin.y, origin.x + width, origin.y + height);
-        self.panel.set_bounds(bounds);
-        bounds
+        let origin = ui.bounds(self.host.id());
+        let host = Rect::new(
+            origin.left,
+            origin.top,
+            origin.left + width,
+            origin.top + height,
+        );
+        ui.apply_moves(&[
+            (self.host.id(), host),
+            (self.id(), Rect::new(0, 0, width, height)),
+        ]);
     }
 
     /// The form's device-pixel size.
