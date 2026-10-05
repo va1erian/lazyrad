@@ -6,7 +6,7 @@ mod common;
 use xui_core::geometry::{Rect, Size};
 use xui_form::{BuildOptions, Catalog, FormDoc, Node, Value, ValueType};
 
-use common::{Msg, aliased_catalog, click_node, with_form};
+use common::{Msg, aliased_catalog, click_node, with_form, with_form_in_container};
 
 /// A minimal form with one clickable button.
 fn click_doc() -> FormDoc {
@@ -37,7 +37,10 @@ fn design_mode_wires_no_events() {
     let messages = click_node(
         &click_doc(),
         &Catalog::xui(),
-        BuildOptions { design_mode: true },
+        BuildOptions {
+            design_mode: true,
+            ..BuildOptions::default()
+        },
         "cmdGo",
     );
     assert!(messages.is_empty(), "the designer must not run event code");
@@ -277,20 +280,28 @@ fn get_and_set_every_builtin_kind() {
 fn construction_only_properties_are_readable_in_design_mode() {
     let doc = all_kinds_doc();
     let catalog = Catalog::xui();
-    with_form(&doc, &catalog, BuildOptions { design_mode: true }, |form| {
-        assert_eq!(
-            form.get("sepOne", "orientation"),
-            Some(Value::Enum("vertical".to_owned()))
-        );
-        assert_eq!(
-            form.get("txtOne", "cue"),
-            Some(Value::Text("type".to_owned()))
-        );
-        assert_eq!(
-            form.get("radOne", "items"),
-            Some(Value::List(vec!["a".to_owned(), "b".to_owned()]))
-        );
-    });
+    with_form(
+        &doc,
+        &catalog,
+        BuildOptions {
+            design_mode: true,
+            ..BuildOptions::default()
+        },
+        |form| {
+            assert_eq!(
+                form.get("sepOne", "orientation"),
+                Some(Value::Enum("vertical".to_owned()))
+            );
+            assert_eq!(
+                form.get("txtOne", "cue"),
+                Some(Value::Text("type".to_owned()))
+            );
+            assert_eq!(
+                form.get("radOne", "items"),
+                Some(Value::List(vec!["a".to_owned(), "b".to_owned()]))
+            );
+        },
+    );
 }
 
 /// A form with a filling panel and a bottom-right button inside it.
@@ -319,13 +330,14 @@ fn anchor_doc() -> FormDoc {
 fn relayout_fills_and_anchors_bottom_right() {
     let doc = anchor_doc();
     let catalog = Catalog::xui();
-    let (panel, button) = with_form(&doc, &catalog, BuildOptions::default(), |form| {
-        assert_eq!(form.bounds("panMain"), Some(Rect::new(0, 0, 320, 200)));
-        assert_eq!(form.bounds("cmdGo"), Some(Rect::new(200, 150, 250, 190)));
+    let (panel, button) =
+        with_form_in_container(&doc, &catalog, BuildOptions::default(), |form, resize| {
+            assert_eq!(form.bounds("panMain"), Some(Rect::new(0, 0, 320, 200)));
+            assert_eq!(form.bounds("cmdGo"), Some(Rect::new(200, 150, 250, 190)));
 
-        form.relayout(Size::new(500, 400));
-        (form.bounds("panMain"), form.bounds("cmdGo"))
-    });
+            resize(Size::new(500, 400));
+            (form.bounds("panMain"), form.bounds("cmdGo"))
+        });
     assert_eq!(panel, Some(Rect::new(0, 0, 500, 400)));
     assert_eq!(button, Some(Rect::new(380, 350, 430, 390)));
 }
@@ -382,7 +394,7 @@ fn a_form_with_a_bad_parent_fails_to_build() {
 fn relayout_keeps_geometry_and_anchor_edits_made_through_set() {
     let doc = anchor_doc();
     let catalog = Catalog::xui();
-    let button = with_form(&doc, &catalog, BuildOptions::default(), |form| {
+    let button = with_form_in_container(&doc, &catalog, BuildOptions::default(), |form, resize| {
         // Move the button and pin it top-left instead of bottom-right.
         form.set("cmdGo", "left", &Value::Int(10))
             .expect("left is settable");
@@ -390,7 +402,7 @@ fn relayout_keeps_geometry_and_anchor_edits_made_through_set() {
             .expect("top is settable");
         form.set("cmdGo", "anchor", &Value::Enum("top_left".to_owned()))
             .expect("anchor is settable");
-        form.relayout(Size::new(500, 400));
+        resize(Size::new(500, 400));
         form.bounds("cmdGo")
     });
     assert_eq!(button, Some(Rect::new(10, 20, 60, 60)));
@@ -482,9 +494,9 @@ fn relayout_and_edits_move_every_radio_option() {
     let doc = radio_doc();
     let catalog = Catalog::xui();
     let (before, after_resize, after_edit) =
-        with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        with_form_in_container(&doc, &catalog, BuildOptions::default(), |form, resize| {
             let before = form.node_bounds("optSize");
-            form.relayout(Size::new(420, 300));
+            resize(Size::new(420, 300));
             let after_resize = form.node_bounds("optSize");
             form.set("optSize", "left", &Value::Int(10))
                 .expect("left is settable");
@@ -492,11 +504,34 @@ fn relayout_and_edits_move_every_radio_option() {
         });
     assert_eq!(before.len(), 3, "one node per option");
     for (old, new) in before.iter().zip(&after_resize) {
-        // The window grew by (100, 100): every option follows the corner.
+        // The container grew by (100, 100): every option follows the corner.
         assert_eq!((new.left, new.top), (old.left + 100, old.top + 100));
     }
     for (option, moved) in after_resize.iter().zip(&after_edit) {
-        assert_eq!(moved.left, 10, "an edited left moves every option");
+        // The edited design left is still anchored to the grown corner.
+        assert_eq!(moved.left, 110, "an edited left moves every option");
         assert_eq!(moved.height(), option.height());
     }
+}
+
+#[test]
+fn a_node_overflowing_its_parent_keeps_its_design_position() {
+    let mut doc = anchor_doc();
+    // The panel is narrower than the button's right edge, and a label sits
+    // partly off the form's top-left corner.
+    let panel = doc.node_mut("panMain").expect("the panel exists");
+    panel.set_prop("width", Value::Int(220));
+    panel.set_prop("anchor", Value::Enum("top_left".to_owned()));
+    let mut label = Node::new("Label", "lblOff");
+    label.set_prop("left", Value::Int(-10));
+    label.set_prop("top", Value::Int(-5));
+    label.set_prop("width", Value::Int(60));
+    label.set_prop("height", Value::Int(20));
+    doc.insert(label);
+    let catalog = Catalog::xui();
+    let (button, label) = with_form(&doc, &catalog, BuildOptions::default(), |form| {
+        (form.bounds("cmdGo"), form.bounds("lblOff"))
+    });
+    assert_eq!(button, Some(Rect::new(200, 150, 250, 190)));
+    assert_eq!(label, Some(Rect::new(-10, -5, 50, 15)));
 }

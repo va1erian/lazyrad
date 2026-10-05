@@ -21,23 +21,29 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use lazyrad_designer::{
-    Designer, DesignerMsg, PropertyGrid, PropertyGridMsg, Target, Toolbox, ToolboxMsg,
-    handler_events, rename_handlers,
+    Designer, DesignerMsg, PropertyGrid, PropertyGridMsg, Target, ToolboxMsg, handler_events,
+    rename_handlers,
 };
 use lazyrad_project::Catalog;
 use xui_code_editor::{
     Editor, FontConfig, Marker, MarkerKind, Options as EditorOptions, Query, RhaiHighlighter,
 };
 use xui_core::app::{App, Ui};
+use xui_core::arrange::{
+    Build, Entry, Handle, IntoEntry, LayoutExt, Mounted, absolute, build, column, combo_box,
+    menu_bar, panel, row, tabs,
+};
 use xui_core::backend::{BackendError, Event, PlatformSpec, Result as UiResult, TimerId, WidgetId};
 use xui_core::geometry::Point;
-use xui_core::layout::Dock;
+use xui_core::layout::Insets;
 use xui_core::units::Px;
 use xui_core::widget::{
     ComboBox, Dialog, DialogAction, HasText, Label, ListModel, ListView, Menu, MenuId, MenuScope,
-    Panel, Split, Tabs, Toolbar, TreeView,
+    Panel, Split, Tabs, TreeView,
 };
 use xui_core::{Dip, Lucide, Rect, dip};
+
+mod frame;
 
 use crate::command::{Command, Dispatcher};
 use crate::compile::{self, CodeDiagnostic, CompileScheduler};
@@ -62,13 +68,12 @@ const STATUS_HEIGHT: Dip = dip(22.0);
 /// The divider thickness xui's [`Split`] draws, so computed pane sizes are
 /// exact.
 const DIVIDER: f32 = 5.0;
-/// The tab strip height xui's [`Tabs`] reserves at the top of a page. The code
-/// view positions its widgets below it, matching the tab layout.
-const TABS_STRIP: Dip = dip(32.0);
 /// The code view's procedure-combo header height.
 const CODE_HEADER: Dip = dip(26.0);
-/// The device-pixel height of a pane title, so a pane's widget starts below it.
-const PANE_TITLE: i32 = 28;
+/// The gap around and between the code view's procedure combos.
+const CODE_GAP: Dip = dip(12.0);
+/// The height of a pane's title strip; the pane's content starts below it.
+const PANE_TITLE: Dip = dip(28.0);
 /// The margin between a pane's edge and its title, and between the window's
 /// left edge and the status text.
 const PANE_MARGIN: Dip = dip(8.0);
@@ -389,7 +394,7 @@ enum DocumentView {
         designer_ui: Ui<Msg>,
         /// The page panel the designer lives in, kept so its node lives as long
         /// as the document.
-        _page: Panel<Msg>,
+        _page: Rc<Panel<Msg>>,
     },
     /// The code editor, with the two procedure combos for a form's code.
     Code(Box<CodeView>),
@@ -397,11 +402,15 @@ enum DocumentView {
 
 /// One open code document: the editor and, for a form, its procedure combos.
 struct CodeView {
+    /// The page panel the view's layout is mounted in.
+    page: Rc<Panel<Msg>>,
+    /// The page's layout, mounted again when the procedure combo is rebuilt.
+    layout: Mounted<Msg>,
     /// The object combo (the form and its controls). `None` for a module, which
     /// has no events to bind.
-    object: Option<ComboBox<Msg>>,
+    object: Option<Rc<ComboBox<Msg>>>,
     /// The event combo, rebuilt when the object changes.
-    procedure: Option<ComboBox<Msg>>,
+    procedure: Option<Rc<ComboBox<Msg>>>,
     /// The code editor.
     editor: Rc<Editor<Msg>>,
     /// The object entries the combos are built from.
@@ -411,19 +420,6 @@ struct CodeView {
 }
 
 impl CodeView {
-    /// The page children, in the order the tab lays them out.
-    fn children(&self) -> Vec<WidgetId> {
-        let mut ids = Vec::new();
-        if let Some(object) = &self.object {
-            ids.push(object.id());
-        }
-        if let Some(procedure) = &self.procedure {
-            ids.push(procedure.id());
-        }
-        ids.push(self.editor.id());
-        ids
-    }
-
     /// The selected object's entry, if any.
     fn selected_object(&self) -> Option<&ObjectEntry> {
         self.object_index.and_then(|index| self.objects.get(index))
@@ -511,43 +507,41 @@ pub struct IdeApp {
     dispatcher: Dispatcher,
     /// Every menu entry that dispatches a command, for enabling/disabling.
     menu_commands: MenuCommands,
-    /// Kept alive so the menu's nodes live as long as the app; replaced when
-    /// the recent list changes, since xui menus cannot be rebuilt in place.
-    menu: Menu<Msg>,
-    menu_id: WidgetId,
-    _toolbar: Toolbar<Msg>,
-    toolbar_id: WidgetId,
+    /// The menu bar and the layout that places it in its slot, both replaced
+    /// when the recent list changes, since xui menus cannot be rebuilt in
+    /// place.
+    menu: Rc<Menu<Msg>>,
+    menu_layout: Mounted<Msg>,
+    /// The plain panel the menu bar is mounted in.
+    menu_slot: Rc<Panel<Msg>>,
     /// The Project Explorer's context menu, shown at a right-clicked row.
     context_menu: Menu<Msg>,
     /// The item the context menu was opened on.
     context_target: Option<String>,
 
-    outer: Split<Msg>,
-    rest: Split<Msg>,
-    centre: Split<Msg>,
-    right: Split<Msg>,
-    /// The pane containers, kept alive.
-    toolbox_panel: Panel<Msg>,
-    output_panel: Panel<Msg>,
-    project_panel: Panel<Msg>,
-    properties_panel: Panel<Msg>,
-    /// The pane titles. A dropped widget destroys its node, so they live as
-    /// long as the app.
-    pane_labels: Vec<Label<Msg>>,
+    outer: Rc<Split<Msg>>,
+    rest: Rc<Split<Msg>>,
+    centre: Rc<Split<Msg>>,
+    right: Rc<Split<Msg>>,
+    /// The pane cards.
+    project_panel: Rc<Panel<Msg>>,
+    properties_panel: Rc<Panel<Msg>>,
     /// The control catalog shared by every designer and the property grid.
     catalog: Rc<Catalog>,
-    /// The toolbox tiles: one for the whole IDE, routed to the active designer.
-    toolbox: Toolbox<Msg>,
-    /// The property grid, bound to the active designer. It is rebuilt when the
-    /// active form tab changes, so a closed tab's grid cannot keep editing.
-    properties_grid: Option<PropertyGrid<Msg>>,
+    /// The property grid, bound to the active designer, and the layout that
+    /// places it in the Properties pane. Both are rebuilt when the active form
+    /// tab changes, so a closed tab's grid cannot keep editing.
+    properties_grid: Option<Rc<PropertyGrid<Msg>>>,
+    grid_layout: Option<Mounted<Msg>>,
     /// The form the grid is currently bound to, so a queued grid message for a
     /// closed or inactive form is dropped rather than applied elsewhere.
     grid_form: Option<String>,
-    /// The centre split's scoped UI, where document tabs are built.
-    docs_ui: Ui<Msg>,
-    /// The document tab container; `None` only while it is being rebuilt.
-    docs: Option<Tabs<Msg>>,
+    /// The plain panel filling the document area, where the tabs are mounted.
+    docs_slot: Rc<Panel<Msg>>,
+    /// The document tab container and the layout that places it; `None` only
+    /// while it is being rebuilt.
+    docs: Option<Rc<Tabs<Msg>>>,
+    docs_layout: Option<Mounted<Msg>>,
     /// The Start Page, kept alive across tab rebuilds.
     start_page: Option<StartPage<Msg>>,
     documents: Vec<Document>,
@@ -556,7 +550,7 @@ pub struct IdeApp {
 
     /// The Project Explorer and the entries its rows name.
     explorer: Explorer,
-    tree: TreeView<Msg>,
+    tree: Rc<TreeView<Msg>>,
     double_click: DoubleClick,
 
     /// The open project, if any.
@@ -569,10 +563,10 @@ pub struct IdeApp {
     pending: Option<Pending>,
 
     /// The Output pane's label, rewritten as commands are logged.
-    output: Label<Msg>,
+    output: Rc<Label<Msg>>,
     output_lines: Vec<String>,
     /// The Error List filling the Output pane below the log line.
-    error_list: ListView<Msg>,
+    error_list: Rc<ListView<Msg>>,
     /// Every diagnostic currently shown, across documents, for the Error List
     /// and for jumping to an activated row.
     errors: Vec<ErrorEntry>,
@@ -588,7 +582,7 @@ pub struct IdeApp {
     /// The query of an in-progress replace-all, between its two prompts.
     replace_query: Option<Query>,
     /// The status bar, showing the IDE's Design/Run state.
-    status: Label<Msg>,
+    status: Rc<Label<Msg>>,
     /// Launches the player for Run; injectable so tests drive a fake child.
     launcher: Rc<dyn run::Launcher>,
     /// The one running child, if any (issue #16).
@@ -601,109 +595,12 @@ pub struct IdeApp {
 impl IdeApp {
     /// Builds the whole window and returns the app the runtime drives.
     pub fn build(ui: &Ui<Msg>, settings: Settings, recent: Vec<PathBuf>) -> UiResult<IdeApp> {
-        let dpi = ui.dpi();
-        let client = ui.client_rect();
-
-        // The top strips: menu bar, then toolbar, then the split area.
-        let menu_band = Dock::new().top(MENU_HEIGHT).split(client, dpi);
-        let menu_rect = menu_band.top.unwrap_or(client);
-        let toolbar_band = Dock::new().top(TOOLBAR_HEIGHT).split(menu_band.fill, dpi);
-        let toolbar_rect = toolbar_band.top.unwrap_or(client);
-        // A status bar along the bottom shows Design/Run (issue #16).
-        let status_band = Dock::new()
-            .bottom(STATUS_HEIGHT)
-            .split(toolbar_band.fill, dpi);
-        let status_rect = status_band.bottom.unwrap_or_default();
-        let main_rect = status_band.fill;
-
-        let (menu, menu_commands) = build_menu(ui, menu_rect, &recent, None, false)?;
-        let menu_id = menu.id().unwrap_or(WidgetId::NONE);
-
-        let mut toolbar = Toolbar::empty(ui, toolbar_rect)?;
-        for (index, entry) in TOOLBAR.iter().enumerate() {
-            if TOOLBAR_GROUP_STARTS.contains(&index) {
-                toolbar = toolbar.separator();
-            }
-            let tooltip = entry.tooltip();
-            toolbar = match entry.label {
-                Some(label) => toolbar.item_with_text(entry.icon, &tooltip, label),
-                None => toolbar.item(entry.icon, &tooltip),
-            };
-        }
-        let toolbar =
-            toolbar.on_click(|index| TOOLBAR.get(index).map(|entry| Msg::Command(entry.command)));
-        let toolbar_id = toolbar.id();
-
-        // The nested splits. Each pane is a container created through the
-        // split's own scoped `Ui`, so the split can place its children.
-        let outer = Split::row(ui, main_rect)?
-            .on_moved(|position| Some(Msg::PaneMoved(PaneSlot::Toolbox, position.value())));
-        let toolbox_panel = Panel::new(outer.ui(), Rect::default())?;
-        let rest = Split::column(outer.ui(), Rect::default())?
-            .on_moved(|position| Some(Msg::PaneMoved(PaneSlot::Output, position.value())));
-        outer.pane_a(&[toolbox_panel.id()]);
-        outer.pane_b(&[rest.id()]);
-        outer.set_min(dip(80.0), dip(200.0));
-
-        let centre = Split::row(rest.ui(), Rect::default())?
-            .on_moved(|position| Some(Msg::PaneMoved(PaneSlot::Right, position.value())));
-        let output_panel = Panel::new(rest.ui(), Rect::default())?;
-        rest.pane_a(&[centre.id()]);
-        rest.pane_b(&[output_panel.id()]);
-        rest.set_min(dip(200.0), dip(40.0));
-
-        let docs_ui = centre.ui().clone();
-        let right = Split::column(centre.ui(), Rect::default())?
-            .on_moved(|position| Some(Msg::PaneMoved(PaneSlot::Project, position.value())));
-        // The document tabs are built in `rebuild_tabs`, once the whole frame
-        // exists; pane A is filled there.
-        centre.pane_b(&[right.id()]);
-        centre.set_min(dip(200.0), dip(120.0));
-
-        let project_panel = Panel::new(right.ui(), Rect::default())?;
-        let properties_panel = Panel::new(right.ui(), Rect::default())?;
-        right.pane_a(&[project_panel.id()]);
-        right.pane_b(&[properties_panel.id()]);
-        right.set_min(dip(60.0), dip(60.0));
-
-        // Pane contents: a title per pane, the Toolbox tiles, the Project
-        // Explorer tree, and the Output label.
-        let mut labels = Vec::new();
-        labels.push(Label::new(
-            toolbox_panel.ui(),
-            Rect::new(8, 6, 220, 26),
-            "Toolbox",
-        )?);
-        // The toolbox fills its pane below the title. It is parented to the
-        // toolbox panel, so its local coordinates start at the panel's origin.
-        let toolbox = Toolbox::new(
-            toolbox_panel.ui(),
-            Rect::new(0, PANE_TITLE, 140, 200),
-            Msg::Toolbox,
-        )?;
-        labels.push(Label::new(
-            project_panel.ui(),
-            Rect::new(8, 6, 220, 26),
-            "Project",
-        )?);
-        labels.push(Label::new(
-            properties_panel.ui(),
-            Rect::new(8, 6, 220, 26),
-            "Properties",
-        )?);
-        let output = Label::new(output_panel.ui(), Rect::new(8, 8, 480, 24), "Output")?;
-        // The status bar label; `update_status` rewrites it as runs start and end.
-        let status = Label::new(ui, status_rect, "Design")?;
-        // The Error List: one row per compile diagnostic. Activating a row
-        // (double-click or Return) jumps to its position.
-        let error_list = ListView::new(output_panel.ui(), Rect::default(), &[])?
-            .on_activate(|row| Some(Msg::ErrorActivated(row)));
-
-        // The Project Explorer: an empty tree until a project is opened.
-        let tree = TreeView::new(project_panel.ui(), Rect::default(), &[])?
-            .indent_guides(false)
-            .on_select(|node| Some(Msg::ExplorerSelected(node)))
-            .on_context(|node, at| Some(Msg::ExplorerContext(node, at)));
+        // The menu bar, toolbar, the nested panes and the status line, as one
+        // layout; the split positions follow from the settings in
+        // `layout_frame`.
+        let frame = frame::mount(ui)?;
+        let (menu, menu_layout, menu_commands) =
+            build_menu(&frame.menu_slot, ui, &recent, None, false)?;
 
         // The Editor context menu. xui menus cannot be rebuilt at runtime
         // (PLAN.md §10, gap G11), so it is built once and the right-clicked
@@ -762,31 +659,28 @@ impl IdeApp {
             dispatcher: Dispatcher::new(),
             menu_commands,
             menu,
-            menu_id,
-            _toolbar: toolbar,
-            toolbar_id,
+            menu_layout,
+            menu_slot: frame.menu_slot,
             context_menu,
             context_target: None,
-            outer,
-            rest,
-            centre,
-            right,
-            toolbox_panel,
-            output_panel,
-            project_panel,
-            properties_panel,
-            pane_labels: labels,
+            outer: frame.outer,
+            rest: frame.rest,
+            centre: frame.centre,
+            right: frame.right,
+            project_panel: frame.project_panel,
+            properties_panel: frame.properties_panel,
             catalog: Rc::new(lazyrad_project::lazyrad_catalog()),
-            toolbox,
             properties_grid: None,
+            grid_layout: None,
             grid_form: None,
-            docs_ui,
+            docs_slot: frame.docs_slot,
             docs: None,
+            docs_layout: None,
             start_page: None,
             documents: Vec::new(),
             editors,
             explorer: Explorer::empty(),
-            tree,
+            tree: frame.tree,
             double_click: DoubleClick::new(),
             session: None,
             prompt: None,
@@ -800,16 +694,16 @@ impl IdeApp {
             author: String::new(),
             app_dialog: None,
             pending_app: None,
-            output,
+            output: frame.output,
             output_lines: Vec::new(),
-            error_list,
+            error_list: frame.error_list,
             errors: Vec::new(),
             diagnostics,
             _compile_timer: compile_timer,
             last_find: String::new(),
             last_replace: String::new(),
             replace_query: None,
-            status,
+            status: frame.status,
             launcher: Rc::new(run::PlayerLauncher),
             run: RunState::new(),
             exit_save_failed: false,
@@ -830,8 +724,9 @@ impl IdeApp {
         // the shortcut backend then routes it to the dispatcher (gap G10).
         ui.focus(app.centre.id());
 
-        // Window-level events reach the null node; re-flow the frame when the
-        // window resizes. (`Split` does not re-flow itself on resize.)
+        // Window-level events reach the null node. The layout re-flows the
+        // frame on a resize, and the splits then get their stored pane sizes
+        // back (a split keeps its first pane's extent as it resizes).
         ui.register_events(WidgetId::NONE, |event| {
             matches!(event, Event::Resize { .. }).then_some(Msg::Relayout)
         });
@@ -842,39 +737,14 @@ impl IdeApp {
         Ok(app)
     }
 
-    /// Re-flows the whole frame from the window's current client rectangle.
+    /// Sets the splits' positions from the stored pane sizes and the window's
+    /// current size, then lays the window out again.
     pub fn layout_frame(&mut self, ui: &Ui<Msg>) {
         let dpi = ui.dpi();
-        let client = ui.client_rect();
-        let menu_band = Dock::new().top(MENU_HEIGHT).split(client, dpi);
-        let menu_rect = menu_band.top.unwrap_or(client);
-        let toolbar_band = Dock::new().top(TOOLBAR_HEIGHT).split(menu_band.fill, dpi);
-        let toolbar_rect = toolbar_band.top.unwrap_or(client);
-        let status_band = Dock::new()
-            .bottom(STATUS_HEIGHT)
-            .split(toolbar_band.fill, dpi);
-        let status_rect = status_band.bottom.unwrap_or_default();
-        let main_rect = status_band.fill;
-
-        // The status text sits a little in from the window's left edge.
-        let margin = PANE_MARGIN.to_px(dpi).value();
-        let status_text = Rect::new(
-            status_rect.left + margin,
-            status_rect.top,
-            status_rect.right,
-            status_rect.bottom,
-        );
-        ui.apply_moves(&[
-            (self.menu_id, menu_rect),
-            (self.toolbar_id, toolbar_rect),
-            (self.status.id(), status_text),
-        ]);
-
         // The outer split's first pane is the toolbox, so its stored size maps
         // straight through. The others store their second pane's size, so the
         // first pane's extent follows from the laid-out node.
         self.outer.set_position(dip(self.settings.panes.toolbox));
-        self.outer.set_bounds(main_rect);
         self.rest.set_position(first_pane(
             self.rest.id(),
             self.settings.panes.output,
@@ -896,146 +766,7 @@ impl IdeApp {
             ui,
             dpi,
         ));
-
         ui.relayout();
-
-        // Each pane's title strip spans its pane, less a margin either side, so
-        // it reads as a header rather than a box cut off partway.
-        let panes = [
-            self.toolbox_panel.id(),
-            self.project_panel.id(),
-            self.properties_panel.id(),
-        ];
-        let titles: Vec<(WidgetId, Rect)> = self
-            .pane_labels
-            .iter()
-            .zip(panes)
-            .map(|(label, pane)| {
-                let width = ui.bounds(pane).width();
-                let title = Rect::new(margin, 4, (width - margin).max(margin), 24);
-                (label.id(), title)
-            })
-            .collect();
-        ui.apply_moves(&titles);
-
-        // The Project Explorer fills its panel below the title label.
-        let panel = ui.bounds(self.project_panel.id());
-        ui.apply_moves(&[(
-            self.tree.id(),
-            Rect::new(0, 28, panel.width().max(0), panel.height().max(0)),
-        )]);
-
-        // The Toolbox tiles fill their pane below the title; the grid fills the
-        // Properties pane below its title.
-        let toolbox = ui.bounds(self.toolbox_panel.id());
-        ui.apply_moves(&[(
-            self.toolbox.id(),
-            Rect::new(
-                0,
-                PANE_TITLE,
-                toolbox.width().max(0),
-                toolbox.height().max(0),
-            ),
-        )]);
-        let properties = ui.bounds(self.properties_panel.id());
-        if let Some(grid) = &self.properties_grid {
-            grid.set_bounds(Rect::new(
-                0,
-                PANE_TITLE,
-                properties.width().max(0),
-                properties.height().max(0),
-            ));
-        }
-
-        // The Output pane: the log line on top, the Error List below it.
-        let output = ui.bounds(self.output_panel.id());
-        let header = Dip(24.0).to_px(dpi).value();
-        ui.apply_moves(&[
-            (
-                self.output.id(),
-                Rect::new(0, 0, output.width().max(0), header),
-            ),
-            (
-                self.error_list.id(),
-                Rect::new(0, header, output.width().max(0), output.height().max(0)),
-            ),
-        ]);
-
-        if let Some(docs) = &self.docs {
-            docs.relayout();
-        }
-        self.layout_code_views(ui, dpi);
-    }
-
-    /// Positions the procedure combos and the editor of the selected code
-    /// document within its tab page.
-    ///
-    /// The tab lays every page child over the whole page, so the code view owns
-    /// the finer placement: a combo row at the top for a form, then the editor
-    /// filling the rest.
-    fn layout_code_views(&self, ui: &Ui<Msg>, dpi: u32) {
-        let Some(docs) = &self.docs else {
-            return;
-        };
-        let selected = docs.selected();
-        // A rebuilt procedure combo is not in the tab's own page list, so the
-        // view manages the visibility of every code child itself.
-        for (index, other) in self.documents.iter().enumerate() {
-            if let DocumentView::Code(other) = &other.view {
-                let visible = index + 1 == selected;
-                for id in other.children() {
-                    ui.set_visible(id, visible);
-                }
-            }
-        }
-        let Some(document) = selected
-            .checked_sub(1)
-            .and_then(|index| self.documents.get(index))
-        else {
-            return;
-        };
-        let DocumentView::Code(view) = &document.view else {
-            return;
-        };
-        let node = ui.bounds(docs.id());
-        if node.is_empty() {
-            return;
-        }
-        // The page area of the tab container, in the container's coordinates.
-        let bounds = Rect::from_size(node.size());
-        let page = Dock::new().top(TABS_STRIP).split(bounds, dpi).fill;
-        let header = CODE_HEADER.to_px(dpi).value();
-        let gap = (dpi / 8).max(1) as i32;
-
-        let mut moves = Vec::new();
-        let mut editor_top = page.top;
-        if let (Some(object), Some(procedure)) = (&view.object, &view.procedure) {
-            let half = ((page.width() - gap * 3) / 2).max(0);
-            moves.push((
-                object.id(),
-                Rect::new(
-                    page.left + gap,
-                    page.top,
-                    page.left + gap + half,
-                    page.top + header,
-                ),
-            ));
-            moves.push((
-                procedure.id(),
-                Rect::new(
-                    page.left + gap * 2 + half,
-                    page.top,
-                    page.right - gap,
-                    page.top + header,
-                ),
-            ));
-            editor_top = page.top + header;
-        }
-        moves.push((
-            view.editor.id(),
-            Rect::new(page.left, editor_top, page.right, page.bottom),
-        ));
-        ui.apply_moves(&moves);
     }
 
     /// Pushes `settings.theme` into the window's palette.
@@ -1055,20 +786,18 @@ impl IdeApp {
     /// reflects the current list. xui menus cannot be rebuilt in place
     /// (PLAN.md §10, gap G11).
     fn rebuild_menu(&mut self, ui: &Ui<Msg>) {
-        let bounds = ui.bounds(self.menu_id);
         match build_menu(
+            &self.menu_slot,
             ui,
-            bounds,
             &self.settings.recent_projects,
             self.session.as_ref().map(ProjectSession::name),
             self.installer.is_some(),
         ) {
-            Ok((menu, commands)) => {
+            Ok((menu, layout, commands)) => {
                 self.menu_commands = commands;
-                self.menu_id = menu.id().unwrap_or(WidgetId::NONE);
                 self.menu = menu;
+                self.menu_layout = layout;
                 self.refresh_menu();
-                ui.apply_moves(&[(self.menu_id, bounds)]);
             }
             Err(error) => self.log(ui, format!("the menu could not be rebuilt: {error}")),
         }
@@ -2364,35 +2093,44 @@ impl IdeApp {
         // Drop it while that designer may still be open, so a sink does not
         // accumulate every time the active tab changes.
         self.clear_grid_sink();
-        self.properties_grid = None;
+        self.drop_grid();
         self.grid_form = active_name;
         let Some((name, designer, _)) = active else {
             return;
         };
-        let panel = self.properties_panel.ui().clone();
-        let wrap_name = name.clone();
-        match PropertyGrid::new(
-            &panel,
-            Rect::default(),
-            designer,
-            Rc::clone(&self.catalog),
-            move |msg| Msg::PropertyGrid {
-                form: wrap_name.clone(),
-                msg,
-            },
+        let catalog = Rc::clone(&self.catalog);
+        let grid = Handle::new();
+        let build_grid = build(move |ui| {
+            PropertyGrid::new(ui, Rect::default(), designer, catalog, move |msg| {
+                Msg::PropertyGrid {
+                    form: name.clone(),
+                    msg,
+                }
+            })
+            .map_err(|error| BackendError::Other(error.to_string()))
+        })
+        .bind(&grid);
+        // The grid fills the Properties pane below its title.
+        let panel = &self.properties_panel;
+        match panel.ui().mount_in(
+            panel.id(),
+            column()
+                .padding(Insets::new(dip(0.0), PANE_TITLE, dip(0.0), dip(0.0)))
+                .child(build_grid.fill(1)),
         ) {
-            Ok(grid) => {
-                let bounds = ui.bounds(self.properties_panel.id());
-                grid.set_bounds(Rect::new(
-                    0,
-                    PANE_TITLE,
-                    bounds.width().max(0),
-                    bounds.height().max(0),
-                ));
-                self.properties_grid = Some(grid);
+            Ok(layout) => {
+                self.properties_grid = Some(grid.get());
+                self.grid_layout = Some(layout);
             }
             Err(error) => self.log(ui, format!("the property grid could not be built: {error}")),
         }
+    }
+
+    /// Drops the property grid and the layout that places it, releasing the
+    /// designer the grid holds.
+    fn drop_grid(&mut self) {
+        self.grid_layout = None;
+        self.properties_grid = None;
     }
 
     /// Pushes a designer's document into the session, marking the form and its
@@ -2772,12 +2510,9 @@ impl IdeApp {
     /// Handles a change of the object combo: rebuilds the procedure combo for
     /// the chosen object.
     ///
-    /// xui's [`ComboBox`] cannot replace its items, so the procedure combo is
-    /// destroyed and recreated with the new object's events.
+    /// xui's [`ComboBox`] cannot replace its items, so the code page is mounted
+    /// again with a new procedure combo and the same editor and object combo.
     fn change_object(&mut self, name: &str, index: usize, ui: &mut Ui<Msg>) {
-        let Some(scoped) = self.docs.as_ref().map(|docs| docs.ui().clone()) else {
-            return;
-        };
         let mut failure = None;
         {
             let Some(document) = self
@@ -2794,20 +2529,23 @@ impl IdeApp {
                 return;
             };
             view.object_index = Some(index);
-            let items: Vec<&str> = entry
+            let items: Vec<String> = entry
                 .events
                 .iter()
-                .map(|event| event.name.as_str())
+                .map(|event| event.name.clone())
                 .collect();
-            match ComboBox::new(&scoped, Rect::default(), &items)
-                .map(|combo| with_icons(combo, items.len(), Lucide::Zap))
-            {
-                Ok(combo) => {
-                    let name = name.to_owned();
-                    view.procedure =
-                        Some(combo.on_select(move |index| {
-                            Some(Msg::ProcedureChanged(name.clone(), index))
-                        }));
+            let procedure = Handle::new();
+            let combos = view.object.clone().map(|object| {
+                (
+                    build(move |_| Ok(object)).into_entry(),
+                    procedure_combo(name, &items).bind(&procedure).into_entry(),
+                )
+            });
+            let editor = Rc::clone(&view.editor);
+            match mount_code_page(&view.page, combos, build(move |_| Ok(editor)).into_entry()) {
+                Ok(layout) => {
+                    view.layout = layout;
+                    view.procedure = Some(procedure.get());
                 }
                 Err(error) => failure = Some(error.to_string()),
             }
@@ -2818,7 +2556,6 @@ impl IdeApp {
                 format!("the procedure list could not be rebuilt: {error}"),
             );
         }
-        self.layout_code_views(ui, ui.dpi());
     }
 
     /// Inserts the handler for the chosen event (or jumps to it when it already
@@ -2979,21 +2716,34 @@ impl IdeApp {
     /// The node-local point `at` in the tree, in window (client) coordinates.
     ///
     /// Every node's bounds are relative to its parent, so the window origin of
-    /// the tree is the sum of the bounds' origins up the chain: the tree's
-    /// panel, then the three splits that nest it (its own column, the centre
-    /// row, the rest column) and the outer row, which sits at the window.
+    /// the tree is the sum of the bounds' origins up the chain: the tree, its
+    /// pane card, then the splits that nest it (its own column, the centre
+    /// row, the rest column) and the outer row, which sits at the window. A
+    /// split holds each pane's layout in a panel of its own at the pane's
+    /// rectangle: the first pane's starts at the split's origin, the second's
+    /// ends at its far edge, so its offset is the split's extent less the
+    /// pane's.
     fn tree_point_in_window(&self, at: Point, ui: &Ui<Msg>) -> Point {
-        let chain = [
-            self.tree.id(),
-            self.project_panel.id(),
-            self.right.id(),
-            self.centre.id(),
-            self.rest.id(),
-            self.outer.id(),
+        let origin = |id: WidgetId| {
+            let bounds = ui.bounds(id);
+            Point::new(bounds.left, bounds.top)
+        };
+        // The second pane's panel within a row split, which `pane` fills.
+        let second_pane = |split: WidgetId, pane: WidgetId| {
+            Point::new(ui.bounds(split).width() - ui.bounds(pane).width(), 0)
+        };
+        let offsets = [
+            origin(self.tree.id()),
+            origin(self.project_panel.id()),
+            origin(self.right.id()),
+            second_pane(self.centre.id(), self.right.id()),
+            origin(self.centre.id()),
+            origin(self.rest.id()),
+            second_pane(self.outer.id(), self.rest.id()),
+            origin(self.outer.id()),
         ];
-        chain.iter().fold(at, |point, id| {
-            let bounds = ui.bounds(*id);
-            Point::new(point.x + bounds.left, point.y + bounds.top)
+        offsets.iter().fold(at, |point, offset| {
+            Point::new(point.x + offset.x, point.y + offset.y)
         })
     }
 
@@ -3135,6 +2885,7 @@ impl IdeApp {
 
     /// Opens (or focuses) the document tab for an item.
     fn open_document(&mut self, name: &str, kind: DocKind) -> UiResult<()> {
+        let docs_ui = self.docs_slot.ui().clone();
         if let Some(index) = self
             .documents
             .iter()
@@ -3144,60 +2895,68 @@ impl IdeApp {
                 // Page 0 is the Start Page.
                 docs.select(index + 1);
             }
-            // `select` raises no change message, so place the page's code
-            // children (the procedure combos) and rebind the grid here.
-            let docs_ui = self.docs_ui.clone();
-            self.layout_code_views(&docs_ui, docs_ui.dpi());
+            // `select` raises no change message, so rebind the grid here.
             self.refresh_property_grid(&docs_ui);
             return Ok(());
         }
 
         // The tabs can be missing if rebuilding them failed earlier; report it
         // instead of panicking, since every caller logs this error.
-        let Some(scoped) = self.docs.as_ref().map(|docs| docs.ui().clone()) else {
+        let Some(tabs) = self.docs.clone() else {
             return Err(BackendError::Other(
                 "the document tabs are not available".to_owned(),
             ));
         };
-        let (view, ids, title) = self.build_view(&scoped, name, kind)?;
-        let Some(tabs) = self.docs.take() else {
-            return Err(BackendError::Other(
-                "the document tabs are not available".to_owned(),
-            ));
+        let pages = tabs.page_count();
+        let (view, title) = match self.build_view(&tabs, name, kind) {
+            Ok(built) => built,
+            Err(error) => {
+                // A page the failed build added has no document behind it.
+                if tabs.page_count() > pages {
+                    tabs.remove_page(pages);
+                }
+                return Err(error);
+            }
         };
         self.documents.push(Document {
             name: name.to_owned(),
             kind,
-            title: title.clone(),
+            title,
             dirty: false,
             view,
         });
-        self.docs = Some(tabs.page(&title, &ids));
         // Bring the new document to the front (page 0 is the Start Page).
-        if let Some(docs) = &self.docs {
-            docs.select(self.documents.len());
-        }
-        let docs_ui = self.docs_ui.clone();
-        self.layout_code_views(&docs_ui, docs_ui.dpi());
+        tabs.select(self.documents.len());
         self.refresh_property_grid(&docs_ui);
         Ok(())
     }
 
-    /// Builds the widgets behind a document, returning the view, the ids of its
-    /// page children and the tab title.
+    /// Builds the widgets behind a document in a new page of `tabs`,
+    /// returning the view and the tab title.
     fn build_view(
         &mut self,
-        ui: &Ui<Msg>,
+        tabs: &Tabs<Msg>,
         name: &str,
         kind: DocKind,
-    ) -> UiResult<(DocumentView, Vec<WidgetId>, String)> {
+    ) -> UiResult<(DocumentView, String)> {
+        // Every page is a panel filling the page: a card for a designer, which
+        // scopes the designer's design mode to the document area (leaving the
+        // tab strip and the other panes live), and a plain one for code. The
+        // document's widgets are parented to it, so the tab shows and hides
+        // them with the page.
+        let page = Handle::new();
+        let title = match kind {
+            DocKind::Designer => name.to_owned(),
+            DocKind::Code => format!("{name}.rhai"),
+        };
+        let card = match kind {
+            DocKind::Designer => panel(absolute()),
+            DocKind::Code => panel(absolute()).plain(),
+        };
+        tabs.add_layout_page(&title, column().child(card.bind(&page).fill(1)))?;
+        let page = page.get();
         match kind {
             DocKind::Designer => {
-                // The page panel scopes the designer's design mode to the
-                // document area, leaving the tab strip and the other panes live.
-                // Everything the designer builds is parented to it, so the tab
-                // shows and hides the whole form with the page.
-                let page = Panel::new(ui, Rect::default())?;
                 let designer_ui = page.ui().clone();
                 let doc = self
                     .session
@@ -3240,15 +2999,13 @@ impl IdeApp {
                         target: target.clone(),
                     });
                 });
-                let id = page.id();
                 Ok((
                     DocumentView::Designer {
                         designer: Rc::new(RefCell::new(designer)),
                         designer_ui,
                         _page: page,
                     },
-                    vec![id],
-                    name.to_owned(),
+                    title,
                 ))
             }
             DocKind::Code => {
@@ -3261,51 +3018,45 @@ impl IdeApp {
                     .map(|form| procedures::objects(&catalog, form))
                     .unwrap_or_default();
 
-                let object = if is_form {
+                let object = Handle::new();
+                let procedure = Handle::new();
+                let combos = if is_form {
                     let items: Vec<&str> =
                         objects.iter().map(|entry| entry.label.as_str()).collect();
-                    Some(
-                        with_icons(
-                            ComboBox::new(ui, Rect::default(), &items)?,
-                            items.len(),
-                            Lucide::Box,
-                        )
-                        .on_select({
-                            let name = name.to_owned();
-                            move |index| Some(Msg::ObjectChanged(name.clone(), index))
-                        }),
-                    )
-                } else {
-                    None
-                };
-                let procedure = if is_form {
-                    let items = objects
+                    let count = items.len();
+                    let document = name.to_owned();
+                    let object_combo = combo_box(&items)
+                        .then(move |combo| {
+                            with_icons(combo, count, Lucide::Box).on_select(move |index| {
+                                Some(Msg::ObjectChanged(document.clone(), index))
+                            })
+                        })
+                        .bind(&object);
+                    let events = objects
                         .first()
                         .map(ObjectEntry::event_names)
                         .unwrap_or_default();
-                    let items: Vec<&str> = items.iter().map(String::as_str).collect();
-                    Some(
-                        with_icons(
-                            ComboBox::new(ui, Rect::default(), &items)?,
-                            items.len(),
-                            Lucide::Zap,
-                        )
-                        .on_select({
-                            let name = name.to_owned();
-                            move |index| Some(Msg::ProcedureChanged(name.clone(), index))
-                        }),
-                    )
+                    Some((
+                        object_combo.into_entry(),
+                        procedure_combo(name, &events).bind(&procedure).into_entry(),
+                    ))
                 } else {
                     None
                 };
 
-                let editor = Editor::with_options(ui, Rect::default(), self.editor_options())?
-                    .with_highlighter(RhaiHighlighter)
-                    .on_change({
-                        let name = name.to_owned();
-                        move |text| Some(Msg::DocumentEdited(name.clone(), text.to_string()))
-                    });
-                let editor = Rc::new(editor);
+                let options = self.editor_options();
+                let document = name.to_owned();
+                let editor = Handle::new();
+                let editor_build = build(move |ui| {
+                    Ok(Editor::with_options(ui, Rect::default(), options)?
+                        .with_highlighter(RhaiHighlighter)
+                        .on_change(move |text| {
+                            Some(Msg::DocumentEdited(document.clone(), text.to_string()))
+                        }))
+                })
+                .bind(&editor);
+                let layout = mount_code_page(&page, combos, editor_build.into_entry())?;
+                let editor = editor.get();
                 self.editors.borrow_mut().push(Rc::clone(&editor));
                 let source = self
                     .session
@@ -3328,26 +3079,16 @@ impl IdeApp {
                 editor.set_markers(markers);
                 self.schedule_compile(name, &source);
 
-                let mut ids = Vec::new();
-                if let Some(combo) = &object {
-                    ids.push(combo.id());
-                }
-                if let Some(combo) = &procedure {
-                    ids.push(combo.id());
-                }
-                ids.push(editor.id());
                 let view = CodeView {
-                    object,
-                    procedure,
-                    editor: Rc::clone(&editor),
+                    page,
+                    layout,
+                    object: object.try_get(),
+                    procedure: procedure.try_get(),
+                    editor,
                     objects,
                     object_index: is_form.then_some(0),
                 };
-                Ok((
-                    DocumentView::Code(Box::new(view)),
-                    ids,
-                    format!("{name}.rhai"),
-                ))
+                Ok((DocumentView::Code(Box::new(view)), title))
             }
         }
     }
@@ -3360,7 +3101,7 @@ impl IdeApp {
         self.editors.borrow_mut().clear();
         // Drop the grid first: it holds a strong handle on a designer, which
         // would otherwise outlive the document and keep its sinks alive.
-        self.properties_grid = None;
+        self.drop_grid();
         self.grid_form = None;
         self.documents.clear();
         self.errors.clear();
@@ -3370,9 +3111,10 @@ impl IdeApp {
 
     /// Rebuilds the document tabs and their widgets.
     ///
-    /// xui's [`Tabs`] cannot remove a page, and destroying its container
-    /// destroys the document widgets parented to it, so a rebuild recreates the
-    /// open documents from the session. The Start Page is always first.
+    /// Removing a page from xui's [`Tabs`] keeps its layout's widgets alive
+    /// until the container goes, so a rebuild mounts a new container and
+    /// recreates the open documents from the session. The Start Page is always
+    /// first.
     fn rebuild_tabs(&mut self) -> UiResult<()> {
         let open: Vec<(String, DocKind)> = self
             .documents
@@ -3382,29 +3124,32 @@ impl IdeApp {
         self.editors.borrow_mut().clear();
         // The grid holds a designer alive; drop it before the documents so a
         // closed tab's designer is really dropped.
-        self.properties_grid = None;
+        self.drop_grid();
         self.grid_form = None;
         self.documents.clear();
         self.docs = None;
+        self.docs_layout = None;
         self.start_page = None;
 
-        let tabs = Tabs::new(&self.docs_ui, Rect::default())?
-            .on_change(|index| Some(Msg::TabChanged(index)));
+        let container = Handle::new();
+        let slot = &self.docs_slot;
+        let layout = slot.ui().mount_in(
+            slot.id(),
+            column().child(tabs().on_change(Msg::TabChanged).bind(&container).fill(1)),
+        )?;
+        let tabs = container.get();
         let start_page = StartPage::new(tabs.ui(), WELCOME, &self.editor_options().font)?;
-        let start_id = start_page.id();
+        tabs.add_page("Start Page", &[start_page.id()]);
         self.start_page = Some(start_page);
-        self.docs = Some(tabs.page("Start Page", &[start_id]));
+        self.docs = Some(tabs);
+        self.docs_layout = Some(layout);
 
         for (name, kind) in open {
             self.open_document(&name, kind)?;
         }
 
-        if let Some(docs) = &self.docs {
-            self.centre.pane_a(&[docs.id()]);
-            docs.relayout();
-        }
-        // The selected page's designer may have changed; rebind and reposition.
-        let docs_ui = self.docs_ui.clone();
+        // The selected page's designer may have changed; rebind it.
+        let docs_ui = self.docs_slot.ui().clone();
         self.refresh_property_grid(&docs_ui);
         Ok(())
     }
@@ -3465,7 +3210,6 @@ impl App for IdeApp {
                 self.update_title(ui);
             }
             Msg::TabChanged(_) => {
-                self.layout_code_views(ui, ui.dpi());
                 self.refresh_property_grid(ui);
                 self.layout_frame(ui);
                 self.refresh_edit_availability();
@@ -3581,16 +3325,24 @@ fn second_extent_for_size(size: i32, position: f32, dpi: u32) -> f32 {
         .value()
 }
 
-/// Builds the menu bar and the map from each entry's [`MenuId`] to its command.
+/// Builds the menu bar in `slot`, returning it, the layout that places it (which
+/// destroys it when dropped) and the map from each entry's [`MenuId`] to its
+/// command.
 fn build_menu(
+    slot: &Panel<Msg>,
     ui: &Ui<Msg>,
-    bounds: Rect,
     recent: &[PathBuf],
     project_name: Option<&str>,
     make_app_item: bool,
-) -> UiResult<(Menu<Msg>, MenuCommands)> {
-    let mut ids = MenuIds::new();
-    let menu = Menu::bar(ui, bounds)?.build(|bar| {
+) -> UiResult<(Rc<Menu<Msg>>, Mounted<Msg>, MenuCommands)> {
+    let recent = recent.to_vec();
+    let make_exe_label = make_exe::menu_label(project_name);
+    // The menu is filled when the layout is mounted; the command entries it
+    // hands out come back through this cell, which the selection reads.
+    let map: Rc<RefCell<Vec<(MenuId, Command)>>> = Rc::default();
+    let filled = Rc::clone(&map);
+    let fill = move |bar: &mut MenuScope<'_>| {
+        let mut ids = MenuIds::new();
         bar.submenu(ids.plain(), "&File", |file| {
             file.command(&mut ids, Command::NewProject, "&New Project")
                 .command(&mut ids, Command::OpenProject, "&Open Project…");
@@ -3612,11 +3364,7 @@ fn build_menu(
                 .command(&mut ids, Command::SaveAs, "Save &As…")
                 .command(&mut ids, Command::SaveAll, "Save &All")
                 .separator()
-                .command(
-                    &mut ids,
-                    Command::MakeExe,
-                    &make_exe::menu_label(project_name),
-                )
+                .command(&mut ids, Command::MakeExe, &make_exe_label)
                 .separator();
             if make_app_item {
                 file.command(&mut ids, Command::MakeApp, make_app::MENU_LABEL);
@@ -3672,16 +3420,22 @@ fn build_menu(
                 "&End",
             );
         });
-    });
-    let commands = Rc::new(ids.map);
-    let map_for_select = Rc::clone(&commands);
-    let menu = menu.on_select(move |id| {
-        map_for_select
-            .iter()
-            .find(|(entry, _)| *entry == id)
-            .map(|(_, command)| Msg::Command(*command))
-    });
-    Ok((menu, commands))
+        *filled.borrow_mut() = ids.map;
+    };
+    let chosen = Rc::clone(&map);
+    let handle = Handle::new();
+    let bar = menu_bar(fill)
+        .on_select_with(move |id| {
+            chosen
+                .borrow()
+                .iter()
+                .find(|(entry, _)| *entry == id)
+                .map(|(_, command)| Msg::Command(*command))
+        })
+        .bind(&handle);
+    let layout = ui.mount_in(slot.id(), column().child(bar.fill(1)))?;
+    let commands: MenuCommands = Rc::new(map.borrow().clone());
+    Ok((handle.get(), layout, commands))
 }
 
 /// Hands out unique [`MenuId`]s while building the menu, remembering which ones
@@ -3712,6 +3466,38 @@ impl MenuIds {
         self.next += 1;
         id
     }
+}
+
+/// The procedure combo of `document`'s code page over `events`, each marked
+/// with the event icon.
+fn procedure_combo(document: &str, events: &[String]) -> Build<ComboBox<Msg>, Msg> {
+    let items: Vec<&str> = events.iter().map(String::as_str).collect();
+    let count = items.len();
+    let document = document.to_owned();
+    combo_box(&items).then(move |combo| {
+        with_icons(combo, count, Lucide::Zap)
+            .on_select(move |index| Some(Msg::ProcedureChanged(document.clone(), index)))
+    })
+}
+
+/// Mounts a code page in `page`: for a form, the object and procedure combos
+/// in a row above the editor; for a module, the editor alone.
+fn mount_code_page(
+    page: &Panel<Msg>,
+    combos: Option<(Entry<Msg>, Entry<Msg>)>,
+    editor: Entry<Msg>,
+) -> UiResult<Mounted<Msg>> {
+    let mut layout = column();
+    if let Some((object, procedure)) = combos {
+        layout = layout.child(
+            row()
+                .padding(Insets::new(CODE_GAP, dip(0.0), CODE_GAP, dip(0.0)))
+                .gap(CODE_GAP)
+                .children((object.fill(1), procedure.fill(1)))
+                .height(CODE_HEADER),
+        );
+    }
+    page.ui().mount_in(page.id(), layout.child(editor.fill(1)))
 }
 
 /// Gives each of a combo's `count` items the same leading `icon`: the object
@@ -5026,7 +4812,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_move_reflows_the_toolbox_and_grid_into_their_panes() {
+    fn a_pane_move_reflows_the_tree_and_grid_into_their_panes() {
         let dir = std::env::temp_dir().join(format!("lazyrad-ide-panes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let cleanup = dir.clone();
@@ -5041,24 +4827,29 @@ mod tests {
             app.refresh_explorer(ui);
             app.open_document(crate::project::DEFAULT_FORM, DocKind::Designer)
                 .expect("the form opens in a designer");
+            let title = PANE_TITLE.to_px(ui.dpi()).value();
 
-            // Moving the toolbox divider re-flows its contents into the pane.
+            // Moving the toolbox divider moves the split it belongs to.
             app.on_pane_moved(PaneSlot::Toolbox, 220.0, ui);
-            let toolbox_pane = ui.bounds(app.toolbox_panel.id());
-            let toolbox = ui.bounds(app.toolbox.id());
-            assert_eq!(toolbox.left, 0);
-            assert_eq!(toolbox.top, PANE_TITLE);
-            assert_eq!(toolbox.width(), toolbox_pane.width());
-            assert_eq!(toolbox.height(), toolbox_pane.height() - PANE_TITLE);
+            assert_eq!(app.outer.position(), dip(220.0));
 
-            // The grid follows the Properties pane the same way.
+            // Moving the right column's divider re-flows the tree and the grid
+            // into their panes, below the titles.
+            app.on_pane_moved(PaneSlot::Right, 400.0, ui);
+            let project = ui.bounds(app.project_panel.id());
+            let tree = ui.bounds(app.tree.id());
+            assert_eq!(tree.left, 0);
+            assert_eq!(tree.top, title);
+            assert_eq!(tree.width(), project.width());
+            assert_eq!(tree.height(), project.height() - title);
+
             let grid = app.properties_grid.as_ref().expect("the grid is bound");
             let properties = ui.bounds(app.properties_panel.id());
             let grid_bounds = ui.bounds(grid.id());
             assert_eq!(grid_bounds.left, 0);
-            assert_eq!(grid_bounds.top, PANE_TITLE);
+            assert_eq!(grid_bounds.top, title);
             assert_eq!(grid_bounds.width(), properties.width());
-            assert_eq!(grid_bounds.height(), properties.height() - PANE_TITLE);
+            assert_eq!(grid_bounds.height(), properties.height() - title);
             app
         })
         .expect("the offscreen backend runs to completion");

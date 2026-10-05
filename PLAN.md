@@ -255,10 +255,11 @@ designer uses both. Only the portable versions remain; see the note under §10.
   guides and the rubber-band marquee. The overlay handles all mouse input: hit-testing
   against the model's rectangles, capture for drags, and `set_cursor` for handles.
 - **Model-first:** the designer edits the `xui-form` [`FormDoc`](crates/xui-form)
-  and re-applies it to the live widgets through `LiveForm::set` / `apply_moves`.
+  and re-applies it to the live widgets through `LiveForm::set`, which places them
+  again in the form's `absolute()` layout.
   Undo and redo operate on the model. The preview is built with
   `build_with(.., BuildOptions { design_mode: true })`, which consults no event
-  binder, while the host has called `Ui::set_design_mode(true)`.
+  binder, while the designer has put its own host node in design mode.
 - **Toolbox:** a grid of control types. You either click a type and draw it, or
   double-click to drop it at a default size. It needs icon buttons (gap G9).
 - **Property grid:** a two-column list of name and value with editors per type: text,
@@ -366,7 +367,8 @@ The layout follows VB6: a menu bar and toolbar at the top, the toolbox on the le
 document area in the centre, project explorer and properties on the right, and
 immediate/locals/watch panes at the bottom.
 
-- **Layout:** built from xui `Dock` arithmetic, nested `Split`s and `Tabs`. MDI is
+- **Layout:** one xui `arrange` layout: a column of the menu bar, the toolbar,
+  nested `split`s and the status line, with `tabs` for the documents. MDI is
   replaced by tabbed documents, with each form offering a designer and a code view.
   Floating or dockable tool windows are a later goal (gap G8).
 - **Project explorer:** a `TreeView` of Forms, Modules and Classes, with add, remove,

@@ -14,9 +14,10 @@
 //!   selection, the in-process clipboard, the undo/redo [`History`] and the live
 //!   gesture. Everything is in design units, so it is unit-tested without a
 //!   window.
-//! * [`Designer`] is the xui widget: a [`Panel`](xui_core::widget::Panel)
-//!   holding the live widgets and a transparent overlay node that receives input
-//!   and paints.
+//! * [`Designer`] is the xui widget: a host node holding a
+//!   [`Panel`](xui_core::widget::Panel) with the live widgets (mounted in an
+//!   `absolute()` layout by [`xui_form`]) and a transparent overlay node that
+//!   receives input and paints.
 //! * [`Toolbox`] is a [`Custom`](xui_core::backend::NodeKind) icon grid of the
 //!   control kinds. It maps a click to [`ToolboxMsg::Select`] and a
 //!   double-click to [`ToolboxMsg::Activate`]; the host forwards those to
@@ -70,14 +71,12 @@
 //! # }
 //! ```
 //!
-//! # Design mode is per window
+//! # Design mode is scoped to the designer
 //!
-//! [`Ui::set_design_mode`](xui_core::app::Ui::set_design_mode) is a flag on the
-//! window, not on a container or a `Ui` handle, so a [`Designer`] puts the whole
-//! window into design mode. A host that wants a designer *and* live widgets in
-//! one window (the IDE) needs the designer in its own child window, or an xui
-//! change that scopes design mode to a subtree. The designer itself is
-//! unaffected: the overlay receives input either way, and
+//! A [`Designer`] turns [`Ui::set_design_mode`](xui_core::app::Ui::set_design_mode)
+//! on for its own host node only, so the live widgets it shows ignore their
+//! input while the rest of the window (the IDE's panes) stays live. The overlay
+//! receives input either way, and
 //! [`BuildOptions::design_mode`](xui_form::BuildOptions) already leaves the
 //! preview unwired from the host's events.
 
@@ -85,6 +84,7 @@ pub mod geometry;
 mod grid_nav;
 pub mod history;
 mod local_paint;
+mod pinned;
 pub mod property_grid;
 pub mod surface;
 mod text_field;

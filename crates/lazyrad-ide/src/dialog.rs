@@ -14,11 +14,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use xui_core::app::Ui;
+use xui_core::arrange::{Entry, Handle, IntoEntry, LayoutExt, Mounted, absolute, build, button};
 use xui_core::backend::{Event, NodeKind, NodeSpec, Result, TextStyle, WidgetId};
 use xui_core::geometry::Rect;
 use xui_core::message::Key;
 use xui_core::theme::Theme;
-use xui_core::units::Dip;
+use xui_core::units::{Dip, Px};
 use xui_core::widget::{Button, Control};
 
 /// Padding between the card edge and its content.
@@ -70,7 +71,10 @@ pub struct ChoiceDialog<M: 'static> {
     shared: Rc<Shared<M>>,
     layout: Rc<Cell<Layout>>,
     scrim: Control<M>,
-    buttons: Vec<Button<M>>,
+    buttons: Vec<Rc<Button<M>>>,
+    /// The layout that places the buttons on the card, mounted again each
+    /// time the dialog opens.
+    placed: RefCell<Mounted<M>>,
 }
 
 impl<M: 'static> ChoiceDialog<M> {
@@ -142,13 +146,20 @@ impl<M: 'static> ChoiceDialog<M> {
             });
         }
 
-        let mut buttons = Vec::new();
-        for (index, label) in labels.iter().enumerate() {
+        let handles: Vec<Handle<Button<M>>> = labels.iter().map(|_| Handle::new()).collect();
+        let mut entries = Vec::new();
+        for (index, (label, handle)) in labels.iter().zip(&handles).enumerate() {
             let shared = Rc::clone(&shared);
-            buttons.push(
-                Button::new(ui, Rect::default(), label)?.on_click(move || dismiss(&shared, index)),
+            entries.push(
+                button(*label)
+                    .on_click_with(move || dismiss(&shared, index))
+                    .bind(handle)
+                    .into_entry(),
             );
         }
+        // The buttons go where `open` places them; until then they are hidden.
+        let placed = ui.mount(absolute().children(entries))?;
+        let buttons: Vec<Rc<Button<M>>> = handles.iter().map(Handle::get).collect();
         {
             let mut nodes = shared.nodes.borrow_mut();
             for button in &buttons {
@@ -164,6 +175,7 @@ impl<M: 'static> ChoiceDialog<M> {
             layout,
             scrim,
             buttons,
+            placed: RefCell::new(placed),
         })
     }
 
@@ -186,14 +198,17 @@ impl<M: 'static> ChoiceDialog<M> {
         let ui = &self.shared.ui;
         let title = self.shared.title.borrow().clone();
         let message = self.shared.message.borrow().clone();
-        let button_ids: Vec<WidgetId> = self.buttons.iter().map(Button::id).collect();
+        let button_ids: Vec<WidgetId> = self.buttons.iter().map(|button| button.id()).collect();
         let placement = place(ui, self.scrim.id(), &button_ids, &title, &message);
 
-        ui.apply_moves(&placement.moves);
-        self.layout.set(placement.layout);
+        // Shown first: a layout leaves hidden widgets out.
         for id in self.shared.nodes.borrow().iter() {
             ui.set_visible(*id, true);
         }
+        let (scrim, buttons) = placement.moves.split_at(1);
+        ui.apply_moves(scrim);
+        self.place_buttons(ui, buttons);
+        self.layout.set(placement.layout);
         ui.raise(self.scrim.id());
         for button in &self.buttons {
             ui.raise(button.id());
@@ -203,6 +218,31 @@ impl<M: 'static> ChoiceDialog<M> {
         ui.focus(self.scrim.id());
         self.shared.open.set(true);
         ui.invalidate(self.scrim.id());
+    }
+
+    /// Mounts the buttons again at `moves`' rectangles (device pixels).
+    fn place_buttons(&self, ui: &Ui<M>, moves: &[(WidgetId, Rect)]) {
+        let dpi = ui.dpi();
+        let dip = |px: i32| Px(px).to_dip(dpi);
+        let entries: Vec<Entry<M>> = self
+            .buttons
+            .iter()
+            .zip(moves)
+            .map(|(button, (_, rect))| {
+                let button = Rc::clone(button);
+                build(move |_| Ok(button)).at(
+                    dip(rect.left),
+                    dip(rect.top),
+                    dip(rect.width()),
+                    dip(rect.height()),
+                )
+            })
+            .collect();
+        // Re-mounting widgets the dialog already holds creates nothing, so it
+        // cannot fail.
+        if let Ok(placed) = ui.mount(absolute().children(entries)) {
+            self.placed.replace(placed);
+        }
     }
 
     /// Closes the dialog without raising an action.
