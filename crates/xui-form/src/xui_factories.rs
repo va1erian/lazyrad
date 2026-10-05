@@ -3,21 +3,20 @@
 //! The [`Factories::xui`] registry: a factory for every portable `xui-core`
 //! widget in [`Catalog::xui`](crate::Catalog::xui).
 //!
-//! Each factory mirrors the widget's real API: it passes the node's design
-//! rectangle to the widget constructor, forwards the properties the widget can
-//! set, and wires only the events the widget raises. Geometry is applied at
-//! construction, so a node's `left`/`top`/`width`/`height` are in place as soon
-//! as the form is built.
+//! Each factory mirrors the widget's real API: it describes the widget with its
+//! `xui_core::arrange` builder, forwards the properties the widget can set, and
+//! wires only the events the widget raises. The form places the builder at the
+//! node's `left`/`top`/`width`/`height`, so the geometry is in place as soon as
+//! the form is mounted.
 
 use std::cell::{Cell, RefCell};
 
-use xui_core::app::Ui;
-use xui_core::backend::Result as BackendResult;
-use xui_core::geometry::Rect;
+use xui_core::arrange::{self, Handle};
 use xui_core::{HasText, Properties, WidgetId};
 
-use crate::build::{BuildCx, Factories, LiveWidget, SetError, WidgetFactory, WidgetProps};
+use crate::build::{BuildCx, Factories, Made, SetError, WidgetFactory};
 use crate::doc::Node;
+use crate::live::WidgetProps;
 use crate::value::Value;
 
 impl<M: 'static> Factories<M> {
@@ -52,28 +51,25 @@ impl<M: 'static> WidgetFactory<M> for LabelFactory {
         "Label"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let label = xui_core::Label::new(cx.ui(), cx.rect(), &cx.text("text"))?;
-        Ok(cx.live(LabelProps { label }))
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        let label = Handle::new();
+        let build = arrange::label(cx.text("text")).bind(&label);
+        cx.made(build, &label.clone(), LabelProps { label })
     }
 }
 
 struct LabelProps<M: 'static> {
-    label: xui_core::Label<M>,
+    label: Handle<xui_core::Label<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for LabelProps<M> {
     fn id(&self) -> WidgetId {
-        self.label.id()
+        self.label.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.label.text())),
+            "text" => Some(Value::Text(self.label.get().text())),
             _ => None,
         }
     }
@@ -81,7 +77,7 @@ impl<M: 'static> WidgetProps<M> for LabelProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.label.set_text(text);
+                self.label.get().set_text(text);
                 Ok(())
             }
             ("text", _) => Err(SetError::TypeMismatch),
@@ -98,31 +94,28 @@ impl<M: 'static> WidgetFactory<M> for ButtonFactory {
         "Button"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let mut button = xui_core::Button::new(cx.ui(), cx.rect(), &cx.text("text"))?;
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        let button = Handle::new();
+        let mut build = arrange::button(cx.text("text")).bind(&button);
         if let Some(handler) = cx.handler("Click") {
-            button = button.on_click(move || handler(&[]));
+            build = build.then(move |button| button.on_click(move || handler(&[])));
         }
-        Ok(cx.live(ButtonProps { button }))
+        cx.made(build, &button.clone(), ButtonProps { button })
     }
 }
 
 struct ButtonProps<M: 'static> {
-    button: xui_core::Button<M>,
+    button: Handle<xui_core::Button<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for ButtonProps<M> {
     fn id(&self) -> WidgetId {
-        self.button.id()
+        self.button.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.button.text())),
+            "text" => Some(Value::Text(self.button.get().text())),
             _ => None,
         }
     }
@@ -130,7 +123,7 @@ impl<M: 'static> WidgetProps<M> for ButtonProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.button.set_text(text);
+                self.button.get().set_text(text);
                 Ok(())
             }
             ("text", _) => Err(SetError::TypeMismatch),
@@ -139,7 +132,7 @@ impl<M: 'static> WidgetProps<M> for ButtonProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.button.set_enabled(enabled);
+        self.button.get().set_enabled(enabled);
     }
 }
 
@@ -151,33 +144,33 @@ impl<M: 'static> WidgetFactory<M> for CheckBoxFactory {
         "CheckBox"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let mut check = xui_core::CheckBox::new(cx.ui(), cx.rect(), &cx.text("text"))?;
-        check.set_checked(cx.bool("checked", false));
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        let check = Handle::new();
+        let mut build = arrange::checkbox(cx.text("text"))
+            .checked(cx.bool("checked", false))
+            .bind(&check);
         if let Some(handler) = cx.handler("Toggle") {
-            check = check.on_toggle(move |checked| handler(&[Value::Bool(checked)]));
+            build = build.then(move |check| {
+                check.on_toggle(move |checked| handler(&[Value::Bool(checked)]))
+            });
         }
-        Ok(cx.live(CheckBoxProps { check }))
+        cx.made(build, &check.clone(), CheckBoxProps { check })
     }
 }
 
 struct CheckBoxProps<M: 'static> {
-    check: xui_core::CheckBox<M>,
+    check: Handle<xui_core::CheckBox<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for CheckBoxProps<M> {
     fn id(&self) -> WidgetId {
-        self.check.id()
+        self.check.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.check.text())),
-            "checked" => Some(Value::Bool(self.check.is_checked())),
+            "text" => Some(Value::Text(self.check.get().text())),
+            "checked" => Some(Value::Bool(self.check.get().is_checked())),
             _ => None,
         }
     }
@@ -185,11 +178,11 @@ impl<M: 'static> WidgetProps<M> for CheckBoxProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.check.set_text(text);
+                self.check.get().set_text(text);
                 Ok(())
             }
             ("checked", Value::Bool(checked)) => {
-                self.check.set_checked(*checked);
+                self.check.get().set_checked(*checked);
                 Ok(())
             }
             ("text" | "checked", _) => Err(SetError::TypeMismatch),
@@ -198,7 +191,7 @@ impl<M: 'static> WidgetProps<M> for CheckBoxProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.check.set_enabled(enabled);
+        self.check.get().set_enabled(enabled);
     }
 }
 
@@ -210,33 +203,33 @@ impl<M: 'static> WidgetFactory<M> for ToggleButtonFactory {
         "ToggleButton"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let mut toggle = xui_core::ToggleButton::new(cx.ui(), cx.rect(), &cx.text("text"))?;
-        toggle.set_checked(cx.bool("checked", false));
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        let toggle = Handle::new();
+        let mut build = arrange::toggle_button(cx.text("text"))
+            .checked(cx.bool("checked", false))
+            .bind(&toggle);
         if let Some(handler) = cx.handler("Toggle") {
-            toggle = toggle.on_toggle(move |checked| handler(&[Value::Bool(checked)]));
+            build = build.then(move |toggle| {
+                toggle.on_toggle(move |checked| handler(&[Value::Bool(checked)]))
+            });
         }
-        Ok(cx.live(ToggleButtonProps { toggle }))
+        cx.made(build, &toggle.clone(), ToggleButtonProps { toggle })
     }
 }
 
 struct ToggleButtonProps<M: 'static> {
-    toggle: xui_core::ToggleButton<M>,
+    toggle: Handle<xui_core::ToggleButton<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for ToggleButtonProps<M> {
     fn id(&self) -> WidgetId {
-        self.toggle.id()
+        self.toggle.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.toggle.text())),
-            "checked" => Some(Value::Bool(self.toggle.is_checked())),
+            "text" => Some(Value::Text(self.toggle.get().text())),
+            "checked" => Some(Value::Bool(self.toggle.get().is_checked())),
             _ => None,
         }
     }
@@ -244,11 +237,11 @@ impl<M: 'static> WidgetProps<M> for ToggleButtonProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.toggle.set_text(text);
+                self.toggle.get().set_text(text);
                 Ok(())
             }
             ("checked", Value::Bool(checked)) => {
-                self.toggle.set_checked(*checked);
+                self.toggle.get().set_checked(*checked);
                 Ok(())
             }
             ("text" | "checked", _) => Err(SetError::TypeMismatch),
@@ -257,7 +250,7 @@ impl<M: 'static> WidgetProps<M> for ToggleButtonProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.toggle.set_enabled(enabled);
+        self.toggle.get().set_enabled(enabled);
     }
 }
 
@@ -269,39 +262,43 @@ impl<M: 'static> WidgetFactory<M> for RadioGroupFactory {
         "RadioGroup"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let items = cx.list("items");
         let labels: Vec<&str> = items.iter().map(String::as_str).collect();
-        let mut group = xui_core::RadioGroup::new(cx.ui(), cx.rect(), &labels)?;
+        let group = Handle::new();
+        let mut build = arrange::radio_group(&labels).bind(&group);
         let selected = cx.int("selected", 0);
         if selected >= 0 {
-            group.select(selected as usize);
+            build = build.selected(selected as usize);
         }
         if let Some(handler) = cx.handler("Select") {
-            group = group.on_select(move |index| handler(&[Value::Int(index as i64)]));
+            build = build.then(move |group| {
+                group.on_select(move |index| handler(&[Value::Int(index as i64)]))
+            });
         }
-        Ok(cx.live(RadioGroupProps { group, items }))
+        cx.made(build, &group.clone(), RadioGroupProps { group, items })
     }
 }
 
 struct RadioGroupProps<M: 'static> {
-    group: xui_core::RadioGroup<M>,
+    group: Handle<xui_core::RadioGroup<M>>,
     items: Vec<String>,
 }
 
 impl<M: 'static> WidgetProps<M> for RadioGroupProps<M> {
     fn id(&self) -> WidgetId {
-        self.group.ids().first().copied().unwrap_or(WidgetId::NONE)
+        self.group
+            .get()
+            .ids()
+            .first()
+            .copied()
+            .unwrap_or(WidgetId::NONE)
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
             "items" => Some(Value::List(self.items.clone())),
-            "selected" => Some(Value::Int(self.group.selected() as i64)),
+            "selected" => Some(Value::Int(self.group.get().selected() as i64)),
             _ => None,
         }
     }
@@ -309,7 +306,7 @@ impl<M: 'static> WidgetProps<M> for RadioGroupProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("selected", Value::Int(index)) if *index >= 0 => {
-                self.group.select(*index as usize);
+                self.group.get().select(*index as usize);
                 Ok(())
             }
             ("selected", Value::Int(_)) => Err(SetError::TypeMismatch),
@@ -320,29 +317,11 @@ impl<M: 'static> WidgetProps<M> for RadioGroupProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.group.set_enabled(enabled);
+        self.group.get().set_enabled(enabled);
     }
 
     fn node_ids(&self) -> Vec<WidgetId> {
-        self.group.ids()
-    }
-
-    /// One row per option, stacked from the top of `rect`. The row height is
-    /// read from the first option, as xui sizes the rows itself.
-    fn placements(&self, ui: &Ui<M>, rect: Rect) -> Vec<(WidgetId, Rect)> {
-        let ids = self.group.ids();
-        let row = ids
-            .first()
-            .map(|id| ui.bounds(*id).height())
-            .filter(|height| *height > 0)
-            .unwrap_or_else(|| rect.height() / ids.len().max(1) as i32);
-        ids.into_iter()
-            .enumerate()
-            .map(|(index, id)| {
-                let top = rect.top + row * index as i32;
-                (id, Rect::new(rect.left, top, rect.right, top + row))
-            })
-            .collect()
+        self.group.get().ids()
     }
 }
 
@@ -354,36 +333,35 @@ impl<M: 'static> WidgetFactory<M> for EditFactory {
         "Edit"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let cue = cx.text("cue");
-        let mut edit = xui_core::Edit::new(cx.ui(), cx.rect(), &cx.text("text"))?;
+        let edit = Handle::new();
+        let mut build = arrange::edit().text(cx.text("text")).bind(&edit);
         if !cue.is_empty() {
-            edit = edit.cue(&cue);
+            build = build.placeholder(cue.clone());
         }
         if let Some(handler) = cx.handler("Change") {
-            edit = edit.on_change(move |text| handler(&[Value::Text(text.to_owned())]));
+            build = build.then(move |edit| {
+                edit.on_change(move |text| handler(&[Value::Text(text.to_owned())]))
+            });
         }
-        Ok(cx.live(EditProps { edit, cue }))
+        cx.made(build, &edit.clone(), EditProps { edit, cue })
     }
 }
 
 struct EditProps<M: 'static> {
-    edit: xui_core::Edit<M>,
+    edit: Handle<xui_core::Edit<M>>,
     cue: String,
 }
 
 impl<M: 'static> WidgetProps<M> for EditProps<M> {
     fn id(&self) -> WidgetId {
-        self.edit.id()
+        self.edit.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.edit.text())),
+            "text" => Some(Value::Text(self.edit.get().text())),
             "cue" => Some(Value::Text(self.cue.clone())),
             _ => None,
         }
@@ -392,7 +370,7 @@ impl<M: 'static> WidgetProps<M> for EditProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.edit.set_text(text);
+                self.edit.get().set_text(text);
                 Ok(())
             }
             ("text", _) => Err(SetError::TypeMismatch),
@@ -410,31 +388,36 @@ impl<M: 'static> WidgetFactory<M> for MultilineEditFactory {
         "MultilineEdit"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let mut edit = xui_core::MultilineEdit::new(cx.ui(), cx.rect(), &cx.text("text"))?;
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        let edit = Handle::new();
+        let text = cx.text("text");
+        let mut build = arrange::multiline_edit()
+            .then(move |edit: xui_core::MultilineEdit<M>| {
+                edit.set_text(&text);
+                edit
+            })
+            .bind(&edit);
         if let Some(handler) = cx.handler("Change") {
-            edit = edit.on_change(move |text| handler(&[Value::Text(text.to_owned())]));
+            build = build.then(move |edit| {
+                edit.on_change(move |text| handler(&[Value::Text(text.to_owned())]))
+            });
         }
-        Ok(cx.live(MultilineEditProps { edit }))
+        cx.made(build, &edit.clone(), MultilineEditProps { edit })
     }
 }
 
 struct MultilineEditProps<M: 'static> {
-    edit: xui_core::MultilineEdit<M>,
+    edit: Handle<xui_core::MultilineEdit<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for MultilineEditProps<M> {
     fn id(&self) -> WidgetId {
-        self.edit.id()
+        self.edit.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.edit.text())),
+            "text" => Some(Value::Text(self.edit.get().text())),
             _ => None,
         }
     }
@@ -442,7 +425,7 @@ impl<M: 'static> WidgetProps<M> for MultilineEditProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.edit.set_text(text);
+                self.edit.get().set_text(text);
                 Ok(())
             }
             ("text", _) => Err(SetError::TypeMismatch),
@@ -451,7 +434,7 @@ impl<M: 'static> WidgetProps<M> for MultilineEditProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.edit.set_enabled(enabled);
+        self.edit.get().set_enabled(enabled);
     }
 }
 
@@ -463,44 +446,49 @@ impl<M: 'static> WidgetFactory<M> for NumberFieldFactory {
         "NumberField"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let min = cx.float("min", 0.0);
         let max = cx.float("max", 100.0);
         let step = cx.float("step", 1.0);
-        let mut field = xui_core::NumberField::new(cx.ui(), cx.rect(), min, max, step)?;
-        field.set_value(cx.float("value", min));
+        let value = cx.float("value", min);
+        let field = Handle::new();
+        let mut build = arrange::number_field(min, max, step)
+            .then(move |field: xui_core::NumberField<M>| {
+                field.set_value(value);
+                field
+            })
+            .bind(&field);
         if let Some(handler) = cx.handler("Change") {
-            field = field.on_change(move |value| handler(&[Value::Float(value)]));
+            build = build
+                .then(move |field| field.on_change(move |value| handler(&[Value::Float(value)])));
         }
         if let Some(handler) = cx.handler("Commit") {
-            field = field.on_commit(move |value| handler(&[Value::Float(value)]));
+            build = build
+                .then(move |field| field.on_commit(move |value| handler(&[Value::Float(value)])));
         }
-        Ok(cx.live(NumberFieldProps {
-            field,
+        let props = NumberFieldProps {
+            field: field.clone(),
             min: Cell::new(min),
             max: Cell::new(max),
-        }))
+        };
+        cx.made(build, &field, props)
     }
 }
 
 struct NumberFieldProps<M: 'static> {
-    field: xui_core::NumberField<M>,
+    field: Handle<xui_core::NumberField<M>>,
     min: Cell<f64>,
     max: Cell<f64>,
 }
 
 impl<M: 'static> WidgetProps<M> for NumberFieldProps<M> {
     fn id(&self) -> WidgetId {
-        self.field.id()
+        self.field.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "value" => Some(Value::Float(self.field.value())),
+            "value" => Some(Value::Float(self.field.get().value())),
             "min" => Some(Value::Float(self.min.get())),
             "max" => Some(Value::Float(self.max.get())),
             _ => None,
@@ -518,18 +506,20 @@ impl<M: 'static> WidgetProps<M> for NumberFieldProps<M> {
         let number = &number;
         match prop {
             "value" => {
-                self.field.set_value(*number);
+                self.field.get().set_value(*number);
                 Ok(())
             }
             "min" => {
                 self.min.set(*number);
                 self.field
+                    .get()
                     .set_property("min", xui_core::Value::Float(*number));
                 Ok(())
             }
             "max" => {
                 self.max.set(*number);
                 self.field
+                    .get()
                     .set_property("max", xui_core::Value::Float(*number));
                 Ok(())
             }
@@ -538,7 +528,7 @@ impl<M: 'static> WidgetProps<M> for NumberFieldProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.field.set_enabled(enabled);
+        self.field.get().set_enabled(enabled);
     }
 }
 
@@ -550,43 +540,48 @@ impl<M: 'static> WidgetFactory<M> for SliderFactory {
         "Slider"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let min = cx.float("min", 0.0);
         let max = cx.float("max", 100.0);
-        let mut slider = xui_core::Slider::new(cx.ui(), cx.rect(), min, max)?;
-        slider.set_value(cx.float("value", min));
+        let value = cx.float("value", min);
+        let slider = Handle::new();
+        let mut build = arrange::slider(min, max)
+            .then(move |slider: xui_core::Slider<M>| {
+                slider.set_value(value);
+                slider
+            })
+            .bind(&slider);
         if let Some(handler) = cx.handler("Change") {
-            slider = slider.on_change(move |value| handler(&[Value::Float(value)]));
+            build = build
+                .then(move |slider| slider.on_change(move |value| handler(&[Value::Float(value)])));
         }
         if let Some(handler) = cx.handler("Commit") {
-            slider = slider.on_commit(move |value| handler(&[Value::Float(value)]));
+            build = build
+                .then(move |slider| slider.on_commit(move |value| handler(&[Value::Float(value)])));
         }
-        Ok(cx.live(SliderProps {
-            slider,
+        let props = SliderProps {
+            slider: slider.clone(),
             min: Cell::new(min),
             max: Cell::new(max),
-        }))
+        };
+        cx.made(build, &slider, props)
     }
 }
 
 struct SliderProps<M: 'static> {
-    slider: xui_core::Slider<M>,
+    slider: Handle<xui_core::Slider<M>>,
     min: Cell<f64>,
     max: Cell<f64>,
 }
 
 impl<M: 'static> WidgetProps<M> for SliderProps<M> {
     fn id(&self) -> WidgetId {
-        self.slider.id()
+        self.slider.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "value" => Some(Value::Float(self.slider.value())),
+            "value" => Some(Value::Float(self.slider.get().value())),
             "min" => Some(Value::Float(self.min.get())),
             "max" => Some(Value::Float(self.max.get())),
             _ => None,
@@ -604,17 +599,17 @@ impl<M: 'static> WidgetProps<M> for SliderProps<M> {
         let number = &number;
         match prop {
             "value" => {
-                self.slider.set_value(*number);
+                self.slider.get().set_value(*number);
                 Ok(())
             }
             "min" => {
                 self.min.set(*number);
-                self.slider.set_range(*number, self.max.get());
+                self.slider.get().set_range(*number, self.max.get());
                 Ok(())
             }
             "max" => {
                 self.max.set(*number);
-                self.slider.set_range(self.min.get(), *number);
+                self.slider.get().set_range(self.min.get(), *number);
                 Ok(())
             }
             _ => Err(SetError::UnknownProperty),
@@ -622,7 +617,7 @@ impl<M: 'static> WidgetProps<M> for SliderProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.slider.set_enabled(enabled);
+        self.slider.get().set_enabled(enabled);
     }
 }
 
@@ -634,31 +629,29 @@ impl<M: 'static> WidgetFactory<M> for ProgressBarFactory {
         "ProgressBar"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let max = cx.int("max", 100) as i32;
-        let bar = xui_core::ProgressBar::new(cx.ui(), cx.rect(), max)?;
-        bar.set_value(cx.int("value", 0) as i32);
-        Ok(cx.live(ProgressBarProps { bar }))
+        let bar = Handle::new();
+        let build = arrange::progress(max)
+            .value(cx.int("value", 0) as i32)
+            .bind(&bar);
+        cx.made(build, &bar.clone(), ProgressBarProps { bar })
     }
 }
 
 struct ProgressBarProps<M: 'static> {
-    bar: xui_core::ProgressBar<M>,
+    bar: Handle<xui_core::ProgressBar<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for ProgressBarProps<M> {
     fn id(&self) -> WidgetId {
-        self.bar.id()
+        self.bar.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "value" => Some(Value::Int(self.bar.value() as i64)),
-            "max" => Some(Value::Int(self.bar.max() as i64)),
+            "value" => Some(Value::Int(self.bar.get().value() as i64)),
+            "max" => Some(Value::Int(self.bar.get().max() as i64)),
             _ => None,
         }
     }
@@ -666,11 +659,11 @@ impl<M: 'static> WidgetProps<M> for ProgressBarProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("value", Value::Int(value)) => {
-                self.bar.set_value(*value as i32);
+                self.bar.get().set_value(*value as i32);
                 Ok(())
             }
             ("max", Value::Int(value)) => {
-                self.bar.set_max(*value as i32);
+                self.bar.get().set_max(*value as i32);
                 Ok(())
             }
             ("value" | "max", _) => Err(SetError::TypeMismatch),
@@ -679,7 +672,7 @@ impl<M: 'static> WidgetProps<M> for ProgressBarProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.bar.set_enabled(enabled);
+        self.bar.get().set_enabled(enabled);
     }
 }
 
@@ -691,39 +684,42 @@ impl<M: 'static> WidgetFactory<M> for ComboBoxFactory {
         "ComboBox"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let items = cx.list("items");
         let labels: Vec<&str> = items.iter().map(String::as_str).collect();
-        let mut combo = xui_core::ComboBox::new(cx.ui(), cx.rect(), &labels)?;
+        let combo = Handle::new();
         let selected = cx.int("selected", 0);
-        if selected >= 0 {
-            combo.select(selected as usize);
-        }
+        let mut build = arrange::combo_box(&labels)
+            .then(move |combo: xui_core::ComboBox<M>| {
+                if selected >= 0 {
+                    combo.select(selected as usize);
+                }
+                combo
+            })
+            .bind(&combo);
         if let Some(handler) = cx.handler("Select") {
-            combo = combo.on_select(move |index| handler(&[Value::Int(index as i64)]));
+            build = build.then(move |combo| {
+                combo.on_select(move |index| handler(&[Value::Int(index as i64)]))
+            });
         }
-        Ok(cx.live(ComboBoxProps { combo, items }))
+        cx.made(build, &combo.clone(), ComboBoxProps { combo, items })
     }
 }
 
 struct ComboBoxProps<M: 'static> {
-    combo: xui_core::ComboBox<M>,
+    combo: Handle<xui_core::ComboBox<M>>,
     items: Vec<String>,
 }
 
 impl<M: 'static> WidgetProps<M> for ComboBoxProps<M> {
     fn id(&self) -> WidgetId {
-        self.combo.id()
+        self.combo.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
             "items" => Some(Value::List(self.items.clone())),
-            "selected" => Some(Value::Int(self.combo.selected() as i64)),
+            "selected" => Some(Value::Int(self.combo.get().selected() as i64)),
             _ => None,
         }
     }
@@ -731,7 +727,7 @@ impl<M: 'static> WidgetProps<M> for ComboBoxProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("selected", Value::Int(index)) if *index >= 0 => {
-                self.combo.select(*index as usize);
+                self.combo.get().select(*index as usize);
                 Ok(())
             }
             ("selected", Value::Int(_)) => Err(SetError::TypeMismatch),
@@ -742,7 +738,7 @@ impl<M: 'static> WidgetProps<M> for ComboBoxProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.combo.set_enabled(enabled);
+        self.combo.get().set_enabled(enabled);
     }
 }
 
@@ -754,53 +750,57 @@ impl<M: 'static> WidgetFactory<M> for ListViewFactory {
         "ListView"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let items = cx.list("items");
         let labels: Vec<&str> = items.iter().map(String::as_str).collect();
         let multi = cx.bool("multi_select", false);
-        let mut list = xui_core::ListView::new(cx.ui(), cx.rect(), &labels)?.multi_select(multi);
         // The schema default is -1 (no selection), and the writer drops
         // defaults, so a missing key means "nothing selected".
         let selected = cx.int("selected", -1);
-        if selected >= 0 {
-            list.select(Some(selected as usize));
-        } else {
-            list.select(None);
-        }
+        let list = Handle::new();
+        let mut build = arrange::list()
+            .items(&labels)
+            .then(move |list: xui_core::ListView<M>| {
+                let list = list.multi_select(multi);
+                list.select((selected >= 0).then_some(selected as usize));
+                list
+            })
+            .bind(&list);
         if let Some(handler) = cx.handler("Select") {
-            list = list.on_select(move |index| handler(&[Value::Int(index as i64)]));
+            build = build.then(move |list| {
+                list.on_select(move |index| handler(&[Value::Int(index as i64)]))
+            });
         }
         if let Some(handler) = cx.handler("Activate") {
-            list = list.on_activate(move |index| handler(&[Value::Int(index as i64)]));
+            build = build.then(move |list| {
+                list.on_activate(move |index| handler(&[Value::Int(index as i64)]))
+            });
         }
-        Ok(cx.live(ListViewProps {
-            list,
+        let props = ListViewProps {
+            list: list.clone(),
             items: RefCell::new(items),
             multi,
-        }))
+        };
+        cx.made(build, &list, props)
     }
 }
 
 struct ListViewProps<M: 'static> {
-    list: xui_core::ListView<M>,
+    list: Handle<xui_core::ListView<M>>,
     items: RefCell<Vec<String>>,
     multi: bool,
 }
 
 impl<M: 'static> WidgetProps<M> for ListViewProps<M> {
     fn id(&self) -> WidgetId {
-        self.list.id()
+        self.list.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
             "items" => Some(Value::List(self.items.borrow().clone())),
             "selected" => Some(Value::Int(
-                self.list.selected().map_or(-1, |index| index as i64),
+                self.list.get().selected().map_or(-1, |index| index as i64),
             )),
             "multi_select" => Some(Value::Bool(self.multi)),
             _ => None,
@@ -810,13 +810,15 @@ impl<M: 'static> WidgetProps<M> for ListViewProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("selected", Value::Int(index)) => {
-                self.list.select((*index >= 0).then_some(*index as usize));
+                self.list
+                    .get()
+                    .select((*index >= 0).then_some(*index as usize));
                 Ok(())
             }
             ("selected", _) => Err(SetError::TypeMismatch),
             ("items", Value::List(items)) => {
                 let rows: Vec<&str> = items.iter().map(String::as_str).collect();
-                self.list.set_items(&rows);
+                self.list.get().set_items(&rows);
                 *self.items.borrow_mut() = items.clone();
                 Ok(())
             }
@@ -827,7 +829,7 @@ impl<M: 'static> WidgetProps<M> for ListViewProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.list.set_enabled(enabled);
+        self.list.get().set_enabled(enabled);
     }
 }
 
@@ -839,30 +841,27 @@ impl<M: 'static> WidgetFactory<M> for GroupBoxFactory {
         "GroupBox"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let group = xui_core::GroupBox::new(cx.ui(), cx.rect(), &cx.text("text"))?;
-        let scoped = cx.ui().with_parent(group.id());
-        Ok(cx.live(GroupBoxProps { group, scoped }))
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        // The children are mounted in the frame's own node once it exists (see
+        // `placement`), so its content layout here stays empty.
+        let group = Handle::new();
+        let build = arrange::group(cx.text("text"), arrange::absolute()).bind(&group);
+        cx.made(build, &group.clone(), GroupBoxProps { group })
     }
 }
 
 struct GroupBoxProps<M: 'static> {
-    group: xui_core::GroupBox<M>,
-    scoped: xui_core::app::Ui<M>,
+    group: Handle<xui_core::GroupBox<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for GroupBoxProps<M> {
     fn id(&self) -> WidgetId {
-        self.group.id()
+        self.group.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.group.text())),
+            "text" => Some(Value::Text(self.group.get().text())),
             _ => None,
         }
     }
@@ -870,16 +869,12 @@ impl<M: 'static> WidgetProps<M> for GroupBoxProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.group.set_text(text);
+                self.group.get().set_text(text);
                 Ok(())
             }
             ("text", _) => Err(SetError::TypeMismatch),
             _ => Err(SetError::UnknownProperty),
         }
-    }
-
-    fn container_ui(&self) -> Option<&xui_core::app::Ui<M>> {
-        Some(&self.scoped)
     }
 }
 
@@ -891,23 +886,22 @@ impl<M: 'static> WidgetFactory<M> for PanelFactory {
         "Panel"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let panel = xui_core::Panel::new(cx.ui(), cx.rect())?;
-        Ok(cx.live(PanelProps { panel }))
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        // The children are mounted in the panel's node once it exists (see
+        // `placement`), so its content layout here stays empty.
+        let panel = Handle::new();
+        let build = arrange::panel(arrange::absolute()).bind(&panel);
+        cx.made(build, &panel.clone(), PanelProps { panel })
     }
 }
 
 struct PanelProps<M: 'static> {
-    panel: xui_core::Panel<M>,
+    panel: Handle<xui_core::Panel<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for PanelProps<M> {
     fn id(&self) -> WidgetId {
-        self.panel.id()
+        self.panel.get().id()
     }
 
     fn get_own(&self, _prop: &str) -> Option<Value> {
@@ -918,12 +912,8 @@ impl<M: 'static> WidgetProps<M> for PanelProps<M> {
         Err(SetError::UnknownProperty)
     }
 
-    fn container_ui(&self) -> Option<&xui_core::app::Ui<M>> {
-        Some(self.panel.ui())
-    }
-
     fn set_enabled_hint(&self, enabled: bool) {
-        self.panel.set_enabled(enabled);
+        self.panel.get().set_enabled(enabled);
     }
 }
 
@@ -935,32 +925,31 @@ impl<M: 'static> WidgetFactory<M> for SeparatorFactory {
         "Separator"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let vertical = cx.text("orientation") == "vertical";
-        let separator = if vertical {
-            xui_core::Separator::vertical(cx.ui(), cx.rect())?
+        let separator = Handle::new();
+        let build = if vertical {
+            arrange::vertical_separator()
         } else {
-            xui_core::Separator::new(cx.ui(), cx.rect())?
-        };
-        Ok(cx.live(SeparatorProps {
-            separator,
+            arrange::separator()
+        }
+        .bind(&separator);
+        let props = SeparatorProps {
+            separator: separator.clone(),
             vertical,
-        }))
+        };
+        cx.made(build, &separator, props)
     }
 }
 
 struct SeparatorProps<M: 'static> {
-    separator: xui_core::Separator<M>,
+    separator: Handle<xui_core::Separator<M>>,
     vertical: bool,
 }
 
 impl<M: 'static> WidgetProps<M> for SeparatorProps<M> {
     fn id(&self) -> WidgetId {
-        self.separator.id()
+        self.separator.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
@@ -993,31 +982,28 @@ impl<M: 'static> WidgetFactory<M> for HyperlinkFactory {
         "Hyperlink"
     }
 
-    fn create(
-        &self,
-        cx: &mut BuildCx<'_, M>,
-        _node: &Node,
-    ) -> BackendResult<Box<dyn LiveWidget<M>>> {
-        let mut link = xui_core::Hyperlink::new(cx.ui(), cx.rect(), &cx.text("text"))?;
+    fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
+        let link = Handle::new();
+        let mut build = arrange::hyperlink(cx.text("text")).bind(&link);
         if let Some(handler) = cx.handler("Click") {
-            link = link.on_click(move || handler(&[]));
+            build = build.then(move |link| link.on_click(move || handler(&[])));
         }
-        Ok(cx.live(HyperlinkProps { link }))
+        cx.made(build, &link.clone(), HyperlinkProps { link })
     }
 }
 
 struct HyperlinkProps<M: 'static> {
-    link: xui_core::Hyperlink<M>,
+    link: Handle<xui_core::Hyperlink<M>>,
 }
 
 impl<M: 'static> WidgetProps<M> for HyperlinkProps<M> {
     fn id(&self) -> WidgetId {
-        self.link.id()
+        self.link.get().id()
     }
 
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
-            "text" => Some(Value::Text(self.link.text())),
+            "text" => Some(Value::Text(self.link.get().text())),
             _ => None,
         }
     }
@@ -1025,7 +1011,7 @@ impl<M: 'static> WidgetProps<M> for HyperlinkProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("text", Value::Text(text)) => {
-                self.link.set_text(text);
+                self.link.get().set_text(text);
                 Ok(())
             }
             ("text", _) => Err(SetError::TypeMismatch),
@@ -1034,7 +1020,7 @@ impl<M: 'static> WidgetProps<M> for HyperlinkProps<M> {
     }
 
     fn set_enabled_hint(&self, enabled: bool) {
-        self.link.set_enabled(enabled);
+        self.link.get().set_enabled(enabled);
     }
 }
 

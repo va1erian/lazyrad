@@ -9,8 +9,8 @@ bindings as data, validates that data against a typed schema, and builds live
 ```text
             schema                 document                live widgets
 Catalog ──────────────► FormDoc ──────────────► build() ──────────────► LiveForm
-(what a kind     validate()   (plain TOML,     (Factories + Binder)
-  supports)                     byte-stable)
+(what a kind     validate()   (plain TOML,     (Factories + Binder,
+  supports)                     byte-stable)     absolute() layouts)
 ```
 
 ## Why it is separate
@@ -39,7 +39,7 @@ catalog.alias("CommandButton", "Button"); // expose `Button` under a VB name
 | Schema | `Catalog`, `WidgetSpec`, `PropertySpec`, `EventSpec` | One source of truth for the designer, validation and completion |
 | Document | `FormDoc`, `Node`, `WindowNode` | Flat, `parent = "…"`-referenced, byte-stable round trip |
 | Validation | `FormDoc::validate`, `Diagnostic` | Every problem at once, with severities |
-| Building | `build`, `Factories`, `Binder`, `LiveWidget`, `LiveForm` | Live widgets and event wiring |
+| Building | `build`, `Factories`, `Made`, `Binder`, `LiveWidget`, `LiveForm` | Live widgets, their layout and event wiring |
 
 ## Example
 
@@ -85,18 +85,28 @@ text = "Go"
 # use xui_form::{LiveForm, Value, SetError};
 # fn demo(form: &LiveForm<()>) -> Result<(), SetError> {
 form.set("cmdGo", "text", &Value::Text("Go!".into()))?;
+form.set("cmdGo", "left", &Value::Int(24))?; // moves the button
 let text = form.get("cmdGo", "text");
-form.relayout(xui_core::geometry::Size::new(800, 600));
 # Ok(())
 # }
 ```
 
-`relayout` applies each node's `anchor` against the design size with
-`xui_core::layout::anchored` and moves everything in one `Ui::apply_moves` call.
-Call it from a resize handler.
+The form is mounted as `xui_core::arrange::absolute()` layouts: one for the
+window (or the container node named by `BuildOptions::container`) and one inside
+each container node. Every node sits at its `left`/`top`/`width`/`height` and
+follows its `anchor` as the window or container grows or shrinks from its
+design size, so the form re-anchors itself on every resize. A geometry or
+anchor edit through `LiveForm::set` mounts the affected level again over the
+same widgets; `LiveForm::batch` applies a run of edits in one pass.
+
+A factory describes its widget with an `arrange` builder bound to a `Handle`
+and returns both as a `Made`, with the `LiveWidget` that reaches the widget
+through the handle once the form is mounted.
 
 ## Design mode
 
-`build_with(.., BuildOptions { design_mode: true })` consults no binder and
-expects the host to have called `Ui::set_design_mode(true)`. That is how a form
-designer renders a live preview.
+`build_with(.., BuildOptions { design_mode: true, .. })` consults no binder and
+expects the host to have put the form's container in design mode
+(`Ui::set_design_mode(true)` on its handle). That is how a form designer renders
+a live preview; it calls `LiveForm::set_design_size` as the user resizes the
+form, so the nodes stay where they were drawn.

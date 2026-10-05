@@ -12,6 +12,7 @@
 //! * **validation** ([`FormDoc::validate`]) that reports every problem as a
 //!   [`Diagnostic`];
 //! * a **builder** ([`build`]) that turns a document into live `xui` widgets,
+//!   placed in an `absolute()` layout by their design rectangles and anchors,
 //!   mapping events through a host-supplied [`Binder`].
 //!
 //! # Upstream intent
@@ -55,6 +56,8 @@ pub mod schema;
 pub mod validate;
 pub mod value;
 
+mod live;
+mod placement;
 mod xui_factories;
 
 /// The current document format; loading anything newer is an error.
@@ -62,7 +65,7 @@ pub const FORMAT_VERSION: u32 = 1;
 
 pub use build::{
     Binder, BuildCx, BuildError, BuildOptions, EventHandler, EventRef, Factories, LiveForm,
-    LiveWidget, SetError, WidgetFactory, build, build_with,
+    LiveWidget, Made, SetError, WidgetFactory, build, build_with,
 };
 pub use doc::{FormDoc, LoadError, Node, WindowNode};
 pub use schema::{Access, ArgSpec, Catalog, Children, EventSpec, PropertySpec, WidgetSpec};
