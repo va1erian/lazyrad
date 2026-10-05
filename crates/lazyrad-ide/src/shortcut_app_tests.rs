@@ -12,8 +12,8 @@ use lazyrad_designer::{DesignerMsg, Tool, ToolboxMsg};
 use xui_canvas::OffscreenBackend;
 use xui_code_editor::platform::InProcessClipboard;
 use xui_core::app::{App, Ui, run_app};
+use xui_core::arrange::{Handle, LayoutExt, absolute, edit};
 use xui_core::backend::{Backend, Event, WindowId};
-use xui_core::geometry::Rect;
 use xui_core::message::Key;
 use xui_core::widget::{Edit, HasText};
 
@@ -244,7 +244,7 @@ fn edit_commands_leave_the_document_clean_unless_they_change_text() {
 // ---- xui's Edit: text boxes handle the chords themselves ----
 
 /// The window and text box the app hands to the scenario.
-type Built = (WindowId, Edit<Msg>);
+type Built = (WindowId, Rc<Edit<Msg>>);
 
 /// An app that only records the messages it is sent.
 struct Recorder {
@@ -325,7 +325,10 @@ fn a_text_box_keeps_the_edit_chords_and_the_window_keeps_the_file_chords() {
     });
     run_app(backend, default_platform_spec(), move |ui| {
         *proxy_cell.borrow_mut() = Some(ui.proxy());
-        let edit = Edit::new(ui, Rect::new(0, 0, 200, 28), "hello").expect("the edit builds");
+        let field = Handle::new();
+        ui.root(absolute().child(edit().text("hello").bind(&field).at(0, 0, 200, 28)))
+            .expect("the edit builds");
+        let edit = field.get();
         edit.focus();
         *slot_for_app.borrow_mut() = Some((ui.window(), edit));
         Recorder { seen: seen_for_app }
