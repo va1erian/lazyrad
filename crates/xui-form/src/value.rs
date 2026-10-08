@@ -11,7 +11,7 @@
 //! An [`Value::Int`] is accepted wherever a [`ValueType::Float`] is expected, so
 //! a hand-written `1` reads as `1.0`.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde::Serialize;
 use xui_core::Color;
@@ -39,9 +39,9 @@ pub enum Value {
     /// A list of strings (list and combo items).
     List(Vec<String>),
     /// Raw bytes: a method argument such as the file a script hands
-    /// [`PictureBox::load`](crate::picture). Shared, so passing a large file
-    /// between the script and a control never copies it.
-    Bytes(Rc<[u8]>),
+    /// [`PictureBox::load`](crate::picture). Shared (and `Send`, like every
+    /// other value), so passing one around never copies a large file.
+    Bytes(Arc<[u8]>),
 }
 
 impl Value {
@@ -550,6 +550,12 @@ mod tests {
             Ok(Value::Enum("b".to_owned()))
         );
         assert!(!ty.accepts(&Value::Enum("b".to_owned())));
+    }
+
+    #[test]
+    fn values_can_cross_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Value>();
     }
 
     #[test]
