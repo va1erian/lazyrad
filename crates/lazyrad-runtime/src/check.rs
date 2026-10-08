@@ -20,17 +20,33 @@
 //! runtime error (the player's exit code 2) rather than a check failure.
 //! Evaluating scripts during the check would run their side effects (a
 //! `msg_box`, say) before the program starts.
+//!
+//! Besides parse errors, the check runs [`lint`](crate::lint), a static pass
+//! over the compiled AST for the mistakes that compile but fail at run time.
+//! Its findings are warnings: they go in [`CheckReport::lints`] and never make
+//! [`CheckReport::is_empty`] false. The one thing the lint evaluates is a
+//! harmless probe call into a module to ask the engine whether a registered
+//! extension defines it.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
-use lazyrad_project::{Diagnostic, DiagnosticKind};
+use rhai::Engine;
+
+use lazyrad_project::{Diagnostic, DiagnosticKind, lazyrad_catalog};
 
 use xui_rhai::ScriptError;
 
 use crate::form::{FormRuntime, RuntimeError, open_project};
 
-/// Every problem that would stop a project from starting.
+/// Every problem a check found.
+///
+/// [`diagnostics`](CheckReport::diagnostics) and
+/// [`scripts`](CheckReport::scripts) are errors that stop a project from
+/// starting; [`lints`](CheckReport::lints) are warnings about scripts that
+/// compile but are likely to fail at run time, and never make
+/// [`is_empty`](CheckReport::is_empty) false.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckReport {
     /// File-level and form-level problems: missing files, a bad `.lfm`, an
@@ -38,18 +54,44 @@ pub struct CheckReport {
     pub diagnostics: Vec<Diagnostic>,
     /// Scripts that failed to compile, each located in its source file.
     pub scripts: Vec<ScriptError>,
+    /// Scripts that compiled but a static lint flagged, located in their file.
+    pub lints: Vec<ScriptError>,
 }
 
 impl CheckReport {
     /// Whether the project is clean and ready to run.
+    ///
+    /// Lint warnings do not count: a project with warnings still runs.
     pub fn is_empty(&self) -> bool {
         self.diagnostics.is_empty() && self.scripts.is_empty()
     }
 
-    /// How many problems the report lists.
+    /// How many errors (not warnings) the report lists.
     pub fn len(&self) -> usize {
         self.diagnostics.len() + self.scripts.len()
     }
+
+    /// The lint warnings, which do not stop the project from running.
+    pub fn warnings(&self) -> &[ScriptError] {
+        &self.lints
+    }
+}
+
+/// The engine a check compiles with: the shipped one plus every registered
+/// extension, so a `module::fn` lint knows the modules they define.
+fn check_engine() -> Engine {
+    let mut engine = crate::new_engine();
+    crate::extensions::apply(&mut engine, &crate::extensions::ExtensionScope { form: "" });
+    engine
+}
+
+/// The names a script sees without declaring them: `form`, `app` and every
+/// control named here.
+fn supplied(names: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+    let mut supplied: BTreeSet<String> = names.into_iter().collect();
+    supplied.insert("form".to_owned());
+    supplied.insert("app".to_owned());
+    supplied
 }
 
 /// Validates and compiles the project named by `path` without opening a window.
@@ -62,6 +104,7 @@ pub fn check_project(path: impl AsRef<Path>) -> Result<CheckReport, RuntimeError
     let mut report = CheckReport {
         diagnostics: project.validate(&dir),
         scripts: Vec::new(),
+        lints: Vec::new(),
     };
 
     // `Project::validate` only checks that the startup *item* exists; a module
@@ -77,9 +120,15 @@ pub fn check_project(path: impl AsRef<Path>) -> Result<CheckReport, RuntimeError
         ));
     }
 
-    // One engine parses every script; compilation only needs the grammar, not
-    // the form's controls or globals, so the shared setup is enough.
-    let engine = crate::new_engine();
+    // One engine parses every script and resolves the extension modules the
+    // `module::fn` lint checks against.
+    let engine = check_engine();
+    let project_modules = project_modules(&project);
+
+    // A lint needs the control names a form supplies, so parse every form once.
+    let catalog = lazyrad_catalog();
+    let controls = form_controls(&project, &dir, &catalog);
+
     for item in &project.items {
         let code_path = dir.join(item.code());
         // A missing or unreadable script is already a validation diagnostic, so
@@ -87,15 +136,67 @@ pub fn check_project(path: impl AsRef<Path>) -> Result<CheckReport, RuntimeError
         let Ok(source) = fs::read_to_string(&code_path) else {
             continue;
         };
-        if let Err(error) = engine.compile(&source) {
-            report.scripts.push(ScriptError::from_parse(
-                item.code().display().to_string(),
-                &error,
-            ));
+        let file = item.code().display().to_string();
+        match engine.compile(&source) {
+            Ok(ast) => {
+                let supplied = supplied(controls_for(&controls, item.name()));
+                report.lints.extend(crate::lint::script(
+                    &ast,
+                    &file,
+                    &supplied,
+                    &project_modules,
+                    &engine,
+                ));
+            }
+            Err(error) => report.scripts.push(ScriptError::from_parse(file, &error)),
         }
     }
 
     Ok(report)
+}
+
+/// The project's own module names.
+fn project_modules(project: &lazyrad_project::Project) -> BTreeSet<String> {
+    project
+        .items
+        .iter()
+        .filter(|item| item.layout().is_none())
+        .map(|item| item.name().to_owned())
+        .collect()
+}
+
+/// The control names of every form, keyed by form name.
+fn form_controls(
+    project: &lazyrad_project::Project,
+    dir: &Path,
+    catalog: &lazyrad_project::Catalog,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut controls = BTreeMap::new();
+    for item in &project.items {
+        let Some(layout) = item.layout() else {
+            continue;
+        };
+        let path = dir.join(layout);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(doc) = lazyrad_project::parse_form(&path, &text, catalog) {
+            controls.insert(
+                item.name().to_owned(),
+                doc.nodes.iter().map(|node| node.name.clone()).collect(),
+            );
+        }
+    }
+    controls
+}
+
+/// The controls a script may reference: its own form's, or every form's for a
+/// module (which has no form of its own).
+fn controls_for(controls: &BTreeMap<String, BTreeSet<String>>, name: &str) -> BTreeSet<String> {
+    match controls.get(name) {
+        Some(own) => own.clone(),
+        None => controls.values().flatten().cloned().collect(),
+    }
 }
 
 /// Checks a runtime that is already loaded, without reading any files.
@@ -134,22 +235,59 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
         }
     }
 
-    let engine = crate::new_engine();
+    let engine = check_engine();
+    let project_modules: BTreeSet<String> = runtime
+        .modules
+        .iter()
+        .map(|module| module.name.clone())
+        .collect();
+    let controls: BTreeMap<String, BTreeSet<String>> = runtime
+        .forms
+        .iter()
+        .map(|(name, form)| {
+            (
+                name.clone(),
+                form.doc
+                    .nodes
+                    .iter()
+                    .map(|node| node.name.clone())
+                    .collect(),
+            )
+        })
+        .collect();
+
     let sources = runtime
         .forms
         .values()
-        .map(|form| (form.code_file.as_str(), form.code.as_str()))
-        .chain(
-            runtime
-                .modules
-                .iter()
-                .map(|module| (module.file.as_str(), module.source.as_str())),
-        );
-    for (file, source) in sources {
-        if let Err(error) = engine.compile(source) {
-            report
+        .map(|form| {
+            (
+                form.code_file.as_str(),
+                form.code.as_str(),
+                form.name.as_str(),
+            )
+        })
+        .chain(runtime.modules.iter().map(|module| {
+            (
+                module.file.as_str(),
+                module.source.as_str(),
+                module.name.as_str(),
+            )
+        }));
+    for (file, source, name) in sources {
+        match engine.compile(source) {
+            Ok(ast) => {
+                let supplied = supplied(controls_for(&controls, name));
+                report.lints.extend(crate::lint::script(
+                    &ast,
+                    file,
+                    &supplied,
+                    &project_modules,
+                    &engine,
+                ));
+            }
+            Err(error) => report
                 .scripts
-                .push(ScriptError::from_parse(file.to_owned(), &error));
+                .push(ScriptError::from_parse(file.to_owned(), &error)),
         }
     }
     report
@@ -281,6 +419,190 @@ mod tests {
         let dir = scratch("empty");
         assert!(check_project(&dir).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_top_level_const_used_in_a_function_is_a_lint() {
+        let dir = scratch("lint-const");
+        write_project(
+            &dir,
+            "const GREETING = \"hi\";\nfn hello() { greeting_label.text = GREETING; }\n",
+        );
+
+        let report = check_project(&dir).expect("the project loads");
+        assert!(
+            report.is_empty(),
+            "a lint does not stop the project running"
+        );
+        assert_eq!(report.warnings().len(), 1, "{:?}", report.warnings());
+        let lint = &report.warnings()[0];
+        assert_eq!(lint.file, "main_form.rhai");
+        assert_eq!(lint.line, 2);
+        assert!(lint.message.contains("GREETING"), "{}", lint.message);
+        assert!(lint.message.starts_with("lint:"), "{}", lint.message);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_global_qualified_const_is_not_a_lint() {
+        let dir = scratch("lint-global");
+        write_project(
+            &dir,
+            "const GREETING = \"hi\";\nfn hello() { let x = global::GREETING; }\n",
+        );
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_parameter_shadowing_a_const_is_not_a_lint() {
+        let dir = scratch("lint-param");
+        write_project(
+            &dir,
+            "const GREETING = \"hi\";\nfn hello(GREETING) { let x = GREETING; }\n",
+        );
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_const_name_in_a_string_or_comment_is_not_a_lint() {
+        let dir = scratch("lint-text");
+        write_project(
+            &dir,
+            "const GREETING = \"hi\";\n\
+             fn hello() {\n\
+                 let x = \"GREETING\"; // GREETING is not a variable here\n\
+             }\n",
+        );
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_const_shadowed_by_a_control_is_not_a_lint() {
+        let dir = scratch("lint-control");
+        write_project(
+            &dir,
+            "const save_button = \"x\";\nfn run_it() { let x = save_button; }\n",
+        );
+        fs::write(
+            dir.join("main_form.lfm"),
+            "format = 1\n\n[window]\nname = \"main_form\"\n\n\
+             [[node]]\nkind = \"Button\"\nname = \"save_button\"\n",
+        )
+        .expect("form writes");
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.scripts.is_empty(), "{:?}", report.scripts);
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_function_that_calls_a_method_of_its_own_name_is_a_lint() {
+        let dir = scratch("lint-recurse");
+        write_project(&dir, "fn mute(deck, on) { deck.mute(!on); }\n");
+        let report = check_project(&dir).expect("the project loads");
+        assert_eq!(report.warnings().len(), 1, "{:?}", report.warnings());
+        assert!(
+            report.warnings()[0].message.contains("mute"),
+            "{}",
+            report.warnings()[0].message
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_method_call_with_a_different_name_is_not_a_lint() {
+        let dir = scratch("lint-method-ok");
+        write_project(&dir, "fn mute(deck, on) { deck.unmute(!on); }\n");
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_module_call_is_a_lint() {
+        let dir = scratch("lint-module");
+        write_project(&dir, "fn run_it() { sys::confd::get(\"sys/ui/theme\"); }\n");
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.scripts.is_empty(), "{:?}", report.scripts);
+        assert_eq!(report.warnings().len(), 1, "{:?}", report.warnings());
+        assert!(
+            report.warnings()[0].message.contains("sys"),
+            "{}",
+            report.warnings()[0].message
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_module_call_is_not_a_lint() {
+        let dir = scratch("lint-module-ok");
+        fs::write(
+            dir.join("check.lrp"),
+            "name = \"check\"\nversion = \"0.1.0\"\nstartup = \"main_form\"\n\n\
+             [[items]]\nkind = \"form\"\nname = \"main_form\"\n\
+             layout = \"main_form.lfm\"\ncode = \"main_form.rhai\"\n\n\
+             [[items]]\nkind = \"module\"\nname = \"util\"\ncode = \"util.rhai\"\n",
+        )
+        .expect("project writes");
+        fs::write(
+            dir.join("main_form.lfm"),
+            "format = 1\n\n[window]\nname = \"main_form\"\n",
+        )
+        .expect("form writes");
+        fs::write(
+            dir.join("main_form.rhai"),
+            "fn run_it() { util::greeting(); }",
+        )
+        .expect("code writes");
+        fs::write(dir.join("util.rhai"), "fn greeting() { \"hi\" }\n").expect("module writes");
+
+        let report = check_project(&dir).expect("the project loads");
+        assert!(report.scripts.is_empty(), "{:?}", report.scripts);
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_extension_module_call_is_not_a_lint() {
+        crate::extensions::clear();
+        crate::extensions::add(|engine| {
+            let module = rhai::Module::new();
+            engine.register_static_module("sys", module.into());
+        });
+        let dir = scratch("lint-module-ext");
+        write_project(&dir, "fn run_it() { sys::confd::get(\"sys/ui/theme\"); }\n");
+
+        let report = check_project(&dir).expect("the project loads");
+        crate::extensions::clear();
+
+        assert!(report.scripts.is_empty(), "{:?}", report.scripts);
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_runtime_knows_the_runtimes_modules() {
+        use crate::form::{FormRuntime, FormSource, ModuleSource};
+        use lazyrad_project::FormDoc;
+
+        let runtime = FormRuntime::from_sources(
+            vec![FormSource::new(
+                "runtime",
+                FormDoc::new("runtime"),
+                "fn run_it() { util::greeting(); }",
+            )],
+            vec![ModuleSource::new("util", "fn greeting() { \"hi\" }")],
+        );
+        let report = super::check_runtime(&runtime);
+        assert!(report.scripts.is_empty(), "{:?}", report.scripts);
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
     }
 
     #[test]

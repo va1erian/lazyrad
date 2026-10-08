@@ -20,10 +20,17 @@ desktop = ["xui-canvas/winit-backend", "time/local-offset"]
 # Rhai function metadata (parameter names, doc comments) for the IDE's
 # completion and signature help. The LazyOS player leaves it off.
 metadata = ["rhai/metadata"]
+# The host-side app test kit (`crate::testing`). A host test enables it to get
+# `TestApp` and `run_on_large_stack`; the crate's own tests build it too.
+testing = []
 
 [dependencies]
 lazyrad-project.workspace = true
-rhai.workspace = true
+# `internals` exposes the compiled AST (`iter_fn_def`, `AST::walk`, the `Stmt`
+# and `Expr` variants) so `check` can lint a script's structure, not just parse
+# it. It only gates API visibility, not runtime code, so it does not materially
+# grow the player (PLAN.md §1).
+rhai = { workspace = true, features = ["internals"] }
 thiserror.workspace = true
 time.workspace = true
 xui-canvas.workspace = true

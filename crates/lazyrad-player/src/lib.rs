@@ -99,11 +99,40 @@ pub fn run_with_backend(args: &[String], make_backend: BackendFactory<'_>) -> i3
     }
     match args {
         [] => run_empty_window(make_backend),
+        [flag, path] if flag == "--check" => check_only(Path::new(path)),
         [path] => run_project(Path::new(path), make_backend),
         _ => {
-            eprintln!("usage: lazyrad-player <project dir | .lrp>");
+            eprintln!("usage: lazyrad-player <project dir | .lrp> [--check]");
             EXIT_COMPILE
         }
+    }
+}
+
+/// Checks the project named by `path` and prints every problem, without opening
+/// a window.
+///
+/// Errors and lint warnings are both written; only an error changes the exit
+/// code, so a project with warnings alone is still runnable.
+fn check_only(path: &Path) -> i32 {
+    let report = match check_project(path) {
+        Ok(report) => report,
+        Err(error) => {
+            emit(&[Report::from_load_error(&error)]);
+            return EXIT_COMPILE;
+        }
+    };
+    let mut reports: Vec<Report> = report
+        .diagnostics
+        .iter()
+        .map(Report::from_diagnostic)
+        .collect();
+    reports.extend(report.scripts.iter().map(Report::from_compile_script));
+    reports.extend(report.lints.iter().map(Report::from_lint));
+    emit(&reports);
+    if report.is_empty() {
+        EXIT_OK
+    } else {
+        EXIT_COMPILE
     }
 }
 
@@ -166,6 +195,8 @@ fn run_project(path: &Path, make_backend: BackendFactory<'_>) -> i32 {
             .map(Report::from_diagnostic)
             .collect();
         reports.extend(report.scripts.iter().map(Report::from_compile_script));
+        // Show the warnings too, so a failing check is a complete list.
+        reports.extend(report.lints.iter().map(Report::from_lint));
         emit(&reports);
         return EXIT_COMPILE;
     }
@@ -195,6 +226,8 @@ pub enum Kind {
     Compile,
     /// A fatal problem while the program was running.
     Runtime,
+    /// A lint warning: the project still runs.
+    Warning,
 }
 
 impl Kind {
@@ -203,6 +236,7 @@ impl Kind {
         match self {
             Kind::Compile => "compile",
             Kind::Runtime => "runtime",
+            Kind::Warning => "warning",
         }
     }
 
@@ -211,6 +245,7 @@ impl Kind {
         match name {
             "compile" => Some(Kind::Compile),
             "runtime" => Some(Kind::Runtime),
+            "warning" => Some(Kind::Warning),
             _ => None,
         }
     }
@@ -251,6 +286,17 @@ impl Report {
             line: error.line,
             col: error.column,
             message: error.message.clone(),
+        }
+    }
+
+    /// A warning report for a lint: the project still runs.
+    pub fn from_lint(lint: &ScriptError) -> Report {
+        Report {
+            kind: Kind::Warning,
+            file: lint.file.clone(),
+            line: lint.line,
+            col: lint.column,
+            message: lint.message.clone(),
         }
     }
 

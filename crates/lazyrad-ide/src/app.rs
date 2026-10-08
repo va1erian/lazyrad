@@ -1203,6 +1203,7 @@ impl IdeApp {
             self.refresh_error_list();
             return true;
         }
+        let errors = problems.iter().filter(|problem| !problem.warning).count();
         let entries: Vec<ErrorEntry> = problems
             .iter()
             .map(|problem| ErrorEntry {
@@ -1221,7 +1222,12 @@ impl IdeApp {
                 ),
             );
         }
-        self.log(ui, format!("{} error(s): {refusal}.", problems.len()));
+        if errors == 0 {
+            // Only lint warnings: show them, but let the project run.
+            self.log(ui, format!("{} warning(s).", problems.len()));
+            return true;
+        }
+        self.log(ui, format!("{errors} error(s): {refusal}."));
         false
     }
 

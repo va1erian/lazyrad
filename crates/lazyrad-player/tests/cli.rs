@@ -107,6 +107,48 @@ fn the_ide_can_parse_the_json_the_player_emits() {
 }
 
 #[test]
+fn check_reports_a_lint_without_failing() {
+    let dir = scratch("check-lint");
+    write_project(
+        &dir,
+        "const GREETING = \"hi\";\nfn hello() { let x = GREETING; }\n",
+    );
+
+    let output = player()
+        .args(["--check", dir.to_str().expect("a UTF-8 path")])
+        .output()
+        .expect("the player runs");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a lint does not fail the check"
+    );
+
+    let reports = json_reports(&output);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0]["kind"], "warning");
+    assert_eq!(reports[0]["file"], "main_form.rhai");
+    assert_eq!(reports[0]["line"], 2);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn check_on_a_clean_project_exits_0_with_no_reports() {
+    let dir = scratch("check-clean");
+    write_project(&dir, "fn ok() {}\n");
+
+    let output = player()
+        .args(["--check", dir.to_str().expect("a UTF-8 path")])
+        .output()
+        .expect("the player runs");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(json_reports(&output).is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_directory_without_a_project_exits_1() {
     let dir = scratch("empty");
     let output = player().arg(&dir).output().expect("the player runs");

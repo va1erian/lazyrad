@@ -26,15 +26,18 @@ mod events;
 pub mod extensions;
 pub mod form;
 pub mod fs_policy;
+mod lint;
 pub mod platform;
 pub mod shell;
 pub mod stdlib;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use check::{CheckReport, check_project, check_runtime};
 pub use engine::{EngineHost, new_engine};
 pub use form::{
-    FormApp, FormRuntime, FormSource, HandlerObserver, ModuleSource, Msg, RuntimeError,
-    run_project_with, run_runtime_with,
+    ErrorObserver, FormApp, FormRuntime, FormSource, HandlerObserver, ModuleSource, Msg,
+    MsgBoxObserver, RuntimeError, run_project_with, run_runtime_with,
 };
 #[cfg(feature = "desktop")]
 pub use form::{run_project, run_runtime};
