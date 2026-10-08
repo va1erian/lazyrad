@@ -1001,7 +1001,8 @@ impl FormApp {
     ///
     /// A picked path is granted read access to the script's sandbox, limited to
     /// that exact file, so a sandboxed app can read a file the user chose; with
-    /// the `"folder"` option the file's folder is granted read access too, so a
+    /// the `"folder"` option the file's folder is granted read access too (its
+    /// listing and the files directly in it, never its subfolders), so a
     /// viewer can list and open the file's neighbours. The grant happens here,
     /// on the window that still exists, never for an answer that arrives after
     /// the window closed.
@@ -1011,12 +1012,14 @@ impl FormApp {
             let result = match answer.picked {
                 Some(path) => {
                     self.runtime.fs.allow_runtime(path.clone(), Access::Read);
+                    // The folder's listing and the files directly in it, not
+                    // its subfolders (and nothing for a file in `/`).
                     if answer.folder
                         && let Some(folder) = path.parent().filter(|p| !p.as_os_str().is_empty())
                     {
                         self.runtime
                             .fs
-                            .allow_runtime(folder.to_path_buf(), Access::Read);
+                            .allow_children_runtime(folder.to_path_buf(), Access::Read);
                     }
                     Dynamic::from(path.to_string_lossy().into_owned())
                 }

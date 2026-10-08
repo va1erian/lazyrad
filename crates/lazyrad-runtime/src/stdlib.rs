@@ -618,8 +618,9 @@ fn register_open_file_dialog(engine: &mut Engine, context: &StdlibContext) {
         [
             "/// Like `open_file_dialog(title, filter, callback)`, with an option.",
             "///",
-            "/// `\"folder\"` also grants read access to the picked file's folder, so",
-            "/// a viewer can list and open the file's neighbours (`dir_list`)."
+            "/// `\"folder\"` also grants read access to the picked file's folder (its",
+            "/// listing and the files directly in it, not subfolders), so a viewer",
+            "/// can list and open the file's neighbours (`dir_list`)."
         ],
         move |title: ImmutableString,
               filter: ImmutableString,

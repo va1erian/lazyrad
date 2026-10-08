@@ -98,13 +98,27 @@ pub struct Sandbox {
     allowed: Rc<RefCell<Vec<Allowed>>>,
 }
 
-/// One entry the host added with [`Sandbox::allow`].
+/// One entry the host added with [`Sandbox::allow`] or
+/// [`Sandbox::allow_children`].
 #[derive(Clone, Debug)]
 struct Allowed {
     /// The user-picked file or directory.
     path: PathBuf,
     /// The access this entry grants.
     access: Access,
+    /// How much of a directory entry the grant reaches.
+    scope: Scope,
+}
+
+/// How much of a directory an [`Allowed`] entry covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    /// The directory and everything below it.
+    Subtree,
+    /// The directory itself (to list it) and the files directly in it; not
+    /// its subdirectories or anything below them. A viewer that pages
+    /// through a picked file's neighbours needs no more.
+    Children,
 }
 
 /// Why a path was refused.
@@ -188,6 +202,15 @@ impl FsPolicy {
             sandbox.allow_runtime(path, access);
         }
     }
+
+    /// Grants the directory `dir` and the files directly in it `access` at run
+    /// time ([`Sandbox::allow_children`]); nothing on
+    /// [`FsPolicy::Unrestricted`].
+    pub fn allow_children_runtime(&self, dir: PathBuf, access: Access) {
+        if let FsPolicy::Sandboxed(sandbox) = self {
+            sandbox.allow_children_runtime(dir, access);
+        }
+    }
 }
 
 impl Sandbox {
@@ -221,7 +244,31 @@ impl Sandbox {
     /// sandbox after the fact. It is shared with every clone of the sandbox, so
     /// all of a runtime's forms see the grant.
     pub fn allow_runtime(&self, path: PathBuf, access: Access) {
-        self.allowed.borrow_mut().push(Allowed { path, access });
+        self.allowed.borrow_mut().push(Allowed {
+            path,
+            access,
+            scope: Scope::Subtree,
+        });
+    }
+
+    /// Allow the directory `dir` itself and the files directly in it, granting
+    /// them `access`, and return the sandbox. Subdirectories and anything
+    /// below them stay outside, and a filesystem root (`/`) is never granted
+    /// this way.
+    #[must_use]
+    pub fn allow_children(self, dir: PathBuf, access: Access) -> Sandbox {
+        self.allow_children_runtime(dir, access);
+        self
+    }
+
+    /// [`Sandbox::allow_children`] on a sandbox that is already built, shared
+    /// with every clone like [`Sandbox::allow_runtime`].
+    pub fn allow_children_runtime(&self, dir: PathBuf, access: Access) {
+        self.allowed.borrow_mut().push(Allowed {
+            path: dir,
+            access,
+            scope: Scope::Children,
+        });
     }
 
     /// The sandboxed half of [`FsPolicy::resolve`].
@@ -290,10 +337,25 @@ impl Allowed {
         let Some(entry) = resolve_real(&self.path) else {
             return false;
         };
-        // A file entry matches only itself; a directory entry also covers its
-        // contents. `starts_with` compares whole components, so `/a/b` does
-        // not cover `/a/bc`.
-        resolved == entry || (is_existing_dir(&entry) && resolved.starts_with(&entry))
+        if !is_existing_dir(&entry) {
+            // A file entry matches only itself.
+            return resolved == entry;
+        }
+        match self.scope {
+            // `starts_with` compares whole components, so `/a/b` does not
+            // cover `/a/bc`.
+            Scope::Subtree => resolved.starts_with(&entry),
+            // The listing and the files in it. A root has no parent: granting
+            // its children would be most of the filesystem, so it grants
+            // nothing. `resolved` is canonical, so a link in the directory
+            // that points elsewhere has another parent and is refused.
+            Scope::Children => {
+                entry.parent().is_some()
+                    && (resolved == entry
+                        || (resolved.parent() == Some(entry.as_path())
+                            && !is_existing_dir(resolved)))
+            }
+        }
     }
 }
 

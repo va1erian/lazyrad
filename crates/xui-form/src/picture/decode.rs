@@ -364,6 +364,14 @@ fn decode_gif(bytes: &[u8]) -> DecodeResult<Image> {
     let top = usize::from(le16(bytes, at + 3).ok_or_else(bad)?);
     let frame_w = usize::from(le16(bytes, at + 5).ok_or_else(bad)?);
     let frame_h = usize::from(le16(bytes, at + 7).ok_or_else(bad)?);
+    // The frame has a size of its own, independent of the logical screen
+    // checked above: refuse it before the index buffer is reserved.
+    let frame_pixels = frame_w as u64 * frame_h as u64;
+    if frame_pixels > MAX_PIXELS {
+        return Err(format!(
+            "the GIF frame is too large ({frame_w} x {frame_h}; at most {MAX_PIXELS} pixels)"
+        ));
+    }
     let packed = *bytes.get(at + 9).ok_or_else(bad)?;
     at += 10;
     let palette = if packed & 0x80 != 0 {
@@ -672,6 +680,17 @@ mod tests {
         let mut gif = gif_3x1();
         gif[6..10].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
         assert!(decode(&gif).expect_err("too large").contains("too large"));
+    }
+
+    #[test]
+    fn an_oversized_gif_frame_is_refused_before_decoding() {
+        // A 3x1 screen whose frame claims 65535 x 65535: the screen passes the
+        // header check, the frame must not reach the LZW buffer.
+        let mut gif = gif_3x1();
+        let descriptor = gif.iter().position(|b| *b == 0x2C).expect("descriptor");
+        gif[descriptor + 5..descriptor + 9].copy_from_slice(&[0xFF; 4]);
+        let error = decode(&gif).expect_err("too large");
+        assert!(error.contains("GIF frame is too large"), "{error}");
     }
 
     #[test]
