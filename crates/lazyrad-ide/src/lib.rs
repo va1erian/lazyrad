@@ -19,6 +19,7 @@
 pub mod app;
 pub mod command;
 pub mod compile;
+pub mod completion;
 pub mod dialog;
 pub mod edit_state;
 pub mod explorer;
