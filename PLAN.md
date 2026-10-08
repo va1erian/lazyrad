@@ -137,6 +137,13 @@ Form-level state that outlives a single event lives in `form.state`, an object m
   Rhai function through `Engine::call_fn` on the form's compiled `AST`.
 - `Engine::on_progress` implements Ctrl+Break, an operation budget per event (to catch
   runaway loops), and debugger pause checks.
+- **Hot reload.** The player's `--watch` flag polls the project's `.lrp`, `.lfm` and
+  `.rhai` files every 500 ms. On a change it checks and loads a fresh runtime first, and
+  on success rebuilds each open form in place (releasing the old form's event sources and
+  running `form_load` again); on failure it keeps the running forms and shows the
+  diagnostics in a banner. A script can keep its place across a reload by defining
+  `fn form_reload(old_state)`, which runs after `form_load` with the old `form.state`.
+  The IDE passes `--watch` when it runs a project.
 - `Engine::set_max_*` limits apply by default, but are relaxed for exported apps.
 - `msg_box` and `input_box` use xui `Dialog`. A blocking `msg_box` would need
   `Ui::open_modal`, which **does not work on canvas today** (G14). So in Iteration 1,

@@ -36,7 +36,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use rhai::{AST, Dynamic, Engine, Scope};
+use rhai::{AST, Dynamic, Engine, Map, Scope};
 use xui_form::Catalog;
 
 use crate::control::{Form, FormHost, controls_by_name, register_control, register_form};
@@ -95,6 +95,9 @@ pub struct EngineHost {
     file: String,
     progress: Rc<Progress>,
     globals: Rc<RefCell<BTreeMap<String, Dynamic>>>,
+    /// The `form.state` map, shared with the `form` object the resolver pushes,
+    /// so a host can read it before a reload and hand it to `form_reload`.
+    state: Rc<RefCell<Map>>,
     /// Every module registered through [`EngineHost::register_module`], so
     /// `import "name" as …` can resolve them again after a later registration.
     modules: rhai::module_resolvers::StaticModuleResolver,
@@ -123,6 +126,7 @@ impl EngineHost {
 
         let controls = controls_by_name(&host);
         let form = Form::new(Rc::clone(&host));
+        let state = form.state_handle();
         let globals: Rc<RefCell<BTreeMap<String, Dynamic>>> =
             Rc::new(RefCell::new(BTreeMap::new()));
         let progress = Rc::new(Progress {
@@ -161,6 +165,7 @@ impl EngineHost {
             file: file.into(),
             progress,
             globals,
+            state,
             modules: rhai::module_resolvers::StaticModuleResolver::new(),
             top_level_vars: RefCell::new(BTreeSet::new()),
         };
@@ -181,6 +186,18 @@ impl EngineHost {
     /// The script file errors are reported against.
     pub fn file(&self) -> &str {
         &self.file
+    }
+
+    /// The form's `state` map: data a handler wrote that outlives the event.
+    ///
+    /// The map is cloned out, so the caller may hold it while the engine runs.
+    pub fn state(&self) -> Map {
+        self.state.borrow().clone()
+    }
+
+    /// Replaces the form's `state` map.
+    pub fn set_state(&self, state: Map) {
+        *self.state.borrow_mut() = state;
     }
 
     /// Adds or replaces a global, resolved after controls and `form`.
