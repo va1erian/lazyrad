@@ -3397,7 +3397,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 [[package]]
 name = "xui-canvas"
 version = "0.1.0"
-source = "git+https://github.com/va1erian/xui?rev=51bded370a5174ab43a33be56991807ae5b2be93#51bded370a5174ab43a33be56991807ae5b2be93"
+source = "git+https://github.com/va1erian/xui?rev=bcdde8c859c017067505de082582c8fc02b3932b#bcdde8c859c017067505de082582c8fc02b3932b"
 dependencies = [
  "arboard",
  "cosmic-text",
@@ -3414,7 +3414,7 @@ dependencies = [
 [[package]]
 name = "xui-code-editor"
 version = "0.1.0"
-source = "git+https://github.com/va1erian/xui?rev=51bded370a5174ab43a33be56991807ae5b2be93#51bded370a5174ab43a33be56991807ae5b2be93"
+source = "git+https://github.com/va1erian/xui?rev=bcdde8c859c017067505de082582c8fc02b3932b#bcdde8c859c017067505de082582c8fc02b3932b"
 dependencies = [
  "regex",
  "ropey",
@@ -3424,7 +3424,7 @@ dependencies = [
 [[package]]
 name = "xui-core"
 version = "0.1.0"
-source = "git+https://github.com/va1erian/xui?rev=51bded370a5174ab43a33be56991807ae5b2be93#51bded370a5174ab43a33be56991807ae5b2be93"
+source = "git+https://github.com/va1erian/xui?rev=bcdde8c859c017067505de082582c8fc02b3932b#bcdde8c859c017067505de082582c8fc02b3932b"
 dependencies = [
  "png",
  "zune-jpeg",
@@ -3445,7 +3445,7 @@ dependencies = [
 [[package]]
 name = "xui-gpu"
 version = "0.1.0"
-source = "git+https://github.com/va1erian/xui?rev=51bded370a5174ab43a33be56991807ae5b2be93#51bded370a5174ab43a33be56991807ae5b2be93"
+source = "git+https://github.com/va1erian/xui?rev=bcdde8c859c017067505de082582c8fc02b3932b#bcdde8c859c017067505de082582c8fc02b3932b"
 dependencies = [
  "glow",
  "xui-core",
