@@ -104,17 +104,10 @@ impl Dialogs for NativeDialogs {
         for (name, extensions) in dialog_filters(filters) {
             dialog = dialog.add_filter(name, &extensions);
         }
-        let spawned = std::thread::Builder::new()
-            .name("open-file-dialog".to_owned())
-            .spawn(move || {
-                let picked = pollster::block_on(dialog.pick_file());
-                done(picked.map(|file| file.path().to_path_buf()));
-            });
-        if let Err(error) = spawned {
-            // `done` moved into the closure that failed to start; the caller
-            // sees a dialog that never answers, so say why.
-            eprintln!("lazyrad: cannot start the file dialog: {error}");
-        }
+        platform::pick_on_worker(
+            move || pollster::block_on(dialog.pick_file()).map(|file| file.path().to_path_buf()),
+            done,
+        );
     }
 
     fn choose_folder(&self, title: &str) -> Option<PathBuf> {

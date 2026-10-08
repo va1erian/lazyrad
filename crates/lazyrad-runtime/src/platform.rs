@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::fs_policy::FsPolicy;
 
@@ -112,6 +112,54 @@ pub fn dialog_filters(filters: &[FileFilter]) -> Vec<(String, Vec<String>)> {
 /// Called once with the file a dialog picked, or `None` when it was cancelled.
 /// It may run on any thread.
 pub type FileDone = Box<dyn FnOnce(Option<PathBuf>) + Send>;
+
+/// Runs `pick` (a native dialog) on a worker thread and hands its answer to
+/// `done`, so the window keeps running while the dialog is open.
+///
+/// If the thread cannot be started, `done` is answered with `None` at once,
+/// so a script's request never stays pending.
+pub fn pick_on_worker(pick: impl FnOnce() -> Option<PathBuf> + Send + 'static, done: FileDone) {
+    pick_with(
+        |work| {
+            std::thread::Builder::new()
+                .name("open-file-dialog".to_owned())
+                .spawn(work)
+                .map(drop)
+        },
+        pick,
+        done,
+    );
+}
+
+/// [`pick_on_worker`] with the thread spawner supplied, so the failure path
+/// can be tested.
+fn pick_with(
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+    pick: impl FnOnce() -> Option<PathBuf> + Send + 'static,
+    done: FileDone,
+) {
+    // `done` is shared with the worker, so the spawn's failure path can still
+    // answer when the worker never runs.
+    let slot = Arc::new(Mutex::new(Some(done)));
+    let worker_slot = Arc::clone(&slot);
+    let take = |slot: &Mutex<Option<FileDone>>| {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    };
+    let spawned = spawn(Box::new(move || {
+        let picked = pick();
+        if let Some(done) = take(&worker_slot) {
+            done(picked);
+        }
+    }));
+    if let Err(error) = spawned {
+        eprintln!("lazyrad: cannot start the file dialog: {error}");
+        if let Some(done) = take(&slot) {
+            done(None);
+        }
+    }
+}
 
 /// File, folder and message dialogs.
 ///
@@ -298,6 +346,52 @@ pub fn settings_file_in(dir: Option<&Path>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A `done` that records what it was answered with.
+    fn recording() -> (Arc<Mutex<Vec<Option<PathBuf>>>>, FileDone) {
+        let answers: Arc<Mutex<Vec<Option<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&answers);
+        let done: FileDone = Box::new(move |picked| sink.lock().unwrap().push(picked));
+        (answers, done)
+    }
+
+    #[test]
+    fn a_worker_answers_with_the_picked_path() {
+        let (answers, done) = recording();
+        pick_with(
+            |work| {
+                work();
+                Ok(())
+            },
+            || Some(PathBuf::from("song.mod")),
+            done,
+        );
+        assert_eq!(*answers.lock().unwrap(), [Some(PathBuf::from("song.mod"))]);
+    }
+
+    #[test]
+    fn a_worker_that_cannot_start_answers_none_at_once() {
+        let (answers, done) = recording();
+        pick_with(
+            |_work| Err(std::io::Error::other("no threads left")),
+            || panic!("the dialog never opens"),
+            done,
+        );
+        assert_eq!(*answers.lock().unwrap(), [None]);
+    }
+
+    #[test]
+    fn a_real_worker_thread_answers() {
+        let (answers, done) = recording();
+        pick_on_worker(|| Some(PathBuf::from("a.txt")), done);
+        for _ in 0..200 {
+            if !answers.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(*answers.lock().unwrap(), [Some(PathBuf::from("a.txt"))]);
+    }
     use super::*;
 
     #[test]

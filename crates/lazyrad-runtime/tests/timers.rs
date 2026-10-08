@@ -34,8 +34,19 @@ fn form_doc() -> FormDoc {
     doc
 }
 
-/// Builds `code`'s form, delivers `ticks`, and returns the live form.
+/// Builds `code`'s form, delivers `ticks` as their timers' current ticks,
+/// and returns the live form.
 fn run(code: &str, ticks: &[&str]) -> Rc<LiveForm<Msg>> {
+    run_with(code, ticks, |_| 0)
+}
+
+/// Like [`run`], with `shift` added to each tick's timer id, so a test can
+/// deliver a tick for a timer the control no longer runs.
+fn run_with(
+    code: &str,
+    ticks: &[&str],
+    shift: impl Fn(&str) -> usize + 'static,
+) -> Rc<LiveForm<Msg>> {
     let runtime = FormRuntime::from_sources(
         vec![FormSource::new("main_form", form_doc(), code)],
         Vec::new(),
@@ -52,8 +63,11 @@ fn run(code: &str, ticks: &[&str]) -> Rc<LiveForm<Msg>> {
                 .build_app(ui, "main_form")
                 .expect("main_form builds");
             for control in &ticks {
+                // A stopped timer has no id; 0 is never a live one.
+                let timer = app.running_timer(control).unwrap_or(0) + shift(control);
                 ui.emit(Msg::Tick {
                     control: control.clone(),
+                    timer,
                 });
             }
             *slot.borrow_mut() = Some(app.root_form().expect("the form is live").clone());
@@ -135,4 +149,34 @@ fn a_timer_runs_after_form_load_enables_it() {
     let (timer1, timer2) = capture.borrow_mut().take().expect("captured");
     assert!(timer1, "enabled in form_load starts the timer");
     assert!(!timer2, "a disabled timer is not running");
+}
+
+#[test]
+fn a_tick_for_a_timer_the_control_no_longer_runs_is_dropped() {
+    // timer1's ticks name a timer id other than its live one (as a tick queued
+    // before a stop or restart would); only timer2's current ticks run.
+    let form = run_with(
+        "fn form_load() { timer1.enabled = true; timer2.enabled = true; }
+         fn timer1_tick() { result_label.text += \"a\"; }
+         fn timer2_tick() { result_label.text += \"b\"; }",
+        &["timer1", "timer2", "timer1"],
+        |control| if control == "timer1" { 1000 } else { 0 },
+    );
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("b".to_owned()))
+    );
+}
+
+#[test]
+fn a_tick_for_a_stopped_timer_is_dropped() {
+    // timer1 is never enabled, so any tick for it is stale.
+    let form = run(
+        "fn timer1_tick() { result_label.text += \"a\"; }",
+        &["timer1"],
+    );
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text(String::new()))
+    );
 }

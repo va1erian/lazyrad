@@ -619,6 +619,13 @@ impl FormApp {
         self.timers.is_control_running(name)
     }
 
+    /// The window timer the `Timer` control `name` runs now (`TimerId.0`), or
+    /// `None` while it is stopped. A [`Msg::Tick`] must name this timer to run
+    /// the control's handler.
+    pub fn running_timer(&self, name: &str) -> Option<usize> {
+        self.timers.current(name)
+    }
+
     /// Whether this window is waiting for the answer of an `open_file_dialog`
     /// that is still up (its poll timer is running).
     pub fn has_open_file_dialog(&self) -> bool {
@@ -892,7 +899,10 @@ impl App for FormApp {
                 self.deliver_file_dialogs(ui, &root);
                 self.flush(ui);
             }
-            Msg::Tick { control } => {
+            // A tick queued before its timer was stopped or restarted is
+            // stale: the control no longer runs that timer.
+            Msg::Tick { control, timer } if !self.timers.is_current(&control, timer) => {}
+            Msg::Tick { control, .. } => {
                 match root.run(&control, "Tick", &[]) {
                     Ok(()) => self.runtime.notify_handler(root.name(), &control, "Tick"),
                     Err(error) => {

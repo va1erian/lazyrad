@@ -44,14 +44,15 @@ enum Route {
 }
 
 impl Route {
-    /// The message a tick raises.
-    fn message(&self) -> Msg {
+    /// The message a tick of window timer `timer` raises.
+    fn message(&self, timer: usize) -> Msg {
         match self {
             // An answered dialog is delivered by the same message as work from
             // the event sources: both mean "something arrived for this form".
             Route::Poll | Route::Dialogs => Msg::Poll,
             Route::Tick(control) => Msg::Tick {
                 control: control.clone(),
+                timer,
             },
         }
     }
@@ -87,7 +88,12 @@ impl Timers {
     pub(crate) fn new(ui: &Ui<Msg>, form: &str) -> Timers {
         let routes: Rc<RefCell<BTreeMap<usize, Route>>> = Rc::new(RefCell::new(BTreeMap::new()));
         let for_mapper = Rc::clone(&routes);
-        ui.on_timer(move |id| for_mapper.borrow().get(&id.0).map(Route::message));
+        ui.on_timer(move |id| {
+            for_mapper
+                .borrow()
+                .get(&id.0)
+                .map(|route| route.message(id.0))
+        });
         Timers {
             poller: Poller::new(form),
             poll_timer: None,
@@ -216,6 +222,19 @@ impl Timers {
             .insert(name.to_owned(), Running { id, interval });
     }
 
+    /// The window timer `control` runs now (`TimerId.0`), if it is running.
+    pub(crate) fn current(&self, control: &str) -> Option<usize> {
+        self.controls.get(control).map(|running| running.id.0)
+    }
+
+    /// Whether window timer `timer` is the one `control` runs now. A tick
+    /// queued before the control's timer was stopped or restarted is not.
+    pub(crate) fn is_current(&self, control: &str, timer: usize) -> bool {
+        self.controls
+            .get(control)
+            .is_some_and(|running| running.id.0 == timer)
+    }
+
     /// Stops `name`'s timer, if it is running.
     fn stop(&mut self, ui: &Ui<Msg>, name: &str) {
         if let Some(running) = self.controls.remove(name) {
@@ -272,10 +291,10 @@ mod tests {
 
     #[test]
     fn a_route_maps_to_its_message() {
-        assert!(matches!(Route::Poll.message(), Msg::Poll));
+        assert!(matches!(Route::Poll.message(7), Msg::Poll));
         assert!(matches!(
-            Route::Tick("timer1".to_owned()).message(),
-            Msg::Tick { control } if control == "timer1"
+            Route::Tick("timer1".to_owned()).message(7),
+            Msg::Tick { control, timer: 7 } if control == "timer1"
         ));
     }
 

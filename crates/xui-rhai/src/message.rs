@@ -71,6 +71,10 @@ pub enum Msg {
     Tick {
         /// The `Timer` control that fired.
         control: String,
+        /// The window timer that fired (`TimerId.0`). A tick still queued when
+        /// its timer was stopped or restarted names a timer the control no
+        /// longer runs, and is dropped.
+        timer: usize,
     },
     /// `open_file_dialog(...)`: ask the platform for a file to open. The
     /// application shows the dialog and calls `callback` with the picked path
