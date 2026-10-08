@@ -29,6 +29,43 @@ use crate::fs_policy::FsPolicy;
 /// `(description, extensions)` of a file name filter.
 pub type Filter<'a> = (&'a str, &'a [&'a str]);
 
+/// One filter group a file dialog offers: a display name and its patterns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileFilter {
+    /// The name shown in the dialog's filter list.
+    pub name: String,
+    /// The glob patterns (`*.mod`) the group matches.
+    pub patterns: Vec<String>,
+}
+
+/// Parses a script's filter string into filter groups.
+///
+/// The syntax is `"name|pattern;name|pattern"`: groups are separated by `;`,
+/// each group is a display name and its patterns after a `|`, and several
+/// patterns in one group are separated by `,`. `"MOD files|*.mod;All files|*.*"`
+/// is two groups. An empty or malformed group is skipped.
+pub fn parse_filters(spec: &str) -> Vec<FileFilter> {
+    spec.split(';')
+        .filter_map(|group| {
+            let group = group.trim();
+            if group.is_empty() {
+                return None;
+            }
+            let (name, patterns) = group.split_once('|').unwrap_or((group, "*"));
+            let patterns: Vec<String> = patterns
+                .split(',')
+                .map(str::trim)
+                .filter(|pattern| !pattern.is_empty())
+                .map(str::to_owned)
+                .collect();
+            Some(FileFilter {
+                name: name.trim().to_owned(),
+                patterns,
+            })
+        })
+        .collect()
+}
+
 /// File, folder and message dialogs.
 ///
 /// Every method answers "cancelled" (`None`) when no dialog can be shown, so a
@@ -38,6 +75,19 @@ pub type Filter<'a> = (&'a str, &'a [&'a str]);
 pub trait Dialogs: Send + Sync {
     /// Asks for an existing file.
     fn open_file(&self, title: &str, filter: Option<Filter<'_>>) -> Option<PathBuf>;
+    /// Asks for an existing file, offering several filter groups.
+    ///
+    /// The default offers only the first group, through [`Dialogs::open_file`],
+    /// so an implementation that supports one filter needs nothing more.
+    fn open_file_filtered(&self, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
+        match filters.first() {
+            Some(first) => {
+                let patterns: Vec<&str> = first.patterns.iter().map(String::as_str).collect();
+                self.open_file(title, Some((&first.name, &patterns)))
+            }
+            None => self.open_file(title, None),
+        }
+    }
     /// Asks for a folder.
     fn choose_folder(&self, title: &str) -> Option<PathBuf>;
     /// Asks where to save, suggesting `file_name`.
@@ -219,6 +269,31 @@ mod tests {
     fn current_falls_back_to_portable() {
         // No test installs a platform into the global, so this is the fallback.
         assert_eq!(current().name(), "portable");
+    }
+
+    #[test]
+    fn filter_groups_parse_from_the_script_syntax() {
+        let filters = parse_filters("MOD files|*.mod;All files|*.*");
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].name, "MOD files");
+        assert_eq!(filters[0].patterns, ["*.mod"]);
+        assert_eq!(filters[1].name, "All files");
+        assert_eq!(filters[1].patterns, ["*.*"]);
+
+        // Several patterns in one group, and a bare name gets a catch-all.
+        let filters = parse_filters("Images|*.png,*.jpg;Everything");
+        assert_eq!(filters[0].patterns, ["*.png", "*.jpg"]);
+        assert_eq!(filters[1].patterns, ["*"]);
+        assert!(parse_filters("").is_empty());
+        assert!(parse_filters(" ; ;").is_empty());
+    }
+
+    #[test]
+    fn the_default_filtered_dialog_offers_the_first_group() {
+        // `HeadlessDialogs` cancels, so this only checks the default does not
+        // panic with several groups.
+        let filters = parse_filters("MOD files|*.mod;All files|*.*");
+        assert_eq!(HeadlessDialogs.open_file_filtered("Open", &filters), None);
     }
 
     #[test]

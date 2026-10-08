@@ -1098,6 +1098,48 @@ fn builtin_specs() -> Vec<WidgetSpec> {
                 Children::None,
             )
         },
+        WidgetSpec {
+            properties: vec![
+                property(
+                    "interval",
+                    ValueType::Int {
+                        min: Some(1),
+                        max: None,
+                    },
+                    Value::Int(100),
+                    CATEGORY_BEHAVIOR,
+                    "How often `Tick` is raised, in milliseconds.",
+                ),
+                property(
+                    "enabled",
+                    ValueType::Bool,
+                    Value::Bool(false),
+                    CATEGORY_BEHAVIOR,
+                    "Whether the timer runs. It starts disabled; set it true to begin ticking.",
+                ),
+                // The designer shows a placeholder for a Timer, but a script
+                // must not be able to make it visible in the running program.
+                design_property(
+                    "visible",
+                    ValueType::Bool,
+                    Value::Bool(true),
+                    CATEGORY_BEHAVIOR,
+                    "Whether the designer shows the timer's placeholder.",
+                ),
+            ],
+            events: vec![event(
+                "Tick",
+                Vec::new(),
+                true,
+                "Raised every `interval` milliseconds while the timer is enabled.",
+            )],
+            ..widget(
+                "Timer",
+                "A non-visual timer that raises `Tick` periodically.",
+                (72.0, 20.0),
+                Children::None,
+            )
+        },
     ]
 }
 
@@ -1128,6 +1170,7 @@ mod tests {
                 "RadioGroup",
                 "Separator",
                 "Slider",
+                "Timer",
                 "ToggleButton",
             ]
         );

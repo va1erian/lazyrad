@@ -19,9 +19,11 @@
 //!   appears), the project's icon and its version resources.
 //!
 //! Payload entry names are plain file names, checked with the same rule as
-//! `.lrp` item paths ([`lazyrad_project::is_plain_file_name`]), so a crafted
-//! payload cannot name a file outside the project. Code signing is out of
-//! scope: appending a payload invalidates any signature the stub had.
+//! `.lrp` item paths ([`lazyrad_project::is_plain_file_name`]), except for a
+//! project asset, which is stored under the `assets/` prefix with its
+//! project-relative path. Either way a crafted payload cannot name a file
+//! outside the project. Code signing is out of scope: appending a payload
+//! invalidates any signature the stub had.
 
 pub mod error;
 pub mod export;

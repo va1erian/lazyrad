@@ -85,6 +85,10 @@ pub fn run_cli() -> i32 {
 /// The exit codes, diagnostics and exported-app behaviour are exactly those of
 /// [`run_cli`]; only the window system differs.
 pub fn run_with_backend(args: &[String], make_backend: BackendFactory<'_>) -> i32 {
+    // Install the player's platform (native dialogs, unrestricted files) so a
+    // script's `open_file_dialog` works. A host that already installed its own
+    // platform keeps it.
+    crate::platform::install();
     // An exported app carries its project; it ignores the command line.
     if let Ok(exe) = std::env::current_exe() {
         match embedded::load_from_exe(&exe) {

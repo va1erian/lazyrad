@@ -183,7 +183,14 @@ pub fn build_package(request: &PackageRequest<'_>) -> Result<BuiltPackage, LzpEr
     zip.add(PLAYER_ENTRY, request.player)?;
     add_icons(&mut zip, &project.name, request.icons)?;
     for entry in payload.entries() {
-        zip.add(&format!("{PROJECT_DIR}/{}", entry.name), &entry.data)?;
+        // An asset is stored under the payload's `assets/` prefix; on disk it
+        // keeps its project-relative path, so a script reads it through the
+        // same path in a folder and in an exported app.
+        let relative = entry
+            .name
+            .strip_prefix(crate::payload::ASSET_PREFIX)
+            .unwrap_or(&entry.name);
+        zip.add(&format!("{PROJECT_DIR}/{relative}"), &entry.data)?;
     }
     let entries = zip.len();
     Ok(BuiltPackage {

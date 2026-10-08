@@ -293,6 +293,80 @@ fn two_module_project(scratch: &Scratch, first: &str, second: &str) -> PathBuf {
     dir.join("app.lrp")
 }
 
+/// A project with an `assets` list, for the asset round-trip tests.
+fn asset_project(scratch: &Scratch, assets: &str) -> PathBuf {
+    let dir = scratch.path("assetproj");
+    fs::create_dir_all(dir.join("songs")).expect("songs dir");
+    fs::write(dir.join("m.rhai"), "").expect("code");
+    fs::write(dir.join("songs/song.mod"), b"MOD").expect("asset");
+    fs::write(dir.join("songs/other.mod"), b"OTHER").expect("asset");
+    fs::write(dir.join("readme.txt"), b"readme").expect("other");
+    fs::write(
+        dir.join("app.lrp"),
+        format!(
+            "name = \"app\"\nversion = \"1\"\nstartup = \"m\"\nassets = [{assets}]\n\n[[items]]\nkind = \"module\"\nname = \"m\"\ncode = \"m.rhai\"\n"
+        ),
+    )
+    .expect("lrp");
+    dir.join("app.lrp")
+}
+
+#[test]
+fn assets_are_packed_under_their_relative_paths() {
+    let scratch = Scratch::new("assets");
+    let stub = write_stub(&scratch);
+    let lrp = asset_project(&scratch, "\"songs/*.mod\", \"*.png\"");
+    let output = scratch.path("app.out");
+    export(&ExportRequest {
+        stub: &stub,
+        project: &lrp,
+        output: &output,
+    })
+    .expect("an empty glob does not fail the export");
+
+    let payload = read_payload(&fs::read(&output).expect("reads"))
+        .expect("reads")
+        .expect("has a payload");
+    assert_eq!(payload.get("assets/songs/song.mod"), Some(&b"MOD"[..]));
+    assert_eq!(payload.get("assets/songs/other.mod"), Some(&b"OTHER"[..]));
+    assert!(
+        payload.get("assets/readme.txt").is_none(),
+        "an unmatched file is not packed"
+    );
+    let names: Vec<&str> = payload.assets().map(|(name, _)| name).collect();
+    assert_eq!(names, ["songs/other.mod", "songs/song.mod"]);
+}
+
+#[test]
+fn hostile_asset_names_are_refused() {
+    for name in [
+        "assets/../evil",
+        "assets/a/../../b",
+        "assets//x",
+        "assets/a\\b",
+        "assets/./x",
+        "assets/",
+    ] {
+        let raw = encode_unchecked(&[("a.lrp", b""), (name, b"")], 0, FORMAT_VERSION);
+        let error = read_payload(&raw).expect_err(name);
+        assert!(
+            matches!(error, PayloadError::BadName { .. }),
+            "{name}: {error}"
+        );
+    }
+    // A well-formed asset path is accepted and does not count as the project.
+    let raw = encode_unchecked(
+        &[("a.lrp", b""), ("assets/songs/song.mod", b"MOD")],
+        0,
+        FORMAT_VERSION,
+    );
+    let payload = read_payload(&raw)
+        .expect("a valid asset packs")
+        .expect("present");
+    assert_eq!(payload.get("assets/songs/song.mod"), Some(&b"MOD"[..]));
+    assert_eq!(payload.project_entry().name, "a.lrp");
+}
+
 #[test]
 fn references_differing_only_by_case_are_a_clear_error() {
     let entry = |name: &str| Entry {

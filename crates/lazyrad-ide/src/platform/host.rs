@@ -11,9 +11,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-#[cfg(feature = "native-dialogs")]
-use lazyrad_runtime::platform::Filter;
 use lazyrad_runtime::platform::{self, Dialogs, Platform};
+#[cfg(feature = "native-dialogs")]
+use lazyrad_runtime::platform::{FileFilter, Filter};
 
 use super::process;
 
@@ -82,6 +82,15 @@ impl Dialogs for NativeDialogs {
         let mut dialog = rfd::FileDialog::new().set_title(title);
         if let Some((name, extensions)) = filter {
             dialog = dialog.add_filter(name, extensions);
+        }
+        dialog.pick_file()
+    }
+
+    fn open_file_filtered(&self, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new().set_title(title);
+        for group in filters {
+            let patterns: Vec<&str> = group.patterns.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(&group.name, &patterns);
         }
         dialog.pick_file()
     }

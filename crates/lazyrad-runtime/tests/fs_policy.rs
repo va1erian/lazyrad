@@ -182,6 +182,43 @@ fn an_allowed_extra_file_is_readable_but_not_writable() {
 }
 
 #[test]
+fn a_runtime_grant_is_shared_and_read_only() {
+    let root = Scratch::new("runtime-grant-root");
+    let outside = Scratch::new("runtime-grant-picked");
+    let picked = outside.write("picked.txt", b"data");
+    let policy = sandbox(&root);
+
+    // Denied before the user picks it.
+    assert!(matches!(
+        policy.resolve(text(&picked), Access::Read),
+        Err(FsError::Denied { .. })
+    ));
+
+    // A clone shares the grant, so every form sees the picked file.
+    let shared = policy.clone();
+    policy.allow_runtime(picked.clone(), Access::Read);
+    assert_eq!(
+        shared.resolve(text(&picked), Access::Read),
+        Ok(canon(&picked))
+    );
+    // Read only: the picked file cannot be written.
+    assert!(matches!(
+        shared.resolve(text(&picked), Access::Write),
+        Err(FsError::Denied { .. })
+    ));
+}
+
+#[test]
+fn a_runtime_grant_on_an_unrestricted_policy_changes_nothing() {
+    let policy = FsPolicy::Unrestricted;
+    policy.allow_runtime(PathBuf::from("anything"), Access::Read);
+    assert_eq!(
+        policy.resolve("anything", Access::Write),
+        Ok(PathBuf::from("anything"))
+    );
+}
+
+#[test]
 fn an_allowed_extra_file_with_write_grants_read_too() {
     let root = Scratch::new("allow-write-root");
     let outside = Scratch::new("allow-write-picked");

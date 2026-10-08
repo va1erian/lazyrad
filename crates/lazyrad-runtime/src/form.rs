@@ -40,7 +40,6 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -55,10 +54,11 @@ use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
-use crate::events::Poller;
-use crate::fs_policy::FsPolicy;
+use crate::files::{DiskProject, NoProjectFiles, ProjectFiles};
+use crate::fs_policy::{Access, FsPolicy};
 use crate::platform;
 use crate::stdlib::StdlibContext;
+use crate::timers::Timers;
 use xui_rhai::form::{FormError, ScriptForm, ScriptSource};
 use xui_rhai::message::Pending;
 use xui_rhai::{EngineHost, ScriptError};
@@ -173,6 +173,9 @@ pub struct FormRuntime {
     /// Which paths scripts may touch, fixed when the runtime is built from
     /// the installed platform's policy.
     fs: Rc<FsPolicy>,
+    /// The project's own files, read before the filesystem: a project folder
+    /// on disk, or an exported app's in-memory payload.
+    files: Rc<dyn ProjectFiles>,
     /// Told after every event handler that ran without error.
     observer: RefCell<Option<HandlerObserver>>,
 }
@@ -213,40 +216,32 @@ impl FormRuntime {
     /// (the value scripts see as `app.path`).
     pub fn load_path(path: impl AsRef<Path>) -> Result<Rc<FormRuntime>, RuntimeError> {
         let (dir, project) = open_project(path.as_ref())?;
-        let root = dir.clone();
-        Self::from_project(project, dir, |relative| {
-            fs::read_to_string(root.join(relative))
-        })
+        let files: Rc<dyn ProjectFiles> = Rc::new(DiskProject::new(dir.clone(), &project));
+        Self::from_project(project, dir, files)
     }
 
     /// Builds a runtime from a project and a way to read its files, without
     /// assuming they live on disk.
     ///
-    /// `read` returns the text of a file named by an item path (`main.lfm`,
-    /// `main.rhai`); `dir` is only what scripts see as `app.path`. The player
+    /// `files` reads a file named by an item path (`main.lfm`, `main.rhai`) and
+    /// every asset; `dir` is only what scripts see as `app.path`. The player
     /// uses this to run an exported executable's payload from memory, and
     /// [`FormRuntime::load_path`] uses it to read from the project folder, so
     /// both take exactly the same route.
     pub fn from_project(
         project: Project,
         dir: PathBuf,
-        read: impl Fn(&Path) -> std::io::Result<String>,
+        files: Rc<dyn ProjectFiles>,
     ) -> Result<Rc<FormRuntime>, RuntimeError> {
         let catalog = lazyrad_catalog();
         let mut forms = BTreeMap::new();
         let mut modules = Vec::new();
 
         for item in &project.items {
-            let code = read(item.code()).map_err(|source| RuntimeError::Io {
-                path: dir.join(item.code()),
-                source,
-            })?;
+            let code = read_item(&*files, item.code(), &dir)?;
             match item.layout() {
                 Some(layout) => {
-                    let text = read(layout).map_err(|source| RuntimeError::Io {
-                        path: dir.join(layout),
-                        source,
-                    })?;
+                    let text = read_item(&*files, layout, &dir)?;
                     let doc = parse_form(&dir.join(layout), &text, &catalog)?;
                     forms.insert(
                         item.name().to_owned(),
@@ -277,6 +272,7 @@ impl FormRuntime {
             windows: RefCell::new(BTreeMap::new()),
             inboxes: RefCell::new(BTreeMap::new()),
             fs: Rc::new(platform::current().fs_policy()),
+            files,
             observer: RefCell::new(None),
         }))
     }
@@ -301,6 +297,7 @@ impl FormRuntime {
             windows: RefCell::new(BTreeMap::new()),
             inboxes: RefCell::new(BTreeMap::new()),
             fs: Rc::new(platform::current().fs_policy()),
+            files: Rc::new(NoProjectFiles),
             observer: RefCell::new(None),
         })
     }
@@ -384,11 +381,12 @@ impl FormRuntime {
             root: Some(Rc::clone(&root)),
             runtime: Rc::clone(self),
             dialogs: Vec::new(),
-            poller: Poller::new(ui, form),
+            timers: Timers::new(ui, form),
         };
         app.flush(ui);
-        // `form_load` may already have subscribed to something.
-        app.poller.sync(ui);
+        // `form_load` may already have subscribed to something or enabled a
+        // timer.
+        app.timers.sync(ui, root.live_form());
         Ok(app)
     }
 
@@ -427,6 +425,7 @@ impl FormInstance {
             app_title: runtime.project().name.clone(),
             app_path: runtime.path().display().to_string(),
             fs: Rc::clone(&runtime.fs),
+            files: Rc::clone(&runtime.files),
         };
         let runtime_for_setup = Rc::clone(runtime);
         let script = ScriptForm::build(
@@ -512,9 +511,9 @@ pub struct FormApp {
     /// Every open message box. A [`Dialog`] destroys its nodes when dropped, so
     /// the application keeps each one alive until it closes.
     dialogs: Vec<Dialog<Msg>>,
-    /// Polls the host's event sources while the form has work pending, and
-    /// releases what the form registered when the window goes away.
-    poller: Poller,
+    /// The window's timers: the event-source poller and every `Timer` control.
+    /// Dropping it releases what the form registered.
+    timers: Timers,
 }
 
 impl FormApp {
@@ -525,7 +524,16 @@ impl FormApp {
 
     /// Whether the window is polling the host's event sources for its form.
     pub fn is_polling(&self) -> bool {
-        self.poller.is_polling()
+        self.timers.is_polling()
+    }
+
+    /// Whether the `Timer` control named `name` currently has a running timer.
+    ///
+    /// A `Timer` runs while its `enabled` property is true and it exists in the
+    /// form, so this follows a script's `timer1.enabled = true` after the event
+    /// that set it.
+    pub fn is_timer_running(&self, name: &str) -> bool {
+        self.timers.is_control_running(name)
     }
 
     /// Moves every message a script left pending into the right window's queue.
@@ -570,7 +578,7 @@ impl FormApp {
                         root: None,
                         runtime: Rc::clone(&runtime),
                         dialogs: Vec::new(),
-                        poller: Poller::idle(),
+                        timers: Timers::idle(),
                     }
                 }
             });
@@ -661,6 +669,41 @@ impl FormApp {
         dialog.open();
         self.dialogs.push(dialog);
     }
+
+    /// Shows the platform's open-file dialog for `form` and calls the script's
+    /// callback with the picked path (or `()` when cancelled).
+    ///
+    /// The dialog is synchronous: on the desktop `rfd` blocks the UI thread
+    /// while it is up, which is acceptable for the player. A picked path is
+    /// granted read access to the script's sandbox, limited to that exact
+    /// file, so a sandboxed app can read a file the user chose.
+    fn open_file_dialog(
+        &mut self,
+        ui: &mut Ui<Msg>,
+        form: &str,
+        title: &str,
+        filter: &str,
+        callback: &FnPtr,
+    ) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let filters = platform::parse_filters(filter);
+        let picked = platform::current()
+            .dialogs()
+            .open_file_filtered(title, &filters);
+        let result = match picked {
+            Some(path) => {
+                self.runtime.fs.allow_runtime(path.clone(), Access::Read);
+                Dynamic::from(path.to_string_lossy().into_owned())
+            }
+            None => Dynamic::UNIT,
+        };
+        if let Err(error) = root.call_fn(callback, vec![result]) {
+            let located = root.locate(&error);
+            self.report_handler_error(ui, form, located);
+        }
+    }
 }
 
 impl App for FormApp {
@@ -731,18 +774,38 @@ impl App for FormApp {
                 self.flush(ui);
             }
             Msg::Poll => {
-                for error in self.poller.poll(&root) {
+                for error in self.timers.poll(&root) {
                     self.report_handler_error(ui, root.name(), error);
                 }
+                self.flush(ui);
+            }
+            Msg::Tick { control } => {
+                if let Err(error) = root.run(&control, "Tick", &[]) {
+                    // A tick repeats, so a failing handler must not fire every
+                    // interval: disable the timer and report the error once.
+                    let _ = root
+                        .live_form()
+                        .set(&control, "enabled", &Value::Bool(false));
+                    self.report_handler_error(ui, root.name(), error);
+                }
+                self.flush(ui);
+            }
+            Msg::OpenFileDialog {
+                form,
+                title,
+                filter,
+                callback,
+            } => {
+                self.open_file_dialog(ui, &form, &title, &filter, &callback);
                 self.flush(ui);
             }
             Msg::Quit => ui.quit(),
         }
         // A closed dialog no longer needs its nodes kept alive.
         self.dialogs.retain(Dialog::is_open);
-        // A handler may have subscribed to something, or closed the last
-        // subscription: run the polling timer only while there is work.
-        self.poller.sync(ui);
+        // A handler may have subscribed to something, enabled a timer or
+        // changed an interval: bring every window timer in line with the form.
+        self.timers.sync(ui, root.live_form());
     }
 }
 
@@ -767,7 +830,9 @@ fn stop_frame_loop(form: &LiveForm<Msg>, control: &str) {
 /// The form a message must be handled by, when it belongs to one window.
 fn addressee(msg: &Msg) -> Option<&str> {
     match msg {
-        Msg::MsgBox { form, .. } | Msg::MsgBoxResult { form, .. } => Some(form),
+        Msg::MsgBox { form, .. }
+        | Msg::MsgBoxResult { form, .. }
+        | Msg::OpenFileDialog { form, .. } => Some(form),
         _ => None,
     }
 }
@@ -834,6 +899,23 @@ fn window_spec(doc: &FormDoc) -> PlatformSpec {
         .and_then(Value::as_int)
         .unwrap_or(200) as f32;
     PlatformSpec::new(title).size(Dip(width), Dip(height))
+}
+
+/// Reads a project item's text through `files`, naming the file in any error.
+fn read_item(
+    files: &dyn ProjectFiles,
+    relative: &Path,
+    dir: &Path,
+) -> Result<String, RuntimeError> {
+    let name = relative.to_string_lossy();
+    let bytes = files.read(&name).ok_or_else(|| RuntimeError::Io {
+        path: dir.join(relative),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "the project has no such file"),
+    })?;
+    String::from_utf8(bytes).map_err(|error| RuntimeError::Io {
+        path: dir.join(relative),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+    })
 }
 
 /// Resolves `path` to the project directory and `.lrp` project it names.
@@ -915,7 +997,7 @@ pub fn run_runtime_with(
                     root: None,
                     runtime: Rc::clone(&runtime_for_app),
                     dialogs: Vec::new(),
-                    poller: Poller::idle(),
+                    timers: Timers::idle(),
                 }
             }
         }

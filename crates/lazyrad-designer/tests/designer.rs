@@ -639,7 +639,8 @@ fn dropping_every_toolbox_kind_creates_it_and_undo_removes_it() {
             "group_box1",
             "list_view1",
             "combo_box1",
-            "canvas1"
+            "canvas1",
+            "timer1"
         ]
     );
     let after_undo = after_undo.borrow();

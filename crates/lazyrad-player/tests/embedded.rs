@@ -230,10 +230,7 @@ fn a_payload_missing_a_referenced_file_is_reported() {
     let reports = runtime_from_payload(&payload, PathBuf::from("."))
         .err()
         .expect("a missing script is reported");
-    assert!(
-        reports[0].message.contains("not in the executable"),
-        "{reports:?}"
-    );
+    assert!(reports[0].message.contains("no such file"), "{reports:?}");
 }
 
 #[test]
@@ -253,6 +250,43 @@ fn a_payload_whose_lrp_name_disagrees_with_its_project_is_refused() {
         ("main_form.rhai", ""),
     ]);
     assert!(runtime_from_payload(&payload, PathBuf::from(".")).is_err());
+}
+
+#[test]
+fn a_script_reads_a_payload_asset_through_the_normal_functions() {
+    let lrp = "name = \"a\"\nversion = \"1\"\nstartup = \"main_form\"\nassets = [\"songs/*.mod\"]\n\n\
+               [[items]]\nkind = \"form\"\nname = \"main_form\"\n\
+               layout = \"main_form.lfm\"\ncode = \"main_form.rhai\"\n";
+    let lfm = "format = 1\n\n[window]\nname = \"main_form\"\ntitle = \"A\"\n\n\
+               [[node]]\nkind = \"Label\"\nname = \"result_label\"\n\
+               left = 10\ntop = 10\nwidth = 200\n";
+    let code = "fn form_load() { result_label.text = file_read_text(\"songs/song.mod\"); }";
+    let payload = payload_of(&[
+        ("a.lrp", lrp),
+        ("main_form.lfm", lfm),
+        ("main_form.rhai", code),
+        ("assets/songs/song.mod", "MODDATA"),
+    ]);
+    let runtime = runtime_from_payload(&payload, PathBuf::from(".")).expect("loads");
+
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let spec = PlatformSpec::new("payload asset").size(Dip(320.0), Dip(200.0));
+    let seen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&seen);
+    run_app(backend, spec, move |ui| {
+        let app = runtime.build_app(ui, "main_form").expect("the form builds");
+        let form = app.root_form().expect("the form is live");
+        *slot.borrow_mut() = form
+            .get("result_label", "text")
+            .and_then(|value| value.as_str().map(str::to_owned));
+        app
+    })
+    .expect("the event loop runs");
+    assert_eq!(
+        seen.borrow().as_deref(),
+        Some("MODDATA"),
+        "the asset is read from the payload"
+    );
 }
 
 /// Export with the real player binary as the stub, and a project icon. The

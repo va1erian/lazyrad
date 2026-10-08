@@ -93,6 +93,16 @@ impl Project {
             ));
         }
 
+        if let Some(bad) = self.unsafe_asset_glob() {
+            diagnostics.push(located(
+                DiagnosticKind::ProjectFile,
+                &project_path,
+                &project_text,
+                "assets",
+                format!("asset pattern `{bad}` must be a relative path inside the project folder"),
+            ));
+        }
+
         diagnostics
     }
 }

@@ -105,6 +105,26 @@ fn every_sample_packages_and_verifies() {
 }
 
 #[test]
+fn assets_keep_their_relative_paths_in_the_package() {
+    let dir = scratch("assets");
+    fs::write(dir.join("m0.rhai"), "fn f() {}\n").unwrap();
+    fs::create_dir_all(dir.join("songs")).unwrap();
+    fs::write(dir.join("songs/song.mod"), b"MOD").unwrap();
+    let path = dir.join("app.lrp");
+    fs::write(
+        &path,
+        "name = \"app\"\nversion = \"1.0.0\"\nstartup = \"m0\"\nassets = [\"songs/*.mod\"]\n\n\
+         [[items]]\nkind = \"module\"\nname = \"m0\"\ncode = \"m0.rhai\"\n",
+    )
+    .unwrap();
+
+    let built = build_package(&request(&path, &fake_player(0))).unwrap();
+    let package = verify(&built.bytes).unwrap();
+    assert_eq!(package.files["resources/project/songs/song.mod"], b"MOD");
+    assert_eq!(package.files["resources/project/m0.rhai"], b"fn f() {}\n");
+}
+
+#[test]
 fn the_manifest_points_the_player_at_the_packaged_project() {
     let built = build_package(&request(&example("hello"), &fake_player(0))).unwrap();
     let package = verify(&built.bytes).unwrap();

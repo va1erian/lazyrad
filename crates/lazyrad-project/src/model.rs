@@ -26,6 +26,11 @@ pub struct Project {
     /// plain file name in the project folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<PathBuf>,
+    /// Extra files to ship with the project, as relative glob patterns
+    /// (`songs/*.mod`, `icons/logo.png`). A pattern that matches nothing is a
+    /// warning, not an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<String>,
 }
 
 impl Project {
@@ -38,6 +43,7 @@ impl Project {
             startup: name,
             items: Vec::new(),
             icon: None,
+            assets: Vec::new(),
         }
     }
 
@@ -54,6 +60,15 @@ impl Project {
     /// The file name of the `.lrp` on disk (`<name>.lrp`).
     pub fn file_name(&self) -> String {
         format!("{}.lrp", self.name)
+    }
+
+    /// The first asset pattern that could leave the project folder, if any (see
+    /// [`crate::glob::is_safe_glob`]).
+    pub fn unsafe_asset_glob(&self) -> Option<&str> {
+        self.assets
+            .iter()
+            .find(|pattern| !crate::glob::is_safe_glob(pattern))
+            .map(String::as_str)
     }
 
     /// The first item path (or the icon path) that is not a plain file name in the project

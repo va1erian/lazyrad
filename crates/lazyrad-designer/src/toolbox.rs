@@ -45,6 +45,7 @@ pub const CONTROL_KINDS: [&str; 9] = [
     "ListView",
     "ComboBox",
     "Canvas",
+    "Timer",
 ];
 
 /// The design width of one tile.
@@ -117,6 +118,7 @@ impl Tool {
                 "ListView" => Lucide::List,
                 "ComboBox" => Lucide::ChevronsUpDown,
                 "Canvas" => Lucide::Image,
+                "Timer" => Lucide::Repeat,
                 _ => Lucide::Square,
             },
         }
@@ -445,7 +447,7 @@ mod tests {
         assert_eq!(tools[0], Tool::Pointer);
         assert_eq!(tools[1].kind(), Some("Button"));
         assert_eq!(tools[1].label(), "Button");
-        assert_eq!(tools.last().and_then(Tool::kind), Some("Canvas"));
+        assert_eq!(tools.last().and_then(Tool::kind), Some("Timer"));
     }
 
     #[test]
@@ -466,6 +468,7 @@ mod tests {
             ("ListView", Lucide::List),
             ("ComboBox", Lucide::ChevronsUpDown),
             ("Canvas", Lucide::Image),
+            ("Timer", Lucide::Repeat),
         ];
         for (kind, icon) in expected {
             assert!(

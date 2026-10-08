@@ -23,6 +23,11 @@
 //! `offset + length + footer` is exactly the file size, the limits, the
 //! checksum, then every entry name against the same plain-file-name rule the
 //! `.lrp` item paths use.
+//!
+//! A project `assets` file is stored under the `assets/` prefix
+//! ([`ASSET_PREFIX`]) with its project-relative path (`assets/songs/song.mod`),
+//! so it cannot be mistaken for an item file and the runtime can read it by the
+//! same relative path a project folder uses.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -47,6 +52,8 @@ pub const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 /// The longest entry name, in bytes.
 pub const MAX_NAME_BYTES: usize = 255;
+/// The entry-name prefix an asset file is stored under.
+pub const ASSET_PREFIX: &str = "assets/";
 
 /// One packed file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +96,7 @@ impl Payload {
                 )));
             }
             total = total.saturating_add(size);
-            if has_extension(&entry.name, PROJECT_EXTENSION) {
+            if !is_asset_name(&entry.name) && has_extension(&entry.name, PROJECT_EXTENSION) {
                 projects += 1;
             }
         }
@@ -134,6 +141,15 @@ impl Payload {
                 }
             }
         }
+        // A glob that matches nothing is a warning, not a failure; the packager
+        // has nowhere to show it, so the assets are simply left out.
+        let (assets, _warnings) = lazyrad_project::collect_assets(dir, &project.assets)?;
+        for relative in assets {
+            entries.push(Entry {
+                data: read_regular(&dir.join(&relative), MAX_ENTRY_BYTES)?,
+                name: format!("{ASSET_PREFIX}{relative}"),
+            });
+        }
         Payload::new(entries)
     }
 
@@ -154,8 +170,20 @@ impl Payload {
     pub fn project_entry(&self) -> &Entry {
         self.entries
             .iter()
-            .find(|entry| has_extension(&entry.name, PROJECT_EXTENSION))
+            .find(|entry| {
+                !is_asset_name(&entry.name) && has_extension(&entry.name, PROJECT_EXTENSION)
+            })
             .expect("Payload::new guarantees exactly one .lrp")
+    }
+
+    /// The asset entries, as `(project-relative path, bytes)`, in packed order.
+    pub fn assets(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.entries.iter().filter_map(|entry| {
+            entry
+                .name
+                .strip_prefix(ASSET_PREFIX)
+                .map(|rel| (rel, &entry.data[..]))
+        })
     }
 
     /// The archive bytes (without the footer).
@@ -375,7 +403,14 @@ fn has_extension(name: &str, extension: &str) -> bool {
 /// Applies the plain-file-name rule (the same one `.lrp` item paths use) plus
 /// the payload's own: a short name, no separators or control characters, and
 /// one of the three project file extensions.
+///
+/// An asset entry is instead named `assets/<relative>`; its relative path may
+/// contain `/` but must stay inside the project (no `..`, no absolute path, no
+/// `\`). Its extension is free, since an asset is any file the project ships.
 fn check_name(name: &str) -> Result<(), PayloadError> {
+    if let Some(relative) = name.strip_prefix(ASSET_PREFIX) {
+        return check_asset_path(name, relative);
+    }
     let bad = |reason: &'static str| PayloadError::BadName {
         name: name.to_owned(),
         reason,
@@ -405,6 +440,37 @@ fn check_name(name: &str) -> Result<(), PayloadError> {
         return Err(bad("only .lrp, .lfm and .rhai files are packed"));
     }
     Ok(())
+}
+
+/// Checks an asset entry's `relative` path (the part after `assets/`).
+fn check_asset_path(name: &str, relative: &str) -> Result<(), PayloadError> {
+    let bad = |reason: &'static str| PayloadError::BadName {
+        name: name.to_owned(),
+        reason,
+    };
+    if name.len() > MAX_NAME_BYTES {
+        return Err(bad("it is too long"));
+    }
+    if relative.is_empty() || relative.starts_with('/') || relative.contains('\\') {
+        return Err(bad("it is not a relative path inside the project"));
+    }
+    for component in relative.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(bad("it contains an unsafe path component"));
+        }
+        if component
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        {
+            return Err(bad("it contains a reserved character"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `name` is an asset entry (a path under the `assets/` prefix).
+fn is_asset_name(name: &str) -> bool {
+    name.starts_with(ASSET_PREFIX)
 }
 
 /// Reads a regular file of at most `limit` bytes, refusing links, folders and

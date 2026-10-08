@@ -106,6 +106,14 @@ fn answered(button) {                 // \"ok\", \"cancel\", \"yes\" or \"no\"
     if button == \"yes\" { list1.items = []; }
 }
 
+open_file_dialog(\"Open a song\", \"MOD files|*.mod;All files|*.*\", |path| {
+    print(path);                      // the picked path, or () when cancelled
+});
+
+let data = file_read_bytes(\"songs/song.mod\");   // a Blob of bytes
+file_write_bytes(\"copy.mod\", data);
+let text = file_read_text(\"notes.txt\");          // project-relative paths work
+
 app.quit();                           // close the program
 let title = app.title;                // also app.path
 let stamp = now();                    // \"2026-01-31 14:05:09\"
@@ -210,6 +218,10 @@ fn double(x) { x * 2 }                // the last value is returned",
 /// on the engine and appears in the tutorial's code.
 pub const STDLIB_FUNCTIONS: &[&str] = &[
     "msg_box",
+    "open_file_dialog",
+    "file_read_bytes",
+    "file_write_bytes",
+    "file_read_text",
     "now",
     "today",
     "random",

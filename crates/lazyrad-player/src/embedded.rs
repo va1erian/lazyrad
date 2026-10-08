@@ -23,9 +23,23 @@ use std::rc::Rc;
 
 use lazyrad_packager::{Payload, PayloadError};
 use lazyrad_project::Project;
-use lazyrad_runtime::{FormRuntime, RuntimeError, check_runtime};
+use lazyrad_runtime::{FormRuntime, ProjectFiles, RuntimeError, check_runtime};
 
 use crate::Report;
+
+/// The project's files as the executable's payload holds them: an item's plain
+/// name, or an asset under the payload's `assets/` prefix.
+struct PayloadFiles(Payload);
+
+impl ProjectFiles for PayloadFiles {
+    fn read(&self, relative: &str) -> Option<Vec<u8>> {
+        self.0.get(relative).map(<[u8]>::to_vec).or_else(|| {
+            self.0
+                .get(&format!("assets/{relative}"))
+                .map(<[u8]>::to_vec)
+        })
+    }
+}
 
 /// The runtime for the project appended to `exe`, or `None` when `exe` carries
 /// no payload (an ordinary player).
@@ -66,18 +80,9 @@ pub fn runtime_from_payload(
     let project = Project::parse(Path::new(&project_entry.name), text)
         .map_err(|error| vec![Report::from_load_error(&RuntimeError::from(error))])?;
 
-    let runtime = FormRuntime::from_project(project, dir, |relative| {
-        let name = relative.to_string_lossy();
-        let data = payload.get(&name).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the file is not in the executable's project data",
-            )
-        })?;
-        String::from_utf8(data.to_vec())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    })
-    .map_err(|error| vec![Report::from_load_error(&error)])?;
+    let files: Rc<dyn ProjectFiles> = Rc::new(PayloadFiles(payload.clone()));
+    let runtime = FormRuntime::from_project(project, dir, files)
+        .map_err(|error| vec![Report::from_load_error(&error)])?;
 
     let check = check_runtime(&runtime);
     if check.is_empty() {
