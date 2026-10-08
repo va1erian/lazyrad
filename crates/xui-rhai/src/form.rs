@@ -17,7 +17,10 @@
 //!
 //! `form_load` runs once the form is built and `form_close` runs when the
 //! window is asked to close. [`ScriptForm::build`] runs `form_load`;
-//! [`ScriptForm::close`] runs `form_close`.
+//! [`ScriptForm::close`] runs `form_close`. A host that reloads a form calls
+//! [`ScriptForm::build_deferred`], then [`ScriptForm::load`], then
+//! [`ScriptForm::reload`] with the old [`ScriptForm::state`], which runs
+//! `form_reload(old_state)` when the script defines it (issue #91).
 //!
 //! # Standard modules
 //!
@@ -30,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
 
-use rhai::{AST, Dynamic, FnPtr};
+use rhai::{AST, Dynamic, FnPtr, Map};
 use xui_core::app::Ui;
 use xui_form::{
     Binder, BuildError, BuildOptions, Catalog, EventHandler, EventRef, Factories, FormDoc,
@@ -222,6 +225,27 @@ impl ScriptForm {
         setup: S,
         configure: impl FnOnce(&mut EngineHost) -> Result<(), ScriptError>,
     ) -> Result<ScriptForm, FormError> {
+        let script = ScriptForm::build_deferred(ui, doc, catalog, source, setup, configure)?;
+        script.load()?;
+        Ok(script)
+    }
+
+    /// Builds `doc`'s widgets and compiles its script, but does **not** run
+    /// `form_load` yet (see [`ScriptForm::load`]).
+    ///
+    /// A hot reload (issue #91) builds the new form this way: the widgets and
+    /// script are ready before anything is torn down, so a failure leaves the
+    /// running form untouched. The caller releases the old form's event sources
+    /// and only then calls [`ScriptForm::load`] and [`ScriptForm::reload`], so
+    /// the new `form_load` subscriptions are not dropped by that release.
+    pub fn build_deferred<S: EngineSetup>(
+        ui: &mut Ui<Msg>,
+        doc: &FormDoc,
+        catalog: &Catalog,
+        source: ScriptSource<'_>,
+        setup: S,
+        configure: impl FnOnce(&mut EngineHost) -> Result<(), ScriptError>,
+    ) -> Result<ScriptForm, FormError> {
         // Compile once to learn the handler names the binder must consult.
         let handler_names = script_functions(source.code, source.file)?;
         let binder = ScriptBinder::new(source.name, Rc::new(handler_names));
@@ -251,15 +275,13 @@ impl ScriptForm {
         // Top-level code runs once, here; handlers run on the imports-only AST.
         let ast = host.prepare(&ast)?;
 
-        let script = ScriptForm {
+        Ok(ScriptForm {
             name: source.name.to_owned(),
             form,
             host,
             ast,
             functions,
-        };
-        script.load()?;
-        Ok(script)
+        })
     }
 
     /// The form's name.
@@ -285,6 +307,30 @@ impl ScriptForm {
     /// Runs `form_close`, if the script defines it.
     pub fn close(&self) -> Result<(), ScriptError> {
         self.run(FORM, "Close", &[])
+    }
+
+    /// The form's `state` map: the value of `form.state`.
+    ///
+    /// A hot reload reads this from the old form before rebuilding (issue #91).
+    pub fn state(&self) -> Map {
+        self.host.state()
+    }
+
+    /// Runs `form_reload(old_state)`, if the script defines it.
+    ///
+    /// This is the opt-in half of a hot reload (issue #91): the runtime calls
+    /// it after the new form's `form_load` with the old form's `state`, so a
+    /// script can keep its place while the UI is edited. A script that does not
+    /// define `form_reload` starts with fresh state. A handler with no
+    /// parameters is called with none; extra parameters get `()`.
+    pub fn reload(&self, old_state: Map) -> Result<(), ScriptError> {
+        let Some(&arity) = self.functions.get("form_reload") else {
+            return Ok(());
+        };
+        let mut args = vec![Dynamic::from(old_state)];
+        args.resize(arity, Dynamic::UNIT);
+        let _ = self.host.call_with(&self.ast, "form_reload", args)?;
+        Ok(())
     }
 
     /// Runs the handler for `control`'s `event`, if the script defines one.

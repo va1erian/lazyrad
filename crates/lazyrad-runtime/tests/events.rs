@@ -223,3 +223,33 @@ fn a_failing_handler_is_reported_and_the_program_keeps_running() {
     );
     assert_eq!(source.released.borrow().as_slice(), ["main_form"]);
 }
+
+#[test]
+fn reloading_releases_the_old_forms_event_sources_and_resubscribes() {
+    let source = Rc::new(FakeSource::default());
+    install(&source);
+    let runtime = label_form("fn form_load() { watch(|x| result_label.text = \"got \" + x); }");
+    let source_for_run = Rc::clone(&source);
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    run_app(backend, spec(), move |ui| {
+        let mut app = runtime
+            .build_app(ui, "main_form")
+            .expect("main_form builds");
+        assert!(app.is_polling(), "form_load subscribed");
+
+        assert!(app.reload_root(ui), "the form rebuilds in place");
+
+        assert_eq!(
+            source_for_run.released.borrow().as_slice(),
+            ["main_form"],
+            "the old form's event sources are released on reload"
+        );
+        assert!(
+            app.is_polling(),
+            "the new form_load subscribed again after the release"
+        );
+        app
+    })
+    .expect("the event loop runs");
+    extensions::clear();
+}

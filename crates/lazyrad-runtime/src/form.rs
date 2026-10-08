@@ -22,8 +22,11 @@
 //! # Window events
 //!
 //! `form_load` runs once the form is built and `form_close` runs when the
-//! window is asked to close (the window then closes for real). The window spec
-//! itself comes from [`Catalog::window_spec`](xui_form::Catalog::window_spec).
+//! window is asked to close (the window then closes for real). On a hot reload
+//! (issue #91) `form_load` runs again on the rebuilt form and, when the script
+//! defines `fn form_reload(old_state)`, it is called afterwards with the old
+//! form's `form.state`. The window spec itself comes from
+//! [`Catalog::window_spec`](xui_form::Catalog::window_spec).
 //!
 //! # Standard modules
 //!
@@ -51,13 +54,17 @@ use xui_core::app::{App, Ui, WindowHandle, run_app};
 use xui_core::backend::{Backend, PlatformSpec};
 use xui_core::units::Dip;
 use xui_core::{Dialog, DialogAction};
-use xui_form::{Catalog, FormDoc, LiveForm, Value};
+use xui_form::{
+    Binder, BuildOptions, Catalog, EventHandler, EventRef, Factories, FormDoc, LiveForm, Value,
+    build_with,
+};
 
-use lazyrad_project::{Project, lazyrad_catalog, parse_form};
+use lazyrad_project::{Node, Project, lazyrad_catalog, parse_form};
 
 use crate::events::Poller;
 use crate::fs_policy::FsPolicy;
 use crate::platform;
+use crate::reload::{ReloadOutcome, WATCH_INTERVAL_MS};
 use crate::stdlib::StdlibContext;
 use xui_rhai::form::{FormError, ScriptForm, ScriptSource};
 use xui_rhai::message::Pending;
@@ -153,14 +160,24 @@ pub enum RuntimeError {
     UnknownForm(String),
 }
 
+/// The project's reloadable content: its `.lrp` model, its forms and its
+/// modules.
+///
+/// A hot reload (issue #91) swaps this whole set for a freshly loaded one, so
+/// every accessor returns an owned clone rather than borrowing the map.
+#[derive(Clone, Debug)]
+pub(crate) struct Sources {
+    pub(crate) project: Project,
+    pub(crate) forms: BTreeMap<String, FormSource>,
+    pub(crate) modules: Vec<ModuleSource>,
+}
+
 /// Every form and module a project declares, plus what a running window needs.
 ///
 /// The runtime is shared (`Rc`) by every open window: a form's script may ask a
 /// different form to open, and the request travels through this type.
 pub struct FormRuntime {
-    project: Project,
-    pub(crate) forms: BTreeMap<String, FormSource>,
-    pub(crate) modules: Vec<ModuleSource>,
+    pub(crate) sources: RefCell<Sources>,
     catalog: Catalog,
     pending: Pending,
     /// The project directory, shown to scripts as `App.path`.
@@ -179,6 +196,8 @@ pub struct FormRuntime {
     error_observer: RefCell<Option<ErrorObserver>>,
     /// Told whenever the application opens a message box.
     msg_box_observer: RefCell<Option<MsgBoxObserver>>,
+    /// The hot-reload watcher, when the player was started with `--watch`.
+    pub(crate) watch: RefCell<Option<crate::reload::Watcher>>,
 }
 
 /// A callback told `(form, control, event)` after an event handler ran without
@@ -314,9 +333,11 @@ impl FormRuntime {
         }
 
         Ok(Rc::new(FormRuntime {
-            project,
-            forms,
-            modules,
+            sources: RefCell::new(Sources {
+                project,
+                forms,
+                modules,
+            }),
             catalog,
             pending: Rc::new(RefCell::new(Vec::new())),
             path: dir,
@@ -327,6 +348,7 @@ impl FormRuntime {
             observer: RefCell::new(None),
             error_observer: RefCell::new(None),
             msg_box_observer: RefCell::new(None),
+            watch: RefCell::new(None),
         }))
     }
 
@@ -340,9 +362,11 @@ impl FormRuntime {
             by_name.insert(form.name.clone(), form);
         }
         Rc::new(FormRuntime {
-            project: Project::new("runtime"),
-            forms: by_name,
-            modules,
+            sources: RefCell::new(Sources {
+                project: Project::new("runtime"),
+                forms: by_name,
+                modules,
+            }),
             catalog: lazyrad_catalog(),
             pending: Rc::new(RefCell::new(Vec::new())),
             path: PathBuf::from("."),
@@ -353,12 +377,13 @@ impl FormRuntime {
             observer: RefCell::new(None),
             error_observer: RefCell::new(None),
             msg_box_observer: RefCell::new(None),
+            watch: RefCell::new(None),
         })
     }
 
     /// The project this runtime was loaded from.
-    pub fn project(&self) -> &Project {
-        &self.project
+    pub fn project(&self) -> Project {
+        self.sources.borrow().project.clone()
     }
 
     /// The catalog the forms are built against.
@@ -372,19 +397,20 @@ impl FormRuntime {
     }
 
     /// The form names, in sorted order.
-    pub fn form_names(&self) -> impl Iterator<Item = &str> {
-        self.forms.keys().map(String::as_str)
+    pub fn form_names(&self) -> Vec<String> {
+        self.sources.borrow().forms.keys().cloned().collect()
     }
 
     /// The form named `name`, if the project has it.
-    pub fn form(&self, name: &str) -> Option<&FormSource> {
-        self.forms.get(name)
+    pub fn form(&self, name: &str) -> Option<FormSource> {
+        self.sources.borrow().forms.get(name).cloned()
     }
 
     /// The project's startup form name.
     pub fn startup_name(&self) -> Result<String, RuntimeError> {
-        let name = &self.project.startup;
-        if self.forms.contains_key(name) {
+        let sources = self.sources.borrow();
+        let name = &sources.project.startup;
+        if sources.forms.contains_key(name) {
             Ok(name.clone())
         } else {
             Err(RuntimeError::MissingStartup(name.clone()))
@@ -405,6 +431,13 @@ impl FormRuntime {
             .is_none_or(|handle| handle.is_open())
     }
 
+    /// Sends `msg` to every open form window, so a reload rebuilds each one.
+    pub(crate) fn broadcast(&self, msg: Msg) {
+        for ui in self.inboxes.borrow().values() {
+            ui.emit(msg.clone());
+        }
+    }
+
     /// Builds `form` into `ui` and returns the application that drives it.
     pub fn build_app(
         self: &Rc<Self>,
@@ -412,30 +445,33 @@ impl FormRuntime {
         form: &str,
     ) -> Result<FormApp, RuntimeError> {
         let source = self
-            .forms
-            .get(form)
+            .form(form)
             .ok_or_else(|| RuntimeError::UnknownForm(form.to_owned()))?;
-        let root = Rc::new(FormInstance::build(ui, source, self)?);
+        let root = Rc::new(FormInstance::build(ui, &source, self)?);
 
         // `form_close` runs in the close mapper and then the runtime performs
         // its normal close: a primary window quits the loop, a secondary one
         // does not. Intercepting the close with a message would skip that quit.
-        let root_for_close = Rc::clone(&root);
-        ui.on_close(move || {
-            if let Err(error) = root_for_close.close() {
-                eprintln!("lazyrad: {error}");
-            }
-            None
-        });
+        install_close_handler(&root, ui);
 
         self.inboxes
             .borrow_mut()
             .insert(form.to_owned(), ui.clone());
+        // Only the startup window drives the project-wide watch; the others are
+        // rebuilt when it broadcasts `Msg::Reload`.
+        let watching = self.watch_enabled() && self.startup_name().ok().as_deref() == Some(form);
+        if watching {
+            ui.every(WATCH_INTERVAL_MS, Msg::WatchTick);
+        }
         let mut app = FormApp {
+            form: form.to_owned(),
             root: Some(Rc::clone(&root)),
             runtime: Rc::clone(self),
             dialogs: Vec::new(),
             poller: Poller::new(ui, form),
+            banner: None,
+            generation: 0,
+            watching,
         };
         app.flush(ui);
         // `form_load` may already have subscribed to something.
@@ -472,6 +508,22 @@ impl FormInstance {
         source: &FormSource,
         runtime: &Rc<FormRuntime>,
     ) -> Result<FormInstance, RuntimeError> {
+        let instance = FormInstance::build_deferred(ui, source, runtime)?;
+        instance.load()?;
+        Ok(instance)
+    }
+
+    /// Builds `source`'s widgets and compiles its script, but does not run
+    /// `form_load` yet.
+    ///
+    /// A hot reload (issue #91) builds the new form this way first, so a build
+    /// failure leaves the running form untouched; it then releases the old
+    /// form's event sources and calls [`FormInstance::load`].
+    fn build_deferred(
+        ui: &mut Ui<Msg>,
+        source: &FormSource,
+        runtime: &Rc<FormRuntime>,
+    ) -> Result<FormInstance, RuntimeError> {
         let stdlib = StdlibContext {
             form: source.name.clone(),
             pending: Rc::clone(&runtime.pending),
@@ -480,7 +532,7 @@ impl FormInstance {
             fs: Rc::clone(&runtime.fs),
         };
         let runtime_for_setup = Rc::clone(runtime);
-        let script = ScriptForm::build(
+        let script = ScriptForm::build_deferred(
             ui,
             &source.doc,
             &runtime.catalog,
@@ -491,7 +543,10 @@ impl FormInstance {
             },
             stdlib,
             move |host| {
-                for module in &runtime_for_setup.modules {
+                // Cloned out so a module's top-level code cannot hit a held
+                // borrow of the runtime's sources.
+                let modules = runtime_for_setup.sources.borrow().modules.clone();
+                for module in &modules {
                     host.register_module(&module.name, &module.file, &module.source)?;
                 }
                 register_form_refs(host, &runtime_for_setup);
@@ -504,6 +559,21 @@ impl FormInstance {
         })?;
 
         Ok(FormInstance { script })
+    }
+
+    /// Runs the form's `form_load` handler.
+    fn load(&self) -> Result<(), ScriptError> {
+        self.script.load()
+    }
+
+    /// The form's `form.state` map, read before a reload replaces the form.
+    fn state(&self) -> rhai::Map {
+        self.script.state()
+    }
+
+    /// Runs `form_reload(old_state)` after a reload, if the script defines it.
+    fn reload(&self, old_state: rhai::Map) -> Result<(), ScriptError> {
+        self.script.reload(old_state)
     }
 
     /// Calls a function pointer the script handed to a host extension (a
@@ -558,6 +628,8 @@ impl FormInstance {
 
 /// The application that owns one window's form and routes its messages.
 pub struct FormApp {
+    /// The form this window drives, kept even when [`FormApp::root`] is `None`.
+    form: String,
     root: Option<Rc<FormInstance>>,
     runtime: Rc<FormRuntime>,
     /// Every open message box. A [`Dialog`] destroys its nodes when dropped, so
@@ -566,18 +638,30 @@ pub struct FormApp {
     /// Polls the host's event sources while the form has work pending, and
     /// releases what the form registered when the window goes away.
     poller: Poller,
+    /// The hot-reload error banner strip, shown while a reload failed.
+    banner: Option<Banner>,
+    /// Bumped on every reload, so a message box result for the old form is
+    /// dropped rather than run against the new script (checklist 1).
+    generation: u64,
+    /// Whether this window drives the project's hot-reload polling (the
+    /// startup window does; secondary windows are rebuilt on `Msg::Reload`).
+    watching: bool,
 }
+
+/// The label strip a failed reload shows, kept alive so its nodes live.
+struct Banner {
+    strip: LiveForm<Msg>,
+    text: String,
+}
+
+/// The name of the node inside the banner's form document.
+const BANNER_NODE: &str = "reload_banner";
 
 impl FormApp {
     /// A placeholder app for a window whose form could not be built: it owns no
     /// form, so updating it quits the loop.
     pub(crate) fn failed(runtime: Rc<FormRuntime>) -> FormApp {
-        FormApp {
-            root: None,
-            runtime,
-            dialogs: Vec::new(),
-            poller: Poller::idle(),
-        }
+        FormApp::empty(runtime, String::new())
     }
 
     /// The live form this window drives, when it built successfully.
@@ -585,9 +669,112 @@ impl FormApp {
         self.root.as_ref().map(|instance| instance.live_form())
     }
 
+    /// The form this window drives, even when its build failed.
+    pub fn form_name(&self) -> &str {
+        &self.form
+    }
+
+    /// An application for a window whose form could not be built: it holds the
+    /// form name so a reload can try again, but drives no form.
+    fn empty(runtime: Rc<FormRuntime>, form: String) -> FormApp {
+        FormApp {
+            form,
+            root: None,
+            runtime,
+            dialogs: Vec::new(),
+            poller: Poller::idle(),
+            banner: None,
+            generation: 0,
+            watching: false,
+        }
+    }
+
+    /// The hot-reload diagnostics currently shown in this window's banner, if
+    /// any. Cleared by the next successful reload.
+    pub fn banner_text(&self) -> Option<&str> {
+        self.banner.as_ref().map(|banner| banner.text.as_str())
+    }
+
     /// Whether the window is polling the host's event sources for its form.
     pub fn is_polling(&self) -> bool {
         self.poller.is_polling()
+    }
+
+    /// Rebuilds this window's form from the runtime's current sources (issue
+    /// #91).
+    ///
+    /// The new form is built **before** the old one is touched, so a build
+    /// failure keeps the running form and shows the error in the banner
+    /// (checklist 3). On success the old form's event sources are released
+    /// through the existing [`EventSource::release`](crate::extensions::EventSource)
+    /// path, its timer is stopped, its open message boxes are dropped and its
+    /// pending callbacks are invalidated; then the new `form_load` and, when
+    /// the script defines it, `form_reload(old_state)` run.
+    ///
+    /// A form the project no longer declares closes a secondary window and
+    /// leaves the startup form untouched. Returns whether the form was rebuilt.
+    pub fn reload_root(&mut self, ui: &mut Ui<Msg>) -> bool {
+        let Some(source) = self.runtime.form(&self.form) else {
+            // The project no longer declares this form. A secondary window
+            // closes; the startup window (the one that drives the watch) keeps
+            // its last good build.
+            if !self.watching {
+                ui.close();
+            }
+            return false;
+        };
+        let old_state = self
+            .root
+            .as_ref()
+            .map_or_else(rhai::Map::new, |root| root.state());
+        let new_root = match FormInstance::build_deferred(ui, &source, &self.runtime) {
+            Ok(instance) => Rc::new(instance),
+            Err(error) => {
+                self.show_banner(ui, &[error.to_string()]);
+                return false;
+            }
+        };
+        // Release the old subscriptions and stop its timer before the new
+        // `form_load` runs: `release` is keyed by form name, so doing it after
+        // would drop the new subscriptions too.
+        let old_poller = std::mem::replace(&mut self.poller, Poller::idle());
+        old_poller.release(ui);
+        // A box opened for the old instance must not call the new script.
+        self.generation += 1;
+        self.dialogs.clear();
+        self.root = Some(Rc::clone(&new_root));
+        self.clear_banner();
+        // The window's close handler must run the new form's `form_close`, not
+        // the dropped old instance's (checklist 1).
+        install_close_handler(&new_root, ui);
+        if let Err(error) = new_root.load() {
+            self.show_banner(ui, &[error.to_string()]);
+        } else if let Err(error) = new_root.reload(old_state) {
+            self.show_banner(ui, &[error.to_string()]);
+        }
+        self.poller = Poller::new(ui, &self.form);
+        self.poller.sync(ui);
+        true
+    }
+
+    /// Shows (or updates) the reload banner with `diagnostics`.
+    fn show_banner(&mut self, ui: &Ui<Msg>, diagnostics: &[String]) {
+        let text = format_diagnostics(diagnostics);
+        if let Some(banner) = &mut self.banner {
+            let _ = banner
+                .strip
+                .set(BANNER_NODE, "text", &Value::Text(text.clone()));
+            banner.text = text;
+            return;
+        }
+        if let Some(strip) = build_banner(ui, self.runtime.catalog(), &text) {
+            self.banner = Some(Banner { strip, text });
+        }
+    }
+
+    /// Removes the reload banner, if one is shown.
+    fn clear_banner(&mut self) {
+        self.banner = None;
     }
 
     /// Moves every message a script left pending into the right window's queue.
@@ -616,7 +803,7 @@ impl FormApp {
         if self.runtime.is_open(name) {
             return;
         }
-        let Some(source) = self.runtime.form(name).cloned() else {
+        let Some(source) = self.runtime.form(name) else {
             eprintln!("lazyrad: the project has no form `{name}`");
             return;
         };
@@ -628,7 +815,7 @@ impl FormApp {
                 Ok(app) => app,
                 Err(error) => {
                     eprintln!("lazyrad: cannot open `{form_name}`: {error}");
-                    FormApp::failed(Rc::clone(&runtime))
+                    FormApp::empty(Rc::clone(&runtime), form_name)
                 }
             });
         match result {
@@ -720,6 +907,7 @@ impl FormApp {
             }
         };
         let form = form.to_owned();
+        let generation = self.generation;
         let dialog = dialog.on_action(move |action| {
             let accepted = matches!(action, DialogAction::Accept(_));
             let result = buttons.result(accepted);
@@ -727,6 +915,7 @@ impl FormApp {
                 form: form.clone(),
                 callback,
                 result,
+                generation,
             })
         });
         dialog.open();
@@ -738,6 +927,44 @@ impl App for FormApp {
     type Msg = Msg;
 
     fn update(&mut self, msg: Msg, ui: &mut Ui<Msg>) {
+        match msg {
+            Msg::WatchTick => {
+                if self.watching {
+                    match self.runtime.check_for_changes() {
+                        ReloadOutcome::Unchanged => {}
+                        ReloadOutcome::Reloaded => {
+                            self.clear_banner();
+                            // Every open window, this one included, rebuilds on
+                            // the message so the reload path is one code path.
+                            self.runtime.broadcast(Msg::Reload);
+                        }
+                        ReloadOutcome::Failed(diagnostics) => {
+                            self.show_banner(ui, &diagnostics);
+                        }
+                    }
+                }
+            }
+            Msg::Reload => {
+                self.reload_root(ui);
+            }
+            Msg::Quit => {
+                ui.quit();
+                return;
+            }
+            other => self.handle_form_message(other, ui),
+        }
+        // A closed dialog no longer needs its nodes kept alive.
+        self.dialogs.retain(Dialog::is_open);
+        // A handler may have subscribed to something, or closed the last
+        // subscription: run the polling timer only while there is work.
+        self.poller.sync(ui);
+    }
+}
+
+impl FormApp {
+    /// Handles the messages that need a live form, leaving the window-wide ones
+    /// ([`Msg::WatchTick`], [`Msg::Reload`], [`Msg::Quit`]) to [`FormApp::update`].
+    fn handle_form_message(&mut self, msg: Msg, ui: &mut Ui<Msg>) {
         let Some(root) = self.root.clone() else {
             ui.quit();
             return;
@@ -793,8 +1020,13 @@ impl App for FormApp {
                 form,
                 callback,
                 result,
+                generation,
             } => {
-                if form.as_str() == root.name()
+                // A result for the previous instance (the form reloaded while
+                // its box was open) must not run the old callback against the
+                // new script (checklist 1).
+                if generation == self.generation
+                    && form.as_str() == root.name()
                     && let Err(error) = root.call_callback(&callback, result)
                 {
                     self.report_handler_error(ui, root.name(), "", "callback", error);
@@ -807,13 +1039,9 @@ impl App for FormApp {
                 }
                 self.flush(ui);
             }
-            Msg::Quit => ui.quit(),
+            // Handled by `update` before this is reached.
+            Msg::WatchTick | Msg::Reload | Msg::Quit => {}
         }
-        // A closed dialog no longer needs its nodes kept alive.
-        self.dialogs.retain(Dialog::is_open);
-        // A handler may have subscribed to something, or closed the last
-        // subscription: run the polling timer only while there is work.
-        self.poller.sync(ui);
     }
 }
 
@@ -833,6 +1061,21 @@ fn stop_frame_loop(form: &LiveForm<Msg>, control: &str) {
     if let Err(error) = form.set(control, "fps", &Value::Int(0)) {
         eprintln!("lazyrad: cannot stop `{control}`'s frame loop: {error}");
     }
+}
+
+/// The form a message must be handled by, when it belongs to one window.
+/// Installs the window's close handler so it runs `root`'s `form_close`.
+///
+/// A reload replaces the root, so the handler is installed again with the new
+/// instance; the old one is dropped with the old root.
+fn install_close_handler(root: &Rc<FormInstance>, ui: &Ui<Msg>) {
+    let root = Rc::clone(root);
+    ui.on_close(move || {
+        if let Err(error) = root.close() {
+            eprintln!("lazyrad: {error}");
+        }
+        None
+    });
 }
 
 /// The form a message must be handled by, when it belongs to one window.
@@ -879,11 +1122,64 @@ fn register_form_refs(host: &mut EngineHost, runtime: &Rc<FormRuntime>) {
         .register_fn("show", |reference: &mut FormRef| reference.show());
     host.engine_mut()
         .register_fn("unload", |reference: &mut FormRef| reference.unload());
-    for name in runtime.forms.keys() {
+    for name in runtime
+        .sources
+        .borrow()
+        .forms
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
         host.set_global(
             name.clone(),
             Dynamic::from(FormRef::new(name.clone(), Rc::clone(&runtime.pending))),
         );
+    }
+}
+
+/// The text the reload banner shows for `diagnostics`: the first problem, plus
+/// a count when there are more.
+fn format_diagnostics(diagnostics: &[String]) -> String {
+    match diagnostics {
+        [] => "reload failed".to_owned(),
+        [only] => format!("reload failed: {only}"),
+        [first, rest @ ..] => format!("reload failed: {first} (+{} more)", rest.len()),
+    }
+}
+
+/// Builds the banner strip (a full-width label at the top of the window).
+///
+/// The strip is a one-node form mounted on the window above the form's own
+/// widgets, so it never blocks input. Dropping the returned [`LiveForm`]
+/// destroys the strip.
+fn build_banner(ui: &Ui<Msg>, catalog: &Catalog, text: &str) -> Option<LiveForm<Msg>> {
+    let mut doc = FormDoc::new(BANNER_NODE);
+    let mut label = Node::new("Label", BANNER_NODE);
+    label.set_prop("left", Value::Int(0));
+    label.set_prop("top", Value::Int(0));
+    label.set_prop("width", Value::Int(640));
+    label.set_prop("height", Value::Int(28));
+    label.set_prop("anchor", Value::Enum("stretch_horizontal".to_owned()));
+    label.set_prop("text", Value::Text(text.to_owned()));
+    doc.insert(label);
+    let factories: Factories<Msg> = Factories::xui();
+    build_with(
+        ui,
+        &doc,
+        catalog,
+        &factories,
+        &NoEvents,
+        BuildOptions::default(),
+    )
+    .ok()
+}
+
+/// A binder that wires no events: the banner strip is inert.
+struct NoEvents;
+
+impl Binder<Msg> for NoEvents {
+    fn bind(&self, _event: EventRef<'_>) -> Option<EventHandler<Msg>> {
+        None
     }
 }
 
@@ -982,7 +1278,7 @@ pub fn run_runtime_with(
             Err(error) => {
                 *failure_for_app.borrow_mut() = Some(error);
                 ui.quit_with(1);
-                FormApp::failed(Rc::clone(&runtime_for_app))
+                FormApp::empty(Rc::clone(&runtime_for_app), startup_for_app.clone())
             }
         }
     })?;
@@ -1278,6 +1574,8 @@ mod tests {
                 form: "main_form".to_owned(),
                 callback,
                 result: "ok",
+                // The first build of a window is generation 0.
+                generation: 0,
             });
             app
         })
@@ -1294,7 +1592,7 @@ mod tests {
         let runtime = button_form("fn go_button_click() { let d = 0; 1 / d }");
         let runtime_for_observer = Rc::clone(&runtime);
         runtime.set_error_observer(Rc::new(move |_form, _control, _event, _error| {
-            let _ = runtime_for_observer.form_names().count();
+            let _ = runtime_for_observer.form_names().len();
             runtime_for_observer.set_error_observer(Rc::new(|_, _, _, _| {}));
         }));
 

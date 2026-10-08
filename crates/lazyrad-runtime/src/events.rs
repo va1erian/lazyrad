@@ -91,6 +91,22 @@ impl Poller {
         }
         errors
     }
+
+    /// Stops the polling timer and releases what the form registered.
+    ///
+    /// This is what a hot reload calls before rebuilding the form (issue #91):
+    /// `release` is keyed by form name, so it must run before the new
+    /// `form_load` re-subscribes, or it would drop the new subscriptions too.
+    /// Consuming `self` leaves nothing for [`Drop`] to release again.
+    pub(crate) fn release(mut self, ui: &Ui<Msg>) {
+        if let Some(timer) = self.timer.take() {
+            ui.kill_timer(timer);
+        }
+        for source in &self.sources {
+            source.release(&self.form);
+        }
+        self.sources.clear();
+    }
 }
 
 impl Drop for Poller {

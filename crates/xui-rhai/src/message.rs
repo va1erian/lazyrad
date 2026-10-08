@@ -61,11 +61,23 @@ pub enum Msg {
         callback: FnPtr,
         /// The button pressed: `"ok"`, `"cancel"`, `"yes"` or `"no"`.
         result: &'static str,
+        /// The form instance the box was opened for. A result whose generation
+        /// no longer matches the window's is stale — the form was reloaded
+        /// while the box was open — and must not run the old callback against
+        /// the new script (hot reload, issue #91).
+        generation: u64,
     },
     /// The window's polling timer fired: run work that arrived outside the
     /// window for its form (a host's event sources, such as Messenger events
     /// on LazyOS).
     Poll,
+    /// The hot-reload watcher's timer fired: check the project's files for
+    /// changes (issue #91). Delivered on its own timer, so it never collides
+    /// with the event-source [`Msg::Poll`].
+    WatchTick,
+    /// A reload succeeded and this window should rebuild its form from the
+    /// runtime's new sources (issue #91). Sent to every open form window.
+    Reload,
     /// `app.quit()`: end the application.
     Quit,
 }

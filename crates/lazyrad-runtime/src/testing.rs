@@ -135,8 +135,8 @@ impl TestApp {
             Ok(name) => name,
             Err(_) => runtime
                 .form_names()
+                .into_iter()
                 .next()
-                .map(str::to_owned)
                 .ok_or_else(|| RuntimeError::UnknownForm(String::new()))?,
         };
         run_session(&runtime, &startup, test)

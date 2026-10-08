@@ -97,6 +97,19 @@ fn form_close() {
         "form is the current form. form.state holds your data; form.title is a string \
          you can read and set.",
     ),
+    Block::Heading("Hot reload"),
+    Block::Para(
+        "When the player runs with --watch (the IDE passes it), saving a .lfm or .rhai \
+         file checks the project and rebuilds the changed form in its window, running \
+         form_load again. A broken save keeps the running form and shows the diagnostics \
+         in a banner instead. To keep values across the rebuild, define form_reload: it \
+         runs after form_load with the form.state the old form left behind.",
+    ),
+    Block::Code(
+        "fn form_reload(old_state) {
+    form.state = old_state;
+}",
+    ),
     Block::Heading("The standard library"),
     Block::Code(
         "msg_box(\"Saved\");                     // a message box

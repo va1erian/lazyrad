@@ -327,6 +327,12 @@ impl Form {
         }
     }
 
+    /// The shared `state` map, so a host that reloads the form can carry the
+    /// old state into the new script's `form_reload` (issue #91).
+    pub(crate) fn state_handle(&self) -> Rc<RefCell<Map>> {
+        Rc::clone(&self.state)
+    }
+
     /// Shows or hides every control.
     fn set_visible(&self, visible: bool) {
         for name in self.host.names() {

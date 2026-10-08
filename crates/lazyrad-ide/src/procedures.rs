@@ -15,10 +15,26 @@
 
 use lazyrad_project::{Catalog, FormDoc};
 use xui_code_editor::{Buffer, HighlightCache, RhaiHighlighter, TokenClass};
-use xui_form::EventSpec;
+use xui_form::{ArgSpec, EventSpec, ValueType};
 
 /// The prefix the form's own handlers use: `form_load`, `form_close`.
 pub const FORM_PREFIX: &str = "form";
+
+/// The synthetic window event for `form_reload`, the hot-reload state hook
+/// (issue #91). It is not raised by the toolkit, so it is not in the catalog;
+/// the procedure combo lists it so a user can create the handler, and the
+/// runtime calls it after `form_load` with the old `form.state`.
+fn reload_event() -> EventSpec {
+    EventSpec {
+        name: "Reload".to_owned(),
+        args: vec![ArgSpec {
+            name: "old_state".to_owned(),
+            ty: ValueType::Text { multiline: false },
+        }],
+        is_default: false,
+        description: "Runs after form_load on a hot reload, with the old form.state.".to_owned(),
+    }
+}
 
 /// One entry in the object combo: the form or a control, plus its events.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,10 +62,14 @@ impl ObjectEntry {
 /// Builds the object combo's entries for `form`: the window first, then each
 /// control that declares at least one event.
 pub fn objects(catalog: &Catalog, form: &FormDoc) -> Vec<ObjectEntry> {
+    let mut form_events = catalog.window_spec().events.clone();
+    // `form_reload` is a runtime hook, not a toolkit event, so it is added by
+    // hand (issue #91).
+    form_events.push(reload_event());
     let mut entries = vec![ObjectEntry {
         label: FORM_PREFIX.to_owned(),
         prefix: FORM_PREFIX.to_owned(),
-        events: catalog.window_spec().events.clone(),
+        events: form_events,
     }];
     for node in &form.nodes {
         let Some(spec) = catalog.get(&node.kind) else {
@@ -208,6 +228,10 @@ mod tests {
         assert_eq!(objects[0].label, "form");
         assert_eq!(objects[0].prefix, FORM_PREFIX);
         assert!(objects[0].events.iter().any(|event| event.name == "Load"));
+        assert!(
+            objects[0].event_names().contains(&"reload".to_owned()),
+            "the form offers the form_reload hook"
+        );
 
         let labels: Vec<&str> = objects.iter().map(|entry| entry.label.as_str()).collect();
         assert_eq!(

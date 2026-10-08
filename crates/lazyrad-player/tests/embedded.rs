@@ -108,8 +108,8 @@ fn each_sample_runs_from_memory_like_from_disk() {
         let from_disk = FormRuntime::load(sample_dir(sample)).expect("the sample loads");
 
         assert_eq!(from_memory.project(), from_disk.project(), "{sample}");
-        let memory_forms: Vec<&str> = from_memory.form_names().collect();
-        let disk_forms: Vec<&str> = from_disk.form_names().collect();
+        let memory_forms: Vec<String> = from_memory.form_names();
+        let disk_forms: Vec<String> = from_disk.form_names();
         assert_eq!(memory_forms, disk_forms, "{sample}");
         for name in &memory_forms {
             assert_eq!(
