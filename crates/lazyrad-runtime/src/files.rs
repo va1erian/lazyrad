@@ -109,6 +109,12 @@ impl ProjectFiles for DiskProject {
 /// Only normal path components are allowed, so `..`, an absolute path and a
 /// Windows drive prefix are all refused before the filesystem is touched.
 fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
+    // Project paths use `/`. A backslash is a separator on Windows but an
+    // ordinary character elsewhere, so the same name would mean different
+    // files on different hosts: refuse it everywhere.
+    if relative.contains('\\') {
+        return None;
+    }
     let relative = Path::new(relative);
     if relative
         .components()
@@ -124,6 +130,18 @@ fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_with_a_backslash_is_refused_on_every_host() {
+        let root = Path::new("project");
+        assert!(safe_join(root, "songs\\song.mod").is_none());
+        assert!(safe_join(root, "..\\outside.txt").is_none());
+        assert!(safe_join(root, "a\\..\\..\\b").is_none());
+        assert_eq!(
+            safe_join(root, "songs/song.mod"),
+            Some(root.join("songs/song.mod"))
+        );
+    }
 
     fn scratch(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
