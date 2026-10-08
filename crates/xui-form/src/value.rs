@@ -11,6 +11,8 @@
 //! An [`Value::Int`] is accepted wherever a [`ValueType::Float`] is expected, so
 //! a hand-written `1` reads as `1.0`.
 
+use std::rc::Rc;
+
 use serde::Serialize;
 use xui_core::Color;
 
@@ -36,6 +38,10 @@ pub enum Value {
     Color(Color),
     /// A list of strings (list and combo items).
     List(Vec<String>),
+    /// Raw bytes: a method argument such as the file a script hands
+    /// [`PictureBox::load`](crate::picture). Shared, so passing a large file
+    /// between the script and a control never copies it.
+    Bytes(Rc<[u8]>),
 }
 
 impl Value {
@@ -49,6 +55,7 @@ impl Value {
             Value::Enum(_) => "enum",
             Value::Color(_) => "color",
             Value::List(_) => "list",
+            Value::Bytes(_) => "bytes",
         }
     }
 
@@ -97,6 +104,14 @@ impl Value {
     pub fn as_list(&self) -> Option<&[String]> {
         match self {
             Value::List(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The bytes inside, if any.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Bytes(value) => Some(value),
             _ => None,
         }
     }
@@ -157,6 +172,22 @@ impl Value {
                 }
                 Ok(Value::List(out))
             }
+            ValueType::Bytes => {
+                let items = raw
+                    .as_array()
+                    .ok_or_else(|| DecodeError::new(ty.type_name(), raw.type_name()))?;
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let byte = item
+                        .as_integer()
+                        .and_then(|value| u8::try_from(value).ok())
+                        .ok_or_else(|| {
+                            DecodeError::new("a list of bytes (0-255)", item.type_name())
+                        })?;
+                    out.push(byte);
+                }
+                Ok(Value::Bytes(out.into()))
+            }
         }
     }
 
@@ -171,6 +202,12 @@ impl Value {
             Value::List(items) => {
                 toml::Value::Array(items.iter().cloned().map(toml::Value::String).collect())
             }
+            Value::Bytes(bytes) => toml::Value::Array(
+                bytes
+                    .iter()
+                    .map(|byte| toml::Value::Integer(i64::from(*byte)))
+                    .collect(),
+            ),
         }
     }
 }
@@ -258,6 +295,9 @@ pub enum ValueType {
     Color,
     /// A list of strings.
     List,
+    /// Raw bytes ([`Value::Bytes`]). Meant for method arguments; a form file
+    /// could store one only as an array of integers.
+    Bytes,
 }
 
 impl ValueType {
@@ -271,6 +311,7 @@ impl ValueType {
             ValueType::Enum { .. } => "enum",
             ValueType::Color => "color",
             ValueType::List => "list",
+            ValueType::Bytes => "bytes",
         }
     }
 
@@ -302,6 +343,7 @@ impl ValueType {
             },
             ValueType::Color => matches!(value, Value::Color(_)),
             ValueType::List => matches!(value, Value::List(_)),
+            ValueType::Bytes => matches!(value, Value::Bytes(_)),
         }
     }
 }
@@ -511,6 +553,18 @@ mod tests {
     }
 
     #[test]
+    fn bytes_refuse_out_of_range_items() {
+        let raw = toml::Value::Array(vec![toml::Value::Integer(256)]);
+        assert!(Value::from_toml(&raw, &ValueType::Bytes).is_err());
+        let raw = toml::Value::Array(vec![toml::Value::Integer(-1)]);
+        assert!(Value::from_toml(&raw, &ValueType::Bytes).is_err());
+        let bytes = Value::Bytes(vec![1, 2].into());
+        assert!(ValueType::Bytes.accepts(&bytes));
+        assert_eq!(bytes.as_bytes(), Some(&[1u8, 2][..]));
+        assert!(!ValueType::List.accepts(&bytes));
+    }
+
+    #[test]
     fn lists_require_strings() {
         let ty = ValueType::List;
         let raw = toml::Value::Array(vec![
@@ -535,6 +589,7 @@ mod tests {
             Value::Enum("left".to_owned()),
             Value::Color(Color::rgb(1, 2, 3)),
             Value::List(vec!["a".to_owned(), "b".to_owned()]),
+            Value::Bytes(vec![0, 7, 255].into()),
         ] {
             let raw = value.to_toml();
             let ty = match &value {
@@ -553,6 +608,7 @@ mod tests {
                 },
                 Value::Color(_) => ValueType::Color,
                 Value::List(_) => ValueType::List,
+                Value::Bytes(_) => ValueType::Bytes,
             };
             assert_eq!(Value::from_toml(&raw, &ty), Ok(value));
         }

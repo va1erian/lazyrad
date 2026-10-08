@@ -280,6 +280,15 @@ pub trait Platform: Send + Sync {
         FsPolicy::Unrestricted
     }
 
+    /// The files the program was started to open (a picture double-clicked in
+    /// the file manager), which scripts read as `app.documents`. Empty by
+    /// default. A sandboxing platform's [`Platform::fs_policy`] must grant
+    /// read access to each of them (LazyOS also grants its folder, so a
+    /// viewer can page through the neighbours).
+    fn documents(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
     /// Where the player executable is expected, next to the running program by
     /// default. `None` when the platform has no fixed place (the IDE then relies
     /// on its `player_path` setting).

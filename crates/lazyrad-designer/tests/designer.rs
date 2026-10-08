@@ -640,6 +640,7 @@ fn dropping_every_toolbox_kind_creates_it_and_undo_removes_it() {
             "list_view1",
             "combo_box1",
             "canvas1",
+            "picture_box1",
             "timer1"
         ]
     );

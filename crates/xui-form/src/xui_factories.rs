@@ -41,6 +41,7 @@ impl<M: 'static> Factories<M> {
         factories.register(SeparatorFactory);
         factories.register(HyperlinkFactory);
         factories.register(crate::canvas::CanvasFactory);
+        factories.register(crate::picture::PictureFactory);
         factories.register(TimerFactory);
         factories
     }

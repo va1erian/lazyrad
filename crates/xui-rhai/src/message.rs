@@ -93,6 +93,9 @@ pub enum Msg {
         filter: String,
         /// The Rhai function pointer to call with the picked path or `()`.
         callback: FnPtr,
+        /// Whether the picked file's folder is granted too (the `"folder"`
+        /// option), so a viewer can page through the file's neighbours.
+        folder: bool,
     },
     /// The hot-reload watcher's timer fired: check the project's files for
     /// changes (issue #91). Delivered on its own timer, so it never collides

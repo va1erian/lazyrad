@@ -671,6 +671,7 @@ pub(crate) fn widget(
 fn builtin_specs() -> Vec<WidgetSpec> {
     vec![
         crate::canvas::spec(),
+        crate::picture::spec(),
         WidgetSpec {
             properties: vec![property(
                 "text",
@@ -1170,6 +1171,7 @@ mod tests {
                 "MultilineEdit",
                 "NumberField",
                 "Panel",
+                "PictureBox",
                 "ProgressBar",
                 "RadioGroup",
                 "Separator",
