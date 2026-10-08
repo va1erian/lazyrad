@@ -270,7 +270,15 @@ impl EngineHost {
         let mut scope = Scope::new();
         self.engine
             .call_fn::<Dynamic>(&mut scope, ast, function, args)
-            .map_err(|error| self.locate(&error))
+            .map_err(|error| {
+                let mut located = self.locate(&error);
+                // Rhai wraps a called function, not the entry call, so name the
+                // entry here: the chain then reads `handler → helper → …`. A
+                // first entry with the same name is the handler calling itself,
+                // so the entry is still added.
+                located.call_chain.insert(0, function.to_owned());
+                located
+            })
     }
 
     /// Locates a runtime error from a handler, adding a hint when the missing

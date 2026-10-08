@@ -181,6 +181,10 @@ pub struct FormRuntime {
     observer: RefCell<Option<HandlerObserver>>,
     /// The open-file dialogs scripts asked for and have not been answered.
     file_dialogs: FileDialogs,
+    /// Told after every handler, callback or poll that failed.
+    error_observer: RefCell<Option<ErrorObserver>>,
+    /// Told whenever the application opens a message box.
+    msg_box_observer: RefCell<Option<MsgBoxObserver>>,
 }
 
 /// A callback told `(form, control, event)` after an event handler ran without
@@ -188,11 +192,37 @@ pub struct FormRuntime {
 /// marker; any host can use it for telemetry or tests.
 pub type HandlerObserver = Rc<dyn Fn(&str, &str, &str)>;
 
+/// A callback told `(form, control, event, error)` whenever a handler, a
+/// message-box callback or a poll fails. The LazyOS player uses it to print its
+/// `LRPLAY:SCRIPTERR` serial marker; a host's test kit uses it to count
+/// failures.
+///
+/// The event name is `"callback"` for a message-box callback and `"poll"` for
+/// an event source; both pass `""` as the control.
+pub type ErrorObserver = Rc<dyn Fn(&str, &str, &str, &ScriptError)>;
+
+/// A callback told `(form, text, title)` whenever a message box is opened,
+/// whether by a script's `msg_box` or by a failed handler. A host's test kit
+/// records them instead of blocking.
+pub type MsgBoxObserver = Rc<dyn Fn(&str, &str, &str)>;
+
 impl FormRuntime {
     /// Installs the observer told after each successful event handler,
     /// replacing any earlier one.
     pub fn set_handler_observer(&self, observer: HandlerObserver) {
         *self.observer.borrow_mut() = Some(observer);
+    }
+
+    /// Installs the observer told after each failed handler, callback or poll,
+    /// replacing any earlier one.
+    pub fn set_error_observer(&self, observer: ErrorObserver) {
+        *self.error_observer.borrow_mut() = Some(observer);
+    }
+
+    /// Installs the observer told whenever a message box is opened, replacing
+    /// any earlier one.
+    pub fn set_msg_box_observer(&self, observer: MsgBoxObserver) {
+        *self.msg_box_observer.borrow_mut() = Some(observer);
     }
 
     /// Tells the observer, if any, that a handler ran.
@@ -202,6 +232,23 @@ impl FormRuntime {
         let observer = self.observer.borrow().clone();
         if let Some(observer) = observer {
             observer(form, control, event);
+        }
+    }
+
+    /// Tells the observer, if any, that a handler, callback or poll failed.
+    fn notify_error(&self, form: &str, control: &str, event: &str, error: &ScriptError) {
+        // Cloned out for the same re-entrancy reason as `notify_handler`.
+        let observer = self.error_observer.borrow().clone();
+        if let Some(observer) = observer {
+            observer(form, control, event, error);
+        }
+    }
+
+    /// Tells the observer, if any, that a message box was opened.
+    fn notify_msg_box(&self, form: &str, text: &str, title: &str) {
+        let observer = self.msg_box_observer.borrow().clone();
+        if let Some(observer) = observer {
+            observer(form, text, title);
         }
     }
 
@@ -278,6 +325,8 @@ impl FormRuntime {
             files,
             observer: RefCell::new(None),
             file_dialogs: FileDialogs::new(),
+            error_observer: RefCell::new(None),
+            msg_box_observer: RefCell::new(None),
         }))
     }
 
@@ -304,6 +353,8 @@ impl FormRuntime {
             files: Rc::new(NoProjectFiles),
             observer: RefCell::new(None),
             file_dialogs: FileDialogs::new(),
+            error_observer: RefCell::new(None),
+            msg_box_observer: RefCell::new(None),
         })
     }
 
@@ -536,6 +587,19 @@ impl Drop for FormApp {
 }
 
 impl FormApp {
+    /// A placeholder app for a window whose form could not be built: it owns no
+    /// form, so updating it quits the loop.
+    pub(crate) fn failed(runtime: Rc<FormRuntime>) -> FormApp {
+        let owner = runtime.file_dialogs.new_owner();
+        FormApp {
+            root: None,
+            runtime,
+            dialogs: Vec::new(),
+            timers: Timers::idle(),
+            owner,
+        }
+    }
+
     /// The live form this window drives, when it built successfully.
     pub fn root_form(&self) -> Option<&Rc<LiveForm<Msg>>> {
         self.root.as_ref().map(|instance| instance.live_form())
@@ -599,13 +663,7 @@ impl FormApp {
                 Ok(app) => app,
                 Err(error) => {
                     eprintln!("lazyrad: cannot open `{form_name}`: {error}");
-                    FormApp {
-                        root: None,
-                        runtime: Rc::clone(&runtime),
-                        dialogs: Vec::new(),
-                        timers: Timers::idle(),
-                        owner: runtime.file_dialogs.new_owner(),
-                    }
+                    FormApp::failed(Rc::clone(&runtime))
                 }
             });
         match result {
@@ -637,7 +695,20 @@ impl FormApp {
     /// `Canvas`'s failing `Frame` handler also stops that canvas's frame loop
     /// (its `fps` becomes 0), so the error is shown once rather than every
     /// frame; the script can set `fps` again to restart it.
-    fn report_handler_error(&mut self, ui: &mut Ui<Msg>, form: &str, error: ScriptError) {
+    ///
+    /// `control` and `event` name what failed, for the
+    /// [`ErrorObserver`](FormRuntime::set_error_observer): a widget event uses
+    /// the real control and event, a message-box callback uses `""` and
+    /// `"callback"`, and an event source poll uses `""` and `"poll"`.
+    fn report_handler_error(
+        &mut self,
+        ui: &mut Ui<Msg>,
+        form: &str,
+        control: &str,
+        event: &str,
+        error: ScriptError,
+    ) {
+        self.runtime.notify_error(form, control, event, &error);
         self.open_msg_box(
             ui,
             form,
@@ -669,6 +740,7 @@ impl FormApp {
         buttons: MsgBoxButtons,
         callback: Option<FnPtr>,
     ) {
+        self.runtime.notify_msg_box(form, text, title);
         let dialog = match buttons {
             MsgBoxButtons::Ok => Dialog::message(ui, title, text),
             MsgBoxButtons::OkCancel => Dialog::confirm(ui, title, text),
@@ -732,7 +804,7 @@ impl FormApp {
             };
             if let Err(error) = root.call_fn(&callback, vec![result]) {
                 let located = root.locate(&error);
-                self.report_handler_error(ui, root.name(), located);
+                self.report_handler_error(ui, root.name(), "", "callback", located);
             }
         }
     }
@@ -776,7 +848,7 @@ impl App for FormApp {
                                 if frame {
                                     stop_frame_loop(root.live_form(), &control);
                                 }
-                                self.report_handler_error(ui, root.name(), error);
+                                self.report_handler_error(ui, root.name(), &control, &event, error);
                             }
                         }
                     }
@@ -809,25 +881,29 @@ impl App for FormApp {
                 if form.as_str() == root.name()
                     && let Err(error) = root.call_callback(&callback, result)
                 {
-                    self.report_handler_error(ui, root.name(), error);
+                    self.report_handler_error(ui, root.name(), "", "callback", error);
                 }
                 self.flush(ui);
             }
             Msg::Poll => {
                 for error in self.timers.poll(&root) {
-                    self.report_handler_error(ui, root.name(), error);
+                    self.report_handler_error(ui, root.name(), "", "poll", error);
                 }
                 self.deliver_file_dialogs(ui, &root);
                 self.flush(ui);
             }
             Msg::Tick { control } => {
-                if let Err(error) = root.run(&control, "Tick", &[]) {
-                    // A tick repeats, so a failing handler must not fire every
-                    // interval: disable the timer and report the error once.
-                    let _ = root
-                        .live_form()
-                        .set(&control, "enabled", &Value::Bool(false));
-                    self.report_handler_error(ui, root.name(), error);
+                match root.run(&control, "Tick", &[]) {
+                    Ok(()) => self.runtime.notify_handler(root.name(), &control, "Tick"),
+                    Err(error) => {
+                        // A tick repeats, so a failing handler must not fire
+                        // every interval: disable the timer and report the
+                        // error once.
+                        let _ = root
+                            .live_form()
+                            .set(&control, "enabled", &Value::Bool(false));
+                        self.report_handler_error(ui, root.name(), &control, "Tick", error);
+                    }
                 }
                 self.flush(ui);
             }
@@ -1037,13 +1113,7 @@ pub fn run_runtime_with(
             Err(error) => {
                 *failure_for_app.borrow_mut() = Some(error);
                 ui.quit_with(1);
-                FormApp {
-                    root: None,
-                    runtime: Rc::clone(&runtime_for_app),
-                    dialogs: Vec::new(),
-                    timers: Timers::idle(),
-                    owner: runtime_for_app.file_dialogs.new_owner(),
-                }
+                FormApp::failed(Rc::clone(&runtime_for_app))
             }
         }
     })?;
@@ -1147,7 +1217,7 @@ mod tests {
                 rhai::Position::new(1, 1),
                 "division by zero",
             );
-            app.report_handler_error(ui, "main_form", error);
+            app.report_handler_error(ui, "main_form", "go_button", "Click", error);
             *slot.borrow_mut() = Some(app.dialogs.last().is_some_and(Dialog::is_open));
             app
         })
@@ -1267,6 +1337,197 @@ mod tests {
             panic!("a located script error is expected, got {error:?}");
         };
         assert_eq!(script.file, "runtime.rhai");
+    }
+
+    /// A one-button form whose `go_button_click` is `code`.
+    fn button_form(code: &str) -> Rc<FormRuntime> {
+        let mut doc = FormDoc::new("main_form");
+        let mut button = Node::new("Button", "go_button");
+        button.set_prop("left", Value::Int(10));
+        button.set_prop("top", Value::Int(10));
+        button.set_prop("width", Value::Int(100));
+        button.set_prop("height", Value::Int(28));
+        doc.insert(button);
+        FormRuntime::from_sources(vec![FormSource::new("main_form", doc, code)], Vec::new())
+    }
+
+    /// Emits one `go_button` click and lets the loop drain it.
+    fn click_go(runtime: Rc<FormRuntime>) {
+        let backend = Rc::new(OffscreenBackend::new());
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let app = runtime
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
+            ui.emit(Msg::Event {
+                form: "main_form".to_owned(),
+                control: "go_button".to_owned(),
+                event: "Click".to_owned(),
+                args: Vec::new(),
+            });
+            app
+        })
+        .expect("the event loop runs");
+    }
+
+    #[test]
+    fn an_error_observer_hears_a_failed_event() {
+        let runtime = button_form("fn go_button_click() { let d = 0; 1 / d }");
+        let heard: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&heard);
+        runtime.set_error_observer(Rc::new(move |form, control, event, error| {
+            sink.borrow_mut()
+                .push(format!("{form}.{control}.{event}: {error}"));
+        }));
+
+        click_go(runtime);
+
+        let heard = heard.borrow();
+        assert_eq!(heard.len(), 1, "heard: {heard:?}");
+        assert!(
+            heard[0].starts_with("main_form.go_button.Click: "),
+            "heard: {heard:?}"
+        );
+        assert!(heard[0].contains("Division by zero"), "heard: {heard:?}");
+    }
+
+    #[test]
+    fn an_error_observer_hears_a_failed_callback() {
+        let runtime = button_form("fn bad_callback(result) { let d = 0; 1 / d }");
+        let heard: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&heard);
+        runtime.set_error_observer(Rc::new(move |form, control, event, _error| {
+            sink.borrow_mut().push(format!("{form}.{control}.{event}"));
+        }));
+        let callback = FnPtr::new("bad_callback").expect("a valid function name");
+
+        let backend = Rc::new(OffscreenBackend::new());
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let app = runtime
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
+            ui.emit(Msg::MsgBoxResult {
+                form: "main_form".to_owned(),
+                callback,
+                result: "ok",
+            });
+            app
+        })
+        .expect("the event loop runs");
+
+        assert_eq!(heard.borrow().as_slice(), ["main_form..callback"]);
+    }
+
+    #[test]
+    fn an_error_observer_may_re_enter_the_runtime() {
+        // The observer is cloned out of its `RefCell` before it runs, so one
+        // that installs a new observer (or otherwise touches the runtime) must
+        // not hit a held borrow.
+        let runtime = button_form("fn go_button_click() { let d = 0; 1 / d }");
+        let runtime_for_observer = Rc::clone(&runtime);
+        runtime.set_error_observer(Rc::new(move |_form, _control, _event, _error| {
+            let _ = runtime_for_observer.form_names().count();
+            runtime_for_observer.set_error_observer(Rc::new(|_, _, _, _| {}));
+        }));
+
+        click_go(runtime);
+    }
+
+    #[test]
+    fn a_stack_overflow_reaches_the_error_observer() {
+        // Deep Rhai recursion needs more than a test thread's default stack in
+        // a debug build, so the whole run goes on a large one.
+        //
+        // Rhai 1.26 treats `ErrorStackOverflow` as a system exception: it is
+        // not wrapped in `ErrorInFunctionCall` and its position is overwritten
+        // to `NONE` on the way out, so the overflow reports no chain and `0:0`.
+        // The point of this test is that the failure is a first-class one a
+        // host can see at all (the MOD sample only showed it in a dialog).
+        let error = crate::testing::run_on_large_stack(|| {
+            let runtime =
+                button_form("fn go_button_click() { recurse(); }\nfn recurse() { recurse(); }");
+            let captured: Rc<RefCell<Option<ScriptError>>> = Rc::new(RefCell::new(None));
+            let sink = Rc::clone(&captured);
+            runtime.set_error_observer(Rc::new(move |_form, _control, _event, error| {
+                *sink.borrow_mut() = Some(error.clone());
+            }));
+            click_go(runtime);
+            captured
+                .borrow_mut()
+                .take()
+                .expect("the error was reported")
+        });
+
+        assert_eq!(error.message, "Stack overflow");
+        assert_eq!(error.file, "main_form.rhai");
+        assert_eq!(error.call_chain, ["go_button_click"]);
+        assert_eq!(
+            error.to_string(),
+            "main_form.rhai:0:0: Stack overflow (in go_button_click)"
+        );
+    }
+
+    #[test]
+    fn a_handler_calling_itself_counts_every_level() {
+        // Rhai wraps the two recursive calls but not the entry call, so the
+        // chain is the entry plus both: three levels, not two.
+        let error = crate::testing::run_on_large_stack(|| {
+            let runtime = button_form(
+                "fn go_button_click() {\n\
+                     if !(\"n\" in form.state) { form.state.n = 0; }\n\
+                     form.state.n += 1;\n\
+                     if form.state.n < 3 { go_button_click(); } else { let d = 0; 1 / d }\n\
+                 }",
+            );
+            let captured: Rc<RefCell<Option<ScriptError>>> = Rc::new(RefCell::new(None));
+            let sink = Rc::clone(&captured);
+            runtime.set_error_observer(Rc::new(move |_form, _control, _event, error| {
+                *sink.borrow_mut() = Some(error.clone());
+            }));
+            click_go(runtime);
+            captured
+                .borrow_mut()
+                .take()
+                .expect("the error was reported")
+        });
+
+        assert_eq!(
+            error.call_chain,
+            ["go_button_click", "go_button_click", "go_button_click"],
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_deeply_nested_error_reports_a_position_and_chain() {
+        // A catchable error keeps Rhai's call wrappers, so the innermost
+        // position and the whole `handler → helper → …` chain survive.
+        let error = crate::testing::run_on_large_stack(|| {
+            let runtime = button_form(
+                "fn go_button_click() { first(); }\n\
+                 fn first() { second(); }\n\
+                 fn second() { let d = 0; 1 / d }",
+            );
+            let captured: Rc<RefCell<Option<ScriptError>>> = Rc::new(RefCell::new(None));
+            let sink = Rc::clone(&captured);
+            runtime.set_error_observer(Rc::new(move |_form, _control, _event, error| {
+                *sink.borrow_mut() = Some(error.clone());
+            }));
+            click_go(runtime);
+            captured
+                .borrow_mut()
+                .take()
+                .expect("the error was reported")
+        });
+
+        assert!(error.line > 0, "a non-zero position: {error}");
+        assert!(error.message.starts_with("Division by zero"), "{error}");
+        assert_eq!(error.call_chain, ["go_button_click", "first", "second"]);
+        assert!(
+            error
+                .to_string()
+                .contains("(in go_button_click → first → second)"),
+            "{error}"
+        );
     }
 
     #[test]

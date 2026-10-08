@@ -187,6 +187,28 @@ fn a_form_without_work_runs_no_timer() {
 }
 
 #[test]
+fn a_poll_failure_reaches_the_error_observer_as_a_poll() {
+    let source = Rc::new(FakeSource::default());
+    install(&source);
+    let runtime = label_form("fn form_load() { watch(|x| { throw \"bad \" + x; }); }");
+    let heard: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&heard);
+    runtime.set_error_observer(Rc::new(move |form, control, event, _error| {
+        sink.borrow_mut().push(format!("{form}|{control}|{event}"));
+    }));
+
+    let run = run_once(runtime, &source, "event");
+    extensions::clear();
+
+    assert_eq!(heard.borrow().as_slice(), ["main_form||poll"]);
+    assert_eq!(
+        run.form.get("result_label", "text"),
+        Some(Value::Text("before".to_owned())),
+        "the throw happened before the assignment"
+    );
+}
+
+#[test]
 fn a_failing_handler_is_reported_and_the_program_keeps_running() {
     let source = Rc::new(FakeSource::default());
     install(&source);

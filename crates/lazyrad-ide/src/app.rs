@@ -178,8 +178,9 @@ pub enum Msg {
     AppRun(bool),
 }
 
-/// The Error List's rows: one line per diagnostic, each led by the error icon.
-struct ErrorRows(Vec<String>);
+/// The Error List's rows: one line per diagnostic, led by the error icon, or
+/// the warning icon for a lint warning (which does not stop a run).
+struct ErrorRows(Vec<(String, bool)>);
 
 impl ListModel for ErrorRows {
     fn rows(&self) -> usize {
@@ -187,12 +188,16 @@ impl ListModel for ErrorRows {
     }
 
     fn cell(&self, row: usize, column: usize) -> Option<&str> {
-        (column == 0).then(|| self.0.get(row).map(String::as_str))?
+        (column == 0).then(|| self.0.get(row).map(|(text, _)| text.as_str()))?
     }
 
-    fn icon(&self, _row: usize) -> Option<xui_core::icon::IconRef> {
-        // Every entry is an error today; warnings would take TriangleAlert.
-        Some(Lucide::CircleX.into())
+    fn icon(&self, row: usize) -> Option<xui_core::icon::IconRef> {
+        let (_, warning) = self.0.get(row)?;
+        Some(if *warning {
+            Lucide::TriangleAlert.into()
+        } else {
+            Lucide::CircleX.into()
+        })
     }
 }
 
@@ -204,6 +209,22 @@ struct ErrorEntry {
     name: String,
     /// The parse error.
     diagnostic: CodeDiagnostic,
+    /// Whether it is a lint warning rather than an error.
+    warning: bool,
+}
+
+impl ErrorEntry {
+    /// The squiggle the code editor draws under the entry's position.
+    fn marker(&self) -> Marker {
+        let line = self.diagnostic.line.saturating_sub(1);
+        let col = self.diagnostic.col.saturating_sub(1);
+        let kind = if self.warning {
+            MarkerKind::Warning
+        } else {
+            MarkerKind::Error
+        };
+        Marker::new(line, col, col + 1, kind)
+    }
 }
 
 /// Which persisted pane size a divider move changes.
@@ -1201,17 +1222,21 @@ impl IdeApp {
             // A clean check clears diagnostics an earlier compile left behind.
             self.errors.clear();
             self.refresh_error_list();
+            self.refresh_markers();
             return true;
         }
+        let errors = problems.iter().filter(|problem| !problem.warning).count();
         let entries: Vec<ErrorEntry> = problems
             .iter()
             .map(|problem| ErrorEntry {
                 name: self.item_for_diagnostic_file(&problem.file),
                 diagnostic: CodeDiagnostic::new(problem.line, problem.col, problem.message.clone()),
+                warning: problem.warning,
             })
             .collect();
         self.errors = entries;
         self.refresh_error_list();
+        self.refresh_markers();
         for problem in &problems {
             self.log(
                 ui,
@@ -1221,7 +1246,12 @@ impl IdeApp {
                 ),
             );
         }
-        self.log(ui, format!("{} error(s): {refusal}.", problems.len()));
+        if errors == 0 {
+            // Only lint warnings: show them, but let the project run.
+            self.log(ui, format!("{} warning(s).", problems.len()));
+            return true;
+        }
+        self.log(ui, format!("{errors} error(s): {refusal}."));
         false
     }
 
@@ -1285,8 +1315,10 @@ impl IdeApp {
         self.errors.push(ErrorEntry {
             name: name.clone(),
             diagnostic,
+            warning: report.kind == lazyrad_player::Kind::Warning,
         });
         self.refresh_error_list();
+        self.refresh_markers();
         if report.file.is_empty() {
             self.log(ui, report.message.clone());
         } else {
@@ -2492,6 +2524,7 @@ impl IdeApp {
             .extend(errors.iter().cloned().map(|diagnostic| ErrorEntry {
                 name: name.to_owned(),
                 diagnostic,
+                warning: false,
             }));
         self.refresh_error_list();
         if let Some(editor) = self.code_editor(name) {
@@ -2514,12 +2547,33 @@ impl IdeApp {
         }
     }
 
+    /// Re-applies the Error List's entries as squiggles in every open code
+    /// editor, so a warning or error added after the editor opened shows.
+    fn refresh_markers(&self) {
+        for document in &self.documents {
+            if let DocumentView::Code(view) = &document.view {
+                let markers = self
+                    .errors
+                    .iter()
+                    .filter(|entry| entry.name == document.name)
+                    .map(ErrorEntry::marker)
+                    .collect();
+                view.editor.set_markers(markers);
+            }
+        }
+    }
+
     /// Rebuilds the Error List rows from the collected diagnostics.
     fn refresh_error_list(&self) {
-        let rows: Vec<String> = self
+        let rows: Vec<(String, bool)> = self
             .errors
             .iter()
-            .map(|entry| format!("{}{}", entry.name, entry.diagnostic.label()))
+            .map(|entry| {
+                (
+                    format!("{}{}", entry.name, entry.diagnostic.label()),
+                    entry.warning,
+                )
+            })
             .collect();
         self.error_list.set_model(ErrorRows(rows));
     }
@@ -3107,11 +3161,7 @@ impl IdeApp {
                     .errors
                     .iter()
                     .filter(|entry| entry.name == name)
-                    .map(|entry| {
-                        let line = entry.diagnostic.line.saturating_sub(1);
-                        let col = entry.diagnostic.col.saturating_sub(1);
-                        Marker::new(line, col, col + 1, MarkerKind::Error)
-                    })
+                    .map(ErrorEntry::marker)
                     .collect();
                 editor.set_markers(markers);
                 self.schedule_compile(name, &source);
@@ -3671,13 +3721,18 @@ mod tests {
     }
 
     #[test]
-    fn every_error_list_row_leads_with_the_error_icon() {
-        let rows = ErrorRows(vec!["Form1 (2:5): boom".to_owned(), "util: bad".to_owned()]);
+    fn error_list_rows_lead_with_the_error_or_warning_icon() {
+        let rows = ErrorRows(vec![
+            ("Form1 (2:5): boom".to_owned(), false),
+            ("util (1:1): a lint".to_owned(), true),
+        ]);
         assert_eq!(rows.rows(), 2);
         assert_eq!(rows.cell(0, 0), Some("Form1 (2:5): boom"));
         assert_eq!(rows.cell(0, 1), None, "the list has one column");
         assert_eq!(rows.cell(5, 0), None);
-        assert_eq!(rows.icon(1), Some(Lucide::CircleX.into()));
+        assert_eq!(rows.icon(0), Some(Lucide::CircleX.into()));
+        assert_eq!(rows.icon(1), Some(Lucide::TriangleAlert.into()));
+        assert_eq!(rows.icon(5), None);
     }
 
     #[test]

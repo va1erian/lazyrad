@@ -127,6 +127,14 @@ fn default_author() -> String {
 fn compile_check(project: &Path) -> Result<(), Vec<String>> {
     let report = lazyrad_runtime::check_project(project).map_err(|e| vec![e.to_string()])?;
     if report.is_empty() {
+        // Lint warnings never fail the check; they are printed and the package
+        // proceeds.
+        for lint in &report.lints {
+            eprintln!(
+                "warning: {}:{}:{}: {}",
+                lint.file, lint.line, lint.column, lint.message
+            );
+        }
         return Ok(());
     }
     let mut lines: Vec<String> = report
@@ -137,6 +145,12 @@ fn compile_check(project: &Path) -> Result<(), Vec<String>> {
     lines.extend(
         report
             .scripts
+            .iter()
+            .map(|s| format!("{}:{}:{}: {}", s.file, s.line, s.column, s.message)),
+    );
+    lines.extend(
+        report
+            .lints
             .iter()
             .map(|s| format!("{}:{}:{}: {}", s.file, s.line, s.column, s.message)),
     );
