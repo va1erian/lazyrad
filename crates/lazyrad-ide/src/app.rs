@@ -3213,8 +3213,17 @@ impl App for IdeApp {
     type Msg = Msg;
 
     fn update(&mut self, msg: Msg, ui: &mut Ui<Msg>) {
-        // The edit-availability timer changes nothing completion reads.
-        let idle = matches!(msg, Msg::RefreshEdit);
+        // Neither the edit-availability timer nor typing in a form's script
+        // changes what completion reads besides the text (a module's exports
+        // do change as it is typed in).
+        let idle = match &msg {
+            Msg::RefreshEdit => true,
+            Msg::DocumentEdited(name, _) => self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.form(name).is_some()),
+            _ => false,
+        };
         match msg {
             Msg::Command(command) => self.run_command(command, ui),
             Msg::Shortcut(command) => self.run_shortcut(command, ui),
