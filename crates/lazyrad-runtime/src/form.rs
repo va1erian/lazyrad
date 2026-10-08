@@ -716,9 +716,12 @@ impl FormApp {
     pub fn reload_root(&mut self, ui: &mut Ui<Msg>) -> bool {
         let Some(source) = self.runtime.form(&self.form) else {
             // The project no longer declares this form. A secondary window
-            // closes; the startup window (the one that drives the watch) keeps
-            // its last good build.
+            // closes, and is forgotten like any closed window so later
+            // broadcasts and addressed messages no longer reach it; the startup
+            // window (the one that drives the watch) keeps its last good build.
             if !self.watching {
+                self.runtime.windows.borrow_mut().remove(&self.form);
+                self.runtime.mark_closed(&self.form);
                 ui.close();
             }
             return false;
@@ -1066,7 +1069,6 @@ fn stop_frame_loop(form: &LiveForm<Msg>, control: &str) {
     }
 }
 
-/// The form a message must be handled by, when it belongs to one window.
 /// Installs the window's close handler so it runs `root`'s `form_close`.
 ///
 /// A reload replaces the root, so the handler is installed again with the new
@@ -1747,6 +1749,47 @@ mod tests {
                 vec!["main_form".to_owned(), "other_form".to_owned()],
                 vec!["main_form".to_owned()],
             ]
+        );
+    }
+    #[test]
+    fn a_secondary_form_removed_by_a_reload_is_forgotten() {
+        let runtime = FormRuntime::from_sources(
+            vec![
+                FormSource::new("main_form", FormDoc::new("main_form"), ""),
+                FormSource::new("other_form", FormDoc::new("other_form"), ""),
+            ],
+            Vec::new(),
+        );
+        let backend = Rc::new(OffscreenBackend::new());
+        let capture: Rc<RefCell<Option<(bool, bool)>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&capture);
+        let runtime_in_loop = Rc::clone(&runtime);
+
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            // The other form's window, as a secondary (non-watching) app.
+            let mut other = runtime_in_loop
+                .build_app(ui, "other_form")
+                .expect("other_form builds");
+            runtime_in_loop.mark_open("other_form");
+            // The project drops the form; the reload closes its window.
+            runtime_in_loop
+                .sources
+                .borrow_mut()
+                .forms
+                .remove("other_form");
+            assert!(!other.reload_root(ui), "nothing to rebuild");
+            *slot.borrow_mut() = Some((
+                runtime_in_loop.inboxes.borrow().contains_key("other_form"),
+                runtime_in_loop.is_open("other_form"),
+            ));
+            other
+        })
+        .expect("the event loop runs");
+
+        assert_eq!(
+            *capture.borrow(),
+            Some((false, false)),
+            "the removed form's inbox and open mark are gone"
         );
     }
 }
