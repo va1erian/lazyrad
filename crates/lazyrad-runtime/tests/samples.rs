@@ -96,7 +96,7 @@ fn run_sample(
 
 #[test]
 fn every_sample_project_validates() {
-    for sample in ["hello", "calculator", "todo"] {
+    for sample in ["hello", "calculator", "todo", "brickbreaker"] {
         let dir = sample_dir(sample);
         let project = lazyrad_project::Project::load(&dir).expect("the project loads");
         let diagnostics = project.validate(&dir);

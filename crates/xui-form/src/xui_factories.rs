@@ -39,6 +39,7 @@ impl<M: 'static> Factories<M> {
         factories.register(PanelFactory);
         factories.register(SeparatorFactory);
         factories.register(HyperlinkFactory);
+        factories.register(crate::canvas::CanvasFactory);
         factories
     }
 }

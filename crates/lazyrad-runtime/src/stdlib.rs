@@ -13,6 +13,9 @@
 //! * `now()`, `today()`;
 //! * `random()`, `random_range(start, end)`, `seed_random(seed)`;
 //! * `array.join(separator)`;
+//! * for games on a `Canvas`: `rgb(r, g, b)` (a `0xRRGGBB` colour),
+//!   `clamp(value, low, high)` and
+//!   `rects_overlap(x1, y1, w1, h1, x2, y2, w2, h2)`;
 //! * Rhai's own `print(value)` and `debug(value)`, routed to standard output so
 //!   the IDE's Output pane shows them.
 //!
@@ -86,6 +89,7 @@ pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     let engine = host.engine_mut();
     register_output(engine);
     register_join(engine);
+    register_games(engine);
     register_random(engine);
     register_time(engine);
     register_app(engine);
@@ -182,6 +186,133 @@ fn join(items: &[Dynamic], separator: &str) -> String {
         .map(Dynamic::to_string)
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+// ---------------------------------------------------------------------------
+// Games
+// ---------------------------------------------------------------------------
+
+/// Registers `rgb`, `clamp` and `rects_overlap`, the small helpers a game on a
+/// `Canvas` needs and Rhai lacks.
+///
+/// They take any mix of ints and floats, since game code computes with both.
+fn register_games(engine: &mut Engine) {
+    documented_fn!(
+        engine,
+        "rgb",
+        ["r: int", "g: int", "b: int"],
+        [
+            "/// A colour as a `0xRRGGBB` int from red, green and blue in `0..=255` (each",
+            "/// clamped). A canvas accepts it wherever it takes a colour."
+        ],
+        |r: Dynamic, g: Dynamic, b: Dynamic| -> Result<i64, Box<EvalAltResult>> {
+            Ok(rgb(
+                number("rgb", &r)?,
+                number("rgb", &g)?,
+                number("rgb", &b)?,
+            ))
+        }
+    );
+
+    documented_fn!(
+        engine,
+        "clamp",
+        ["value: int", "low: int", "high: int"],
+        ["/// `value` limited to `low..=high`."],
+        |value: i64, low: i64, high: i64| -> Result<i64, Box<EvalAltResult>> {
+            if low > high {
+                return Err(script_error(format!(
+                    "clamp needs low <= high, got {low} and {high}"
+                )));
+            }
+            Ok(value.clamp(low, high))
+        }
+    );
+    documented_fn!(
+        engine,
+        "clamp",
+        ["value: float", "low: float", "high: float"],
+        ["/// `value` limited to `low..=high`, as a float when any of them is one."],
+        |value: Dynamic, low: Dynamic, high: Dynamic| -> Result<f64, Box<EvalAltResult>> {
+            clamp(
+                number("clamp", &value)?,
+                number("clamp", &low)?,
+                number("clamp", &high)?,
+            )
+        }
+    );
+
+    documented_fn!(
+        engine,
+        "rects_overlap",
+        [
+            "x1: float",
+            "y1: float",
+            "w1: float",
+            "h1: float",
+            "x2: float",
+            "y2: float",
+            "w2: float",
+            "h2: float"
+        ],
+        [
+            "/// Whether two rectangles, each given as x, y, width and height, overlap.",
+            "/// Rectangles that only touch along an edge do not."
+        ],
+        |x1: Dynamic,
+         y1: Dynamic,
+         w1: Dynamic,
+         h1: Dynamic,
+         x2: Dynamic,
+         y2: Dynamic,
+         w2: Dynamic,
+         h2: Dynamic|
+         -> Result<bool, Box<EvalAltResult>> {
+            let n = |value: &Dynamic| number("rects_overlap", value);
+            Ok(rects_overlap(
+                [n(&x1)?, n(&y1)?, n(&w1)?, n(&h1)?],
+                [n(&x2)?, n(&y2)?, n(&w2)?, n(&h2)?],
+            ))
+        }
+    );
+}
+
+/// A script number (an int or a float) as a float, or an error naming
+/// `function`.
+fn number(function: &str, value: &Dynamic) -> Result<f64, Box<EvalAltResult>> {
+    if let Ok(value) = value.as_float() {
+        Ok(value)
+    } else if let Ok(value) = value.as_int() {
+        Ok(value as f64)
+    } else {
+        Err(script_error(format!(
+            "{function} expects numbers, got {}",
+            value.type_name()
+        )))
+    }
+}
+
+/// `0xRRGGBB` from channels clamped to `0..=255` (a NaN channel is 0).
+fn rgb(r: f64, g: f64, b: f64) -> i64 {
+    let channel = |value: f64| value.clamp(0.0, 255.0) as i64;
+    (channel(r) << 16) | (channel(g) << 8) | channel(b)
+}
+
+/// `value` limited to `low..=high`, refusing a reversed or NaN range.
+fn clamp(value: f64, low: f64, high: f64) -> Result<f64, Box<EvalAltResult>> {
+    if low.is_nan() || high.is_nan() || low > high {
+        return Err(script_error(format!(
+            "clamp needs low <= high, got {low} and {high}"
+        )));
+    }
+    Ok(value.max(low).min(high))
+}
+
+/// Whether the rectangles `[x, y, w, h]` overlap with a positive area.
+fn rects_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
+    let [ax, ay, aw, ah] = a;
+    let [bx, by, bw, bh] = b;
+    ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +579,7 @@ mod tests {
         let mut engine = crate::new_engine();
         register_output(&mut engine);
         register_join(&mut engine);
+        register_games(&mut engine);
         register_random(&mut engine);
         register_time(&mut engine);
         register_app(&mut engine);
@@ -578,6 +710,9 @@ mod tests {
             "seed_random",
             "now",
             "today",
+            "rgb",
+            "clamp",
+            "rects_overlap",
         ] {
             assert!(
                 metadata.contains(&format!("\"{name}\"")),
@@ -585,6 +720,49 @@ mod tests {
             );
         }
         assert!(metadata.contains("non-blocking message box"));
+    }
+
+    #[test]
+    fn rgb_packs_and_clamps_the_channels() {
+        let engine = engine_with(&StdlibContext::headless("main_form"));
+        let packed: i64 = engine.eval("rgb(0x12, 0x34, 0x56)").expect("rgb");
+        assert_eq!(packed, 0x12_3456);
+        let clamped: i64 = engine.eval("rgb(300, -5, 127.9)").expect("rgb");
+        assert_eq!(clamped, 0xFF_007F);
+        assert!(engine.eval::<i64>(r#"rgb("a", 0, 0)"#).is_err());
+    }
+
+    #[test]
+    fn clamp_limits_ints_and_floats() {
+        let engine = engine_with(&StdlibContext::headless("main_form"));
+        assert_eq!(engine.eval::<i64>("clamp(15, 0, 10)").expect("int"), 10);
+        assert_eq!(engine.eval::<i64>("clamp(-3, 0, 10)").expect("int"), 0);
+        assert_eq!(
+            engine.eval::<f64>("clamp(2.5, 0, 1)").expect("mixed"),
+            1.0,
+            "a float value with int bounds"
+        );
+        assert_eq!(
+            engine.eval::<f64>("clamp(0.25, 0.0, 1.0)").expect("f"),
+            0.25
+        );
+        assert!(engine.eval::<i64>("clamp(1, 10, 0)").is_err());
+        assert!(engine.eval::<f64>("clamp(1.0, 10.0, 0.0)").is_err());
+    }
+
+    #[test]
+    fn rects_overlap_needs_a_shared_area() {
+        let engine = engine_with(&StdlibContext::headless("main_form"));
+        let overlap = |script: &str| engine.eval::<bool>(script).expect("evaluates");
+        assert!(overlap("rects_overlap(0, 0, 10, 10, 5, 5, 10, 10)"));
+        assert!(overlap(
+            "rects_overlap(0.0, 0.0, 10.0, 10.0, 9.5, 9.5, 1, 1)"
+        ));
+        assert!(
+            !overlap("rects_overlap(0, 0, 10, 10, 10, 0, 5, 5)"),
+            "touching edges do not overlap"
+        );
+        assert!(!overlap("rects_overlap(0, 0, 10, 10, 20, 20, 5, 5)"));
     }
 
     #[test]

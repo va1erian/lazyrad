@@ -121,6 +121,47 @@ print(line);                          // to the Output pane",
          called later with the button pressed. Rhai's own string, math and array \
          functions (len, trim, to_upper, split, abs, min, max, ...) are available too.",
     ),
+    Block::Heading("Games: the Canvas"),
+    Block::Para(
+        "A Canvas is a control you draw on. Set its fps property and canvas1_frame(dt) \
+         runs that many times a second, dt being the seconds since the last frame. Each \
+         frame, clear the canvas and draw the scene again. Positions are in pixels from \
+         the canvas's top-left corner; a colour is \"#rrggbb\" or rgb(r, g, b). Clicking \
+         the canvas gives it the keyboard; is_key_down tells whether a key is held, and \
+         canvas1_key_down(key), canvas1_key_up(key), canvas1_mouse_down(x, y, button), \
+         canvas1_mouse_up and canvas1_mouse_move(x, y) report input as it happens.",
+    ),
+    Block::Code(
+        "fn form_load() {
+    form.state.x = 0.0;
+    canvas1.fps = 60;
+    canvas1.focus();                      // keys go to the canvas
+}
+
+fn canvas1_frame(dt) {
+    if canvas1.is_key_down(\"right\") { form.state.x += 200.0 * dt; }
+    if canvas1.is_key_down(\"left\") { form.state.x -= 200.0 * dt; }
+    form.state.x = clamp(form.state.x, 0.0, canvas1.width - 20);
+
+    canvas1.clear(rgb(20, 20, 40));
+    canvas1.fill_rect(form.state.x, 100, 20, 20, \"#ffcc00\");
+    canvas1.fill_circle(160, 60, 10, 0x40c0ff);
+    canvas1.text(8, 8, `x = ${form.state.x.to_int()}`, \"#ffffff\", 14);
+    if rects_overlap(form.state.x, 100, 20, 20, 150, 50, 20, 20) {
+        print(\"hit\");
+    }
+}
+
+fn canvas1_key_down(key) {
+    if key == \"space\" { print(\"jump\"); }
+}",
+    ),
+    Block::Para(
+        "Other drawing methods: stroke_rect, fill_round_rect, stroke_circle, line and \
+         text_width. Do not give your own functions a canvas method's name and number \
+         of parameters (a fn clear(color) of your own): Rhai would call yours for \
+         canvas1.clear(color) too.",
+    ),
     Block::Heading("Modules"),
     Block::Para(
         "Project > Add Module adds a plain script file. Its functions can be called \
@@ -176,6 +217,9 @@ pub const STDLIB_FUNCTIONS: &[&str] = &[
     "seed_random",
     "join",
     "print",
+    "rgb",
+    "clamp",
+    "rects_overlap",
 ];
 
 /// The `(widget kind, property)` pairs the tutorial documents. A test checks
@@ -203,6 +247,8 @@ pub const CONTROL_PROPERTIES: &[(&str, &str)] = &[
     ("Edit", "anchor"),
     ("Edit", "visible"),
     ("Edit", "tab_index"),
+    ("Canvas", "fps"),
+    ("Canvas", "width"),
 ];
 
 /// The `(widget kind, control name, event)` triples whose handler names the
@@ -213,6 +259,12 @@ pub const CONTROL_EVENTS: &[(&str, &str, &str)] = &[
     ("CheckBox", "check1", "Toggle"),
     ("ListView", "list1", "Select"),
     ("ListView", "list1", "Activate"),
+    ("Canvas", "canvas1", "Frame"),
+    ("Canvas", "canvas1", "KeyDown"),
+    ("Canvas", "canvas1", "KeyUp"),
+    ("Canvas", "canvas1", "MouseDown"),
+    ("Canvas", "canvas1", "MouseUp"),
+    ("Canvas", "canvas1", "MouseMove"),
 ];
 
 /// The tutorial's code samples, in order.
@@ -436,6 +488,7 @@ mod tests {
             ("label1", "Label"),
             ("check1", "CheckBox"),
             ("list1", "ListView"),
+            ("canvas1", "Canvas"),
         ];
         let mut checked = 0;
         for sample in code_samples() {
@@ -447,9 +500,14 @@ mod tests {
                 }
                 checked += 1;
                 if let Some((_, kind)) = kinds.iter().find(|(name, _)| *name == owner.text) {
+                    let is_method = member.after == '(';
                     assert!(
-                        catalog.property(kind, &member.text).is_some(),
-                        "{}.{} is not a {kind} property",
+                        if is_method {
+                            catalog.method(kind, &member.text).is_some()
+                        } else {
+                            catalog.property(kind, &member.text).is_some()
+                        },
+                        "{}.{} is not a {kind} property or method",
                         owner.text,
                         member.text
                     );

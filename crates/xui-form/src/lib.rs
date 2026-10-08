@@ -13,7 +13,9 @@
 //!   [`Diagnostic`];
 //! * a **builder** ([`build`]) that turns a document into live `xui` widgets,
 //!   placed in an `absolute()` layout by their design rectangles and anchors,
-//!   mapping events through a host-supplied [`Binder`].
+//!   mapping events through a host-supplied [`Binder`];
+//! * **methods** ([`MethodSpec`], [`LiveForm::call`]) a script calls on a
+//!   widget, such as the [`canvas`] control's drawing calls.
 //!
 //! # Upstream intent
 //!
@@ -51,6 +53,7 @@
 //! ```
 
 pub mod build;
+pub mod canvas;
 pub mod doc;
 pub mod schema;
 pub mod validate;
@@ -64,10 +67,12 @@ mod xui_factories;
 pub const FORMAT_VERSION: u32 = 1;
 
 pub use build::{
-    Binder, BuildCx, BuildError, BuildOptions, EventHandler, EventRef, Factories, LiveForm,
-    LiveWidget, Made, SetError, WidgetFactory, build, build_with,
+    Binder, BuildCx, BuildError, BuildOptions, CallError, EventHandler, EventRef, Factories,
+    LiveForm, LiveWidget, Made, SetError, WidgetFactory, build, build_with,
 };
 pub use doc::{FormDoc, LoadError, Node, WindowNode};
-pub use schema::{Access, ArgSpec, Catalog, Children, EventSpec, PropertySpec, WidgetSpec};
+pub use schema::{
+    Access, ArgSpec, Catalog, Children, EventSpec, MethodSpec, PropertySpec, WidgetSpec,
+};
 pub use validate::{Diagnostic, Severity};
 pub use value::{DecodeError, Value, ValueType};

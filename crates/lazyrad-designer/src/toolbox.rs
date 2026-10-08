@@ -35,7 +35,7 @@ use xui_core::{Lucide, Theme};
 use crate::local_paint::paint_local;
 
 /// The Iteration 1 control kinds the toolbox offers, by xui kind name.
-pub const CONTROL_KINDS: [&str; 8] = [
+pub const CONTROL_KINDS: [&str; 9] = [
     "Button",
     "Edit",
     "Label",
@@ -44,6 +44,7 @@ pub const CONTROL_KINDS: [&str; 8] = [
     "GroupBox",
     "ListView",
     "ComboBox",
+    "Canvas",
 ];
 
 /// The design width of one tile.
@@ -115,6 +116,7 @@ impl Tool {
                 "GroupBox" => Lucide::Group,
                 "ListView" => Lucide::List,
                 "ComboBox" => Lucide::ChevronsUpDown,
+                "Canvas" => Lucide::Image,
                 _ => Lucide::Square,
             },
         }
@@ -443,7 +445,7 @@ mod tests {
         assert_eq!(tools[0], Tool::Pointer);
         assert_eq!(tools[1].kind(), Some("Button"));
         assert_eq!(tools[1].label(), "Button");
-        assert_eq!(tools.last().and_then(Tool::kind), Some("ComboBox"));
+        assert_eq!(tools.last().and_then(Tool::kind), Some("Canvas"));
     }
 
     #[test]
@@ -463,6 +465,7 @@ mod tests {
             ("GroupBox", Lucide::Group),
             ("ListView", Lucide::List),
             ("ComboBox", Lucide::ChevronsUpDown),
+            ("Canvas", Lucide::Image),
         ];
         for (kind, icon) in expected {
             assert!(

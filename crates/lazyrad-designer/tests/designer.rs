@@ -638,7 +638,8 @@ fn dropping_every_toolbox_kind_creates_it_and_undo_removes_it() {
             "radio_group1",
             "group_box1",
             "list_view1",
-            "combo_box1"
+            "combo_box1",
+            "canvas1"
         ]
     );
     let after_undo = after_undo.borrow();

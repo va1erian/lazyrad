@@ -6,7 +6,8 @@
 //!
 //! * [`Control`] wraps a shared [`FormHost`] handle plus a control name; its
 //!   properties read and write the live widget through `LiveForm::get` /
-//!   `LiveForm::set`. One type covers every control kind, so nothing here is
+//!   `LiveForm::set`, and its methods (`canvas1.fill_rect(...)`) go through
+//!   `LiveForm::call`. One type covers every control kind, so nothing here is
 //!   written per widget type.
 //! * [`Form`] is `form` in scripts: the form's `title`, its `state` object map
 //!   (data that outlives a single event) and the `show`/`hide` methods.
@@ -14,12 +15,13 @@
 //! The property names are exactly the [`Catalog`]'s (PLAN.md §1.1): there are
 //! no aliases.
 
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use rhai::{Dynamic, Engine, EvalAltResult, ImmutableString, Map, Position};
-use xui_form::{Catalog, LiveForm, SetError, Value, ValueType};
+use xui_form::{CallError, Catalog, LiveForm, MethodSpec, SetError, Value, ValueType};
 
 /// The property surface a live form exposes to controls.
 ///
@@ -44,6 +46,34 @@ pub trait FormHost {
     /// The property names the control named `control` accepts, in catalog
     /// order.
     fn property_names(&self, control: &str) -> Vec<String>;
+
+    /// Calls `method` on the control named `control` with `args`, returning
+    /// its result (`None` for a method that returns nothing). The default
+    /// knows no methods, so a host without live widgets need not implement
+    /// it.
+    fn call(
+        &self,
+        control: &str,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, CallError> {
+        let _ = (control, method, args);
+        Err(CallError::UnknownMethod)
+    }
+
+    /// The spec of `method` on the control named `control`, if its kind
+    /// declares that method. The default knows none.
+    fn method_spec(&self, control: &str, method: &str) -> Option<MethodSpec> {
+        let _ = (control, method);
+        None
+    }
+
+    /// The method names the control named `control` has, in catalog order.
+    /// The default knows none.
+    fn method_names(&self, control: &str) -> Vec<String> {
+        let _ = control;
+        Vec::new()
+    }
 }
 
 impl<M: 'static> FormHost for LiveForm<M> {
@@ -72,6 +102,46 @@ impl<M: 'static> FormHost for LiveForm<M> {
             .map(|kind| self.catalog().property_names(kind))
             .unwrap_or_default()
     }
+
+    fn call(
+        &self,
+        control: &str,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, CallError> {
+        LiveForm::call(self, control, method, args)
+    }
+
+    fn method_spec(&self, control: &str, method: &str) -> Option<MethodSpec> {
+        LiveForm::method_spec(self, control, method).cloned()
+    }
+
+    fn method_names(&self, control: &str) -> Vec<String> {
+        LiveForm::kind(self, control)
+            .and_then(|kind| self.catalog().get(kind))
+            .map(|spec| {
+                spec.methods
+                    .iter()
+                    .map(|method| method.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Every method name a control may have, across every kind in `catalog`, with
+/// the largest argument count any kind declares for it.
+pub fn control_methods(catalog: &Catalog) -> BTreeMap<String, usize> {
+    let mut methods: BTreeMap<String, usize> = BTreeMap::new();
+    for kind in catalog.kinds() {
+        if let Some(spec) = catalog.get(kind) {
+            for method in &spec.methods {
+                let arity = methods.entry(method.name.clone()).or_default();
+                *arity = (*arity).max(method.args.len());
+            }
+        }
+    }
+    methods
 }
 
 /// Every property name a control accepts: the common and widget properties from
@@ -143,6 +213,61 @@ impl Control {
         runtime_error(message)
     }
 
+    /// Calls a method, converting each script argument with the method's
+    /// schema ([`crate::value::to_arg_value`]: a float for an int parameter is
+    /// truncated, an int for a float one widened, a colour is a `"#rrggbb"`
+    /// string or a `0xRRGGBB` int) and the result back (`()` for none).
+    fn call(&self, method: &str, args: Vec<Dynamic>) -> Result<Dynamic, Box<EvalAltResult>> {
+        let Some(spec) = self.host.method_spec(&self.name, method) else {
+            return Err(self.unknown_method(method));
+        };
+        if args.len() != spec.args.len() {
+            let names: Vec<&str> = spec.args.iter().map(|arg| arg.name.as_str()).collect();
+            return Err(runtime_error(format!(
+                "{}.{method} takes {} argument{} ({}), got {}",
+                self.name,
+                names.len(),
+                if names.len() == 1 { "" } else { "s" },
+                names.join(", "),
+                args.len()
+            )));
+        }
+        let mut values = Vec::with_capacity(args.len());
+        for (index, (arg, dynamic)) in spec.args.iter().zip(args).enumerate() {
+            let value = crate::value::to_arg_value(dynamic, &arg.ty).map_err(|error| {
+                runtime_error(format!(
+                    "{}.{method}: argument {} (`{}`): {error}",
+                    self.name,
+                    index + 1,
+                    arg.name
+                ))
+            })?;
+            values.push(value);
+        }
+        match self.host.call(&self.name, method, &values) {
+            Ok(Some(value)) => Ok(crate::value::to_dynamic(&value)),
+            Ok(None) => Ok(Dynamic::UNIT),
+            Err(CallError::UnknownMethod) => Err(self.unknown_method(method)),
+            Err(error) => Err(runtime_error(format!("{}.{method}: {error}", self.name))),
+        }
+    }
+
+    /// The error for a method this control's kind does not have, listing the
+    /// ones it does.
+    fn unknown_method(&self, method: &str) -> Box<EvalAltResult> {
+        let kind = self.host.kind(&self.name).unwrap_or_default();
+        let names = self.host.method_names(&self.name);
+        let listed = if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(", ")
+        };
+        runtime_error(format!(
+            "unknown method '{method}' on {} ({kind}); methods: {listed}",
+            self.name
+        ))
+    }
+
     /// Writes a property, decoding the script value against the schema.
     fn set(&self, property: &str, value: Dynamic) -> Result<(), Box<EvalAltResult>> {
         let Some(ty) = self.host.property_type(&self.name, property) else {
@@ -210,8 +335,13 @@ impl Form {
     }
 }
 
-/// Registers the [`Control`] type and a getter/setter for every property name
-/// in `catalog`.
+/// How many arguments past a method's own count are still routed to it, so a
+/// call with too many arguments gets the method's own arity error rather than
+/// Rhai's "function not found".
+const EXTRA_ARITY: usize = 2;
+
+/// Registers the [`Control`] type, a getter/setter for every property name
+/// in `catalog`, and every method any kind declares.
 ///
 /// The property names are enumerated from the catalog and each one becomes a
 /// `get$name`/`set$name` pair that routes through [`FormHost`], so a new widget
@@ -224,6 +354,14 @@ impl Form {
 /// indexer can answer with a message that names the control and suggests the
 /// right property. Rhai reports that error at the property's position. The
 /// indexer also makes `edit1["text"]` work as a dynamic property access.
+///
+/// Each method name is registered on `Control` for every argument count from
+/// none up to a couple past the largest any kind declares, with untyped
+/// (`Dynamic`) arguments. So `label1.fill_rect(...)` reaches the control and
+/// fails with "unknown method 'fill_rect' on label1 (Label)", and
+/// `canvas1.fill_rect(1, 2)` fails with the method's real signature, rather
+/// than with Rhai's generic "function not found"; the method's own schema
+/// then converts each argument.
 pub fn register_control(engine: &mut Engine, catalog: &Catalog) {
     engine.register_type_with_name::<Control>("Control");
     engine.register_indexer_get(|control: &mut Control, property: ImmutableString| {
@@ -244,6 +382,25 @@ pub fn register_control(engine: &mut Engine, catalog: &Catalog) {
             format!("set${setter}"),
             move |control: &mut Control, value: Dynamic| control.set(&setter, value),
         );
+    }
+    for (name, arity) in control_methods(catalog) {
+        for count in 0..=arity + EXTRA_ARITY {
+            let mut types = vec![TypeId::of::<Control>()];
+            types.extend(std::iter::repeat_n(TypeId::of::<Dynamic>(), count));
+            let method = name.clone();
+            engine.register_raw_fn(
+                name.as_str(),
+                types,
+                move |_context, args| -> Result<Dynamic, Box<EvalAltResult>> {
+                    let (receiver, rest) = args
+                        .split_first_mut()
+                        .ok_or_else(|| runtime_error(format!("{method} needs a control")))?;
+                    let control = receiver.clone_cast::<Control>();
+                    let values = rest.iter_mut().map(|arg| std::mem::take(*arg)).collect();
+                    control.call(&method, values)
+                },
+            );
+        }
     }
 }
 

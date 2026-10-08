@@ -7,6 +7,12 @@
 //! ([`to_value`]) is driven by the catalog's [`ValueType`], so a script string
 //! becomes a [`Value::Text`] for a text property and a [`Value::Enum`] for an
 //! `enum` one.
+//!
+//! A colour is written either as a `"#rrggbb"` string or as a `0xRRGGBB`
+//! integer (what the stdlib's `rgb(r, g, b)` returns). A method argument
+//! ([`to_arg_value`]) is also lenient about numbers, because games compute
+//! with floats: a float passed for an int parameter is truncated, and an int
+//! passed for a float parameter is widened.
 
 use rhai::{Array, Dynamic, ImmutableString};
 use xui_core::Color;
@@ -65,9 +71,16 @@ pub fn to_value(dynamic: Dynamic, ty: &ValueType) -> Result<Value, String> {
             .map(|value| Value::Enum(value.to_string()))
             .ok_or_else(|| mismatch("enum name", found)),
         ValueType::Color => {
+            if let Some(rgb) = dynamic.clone().try_cast::<rhai::INT>() {
+                return u32::try_from(rgb)
+                    .ok()
+                    .filter(|rgb| *rgb <= 0xFF_FFFF)
+                    .map(|rgb| Value::Color(Color::hex(rgb)))
+                    .ok_or_else(|| format!("{rgb} is not a 0xRRGGBB colour"));
+            }
             let text = dynamic
                 .try_cast::<ImmutableString>()
-                .ok_or_else(|| mismatch("a `#rrggbb` colour", found))?;
+                .ok_or_else(|| mismatch("a `#rrggbb` string or 0xRRGGBB colour", found))?;
             parse_color(&text)
                 .map(Value::Color)
                 .ok_or_else(|| format!("`{text}` is not a `#rrggbb` colour"))
@@ -90,6 +103,26 @@ pub fn to_value(dynamic: Dynamic, ty: &ValueType) -> Result<Value, String> {
         // decode rather than guessing.
         _ => Err(format!("unsupported property type `{}`", ty.type_name())),
     }
+}
+
+/// Converts a Rhai [`Dynamic`] into a method argument of type `ty`.
+///
+/// This is [`to_value`] plus numeric coercion: a float passed where an int is
+/// expected is truncated towards zero (a non-finite float or one out of the
+/// int range is an error), and an int passed where a float is expected is
+/// widened.
+pub fn to_arg_value(dynamic: Dynamic, ty: &ValueType) -> Result<Value, String> {
+    if let ValueType::Int { .. } = ty
+        && let Some(value) = dynamic.clone().try_cast::<f64>()
+    {
+        // `i64::MIN as f64` is exact; `i64::MAX as f64` rounds up to 2^63,
+        // so the upper bound is exclusive.
+        if !value.is_finite() || value < i64::MIN as f64 || value >= i64::MAX as f64 {
+            return Err(format!("{value} is not a whole number in range"));
+        }
+        return Ok(Value::Int(value.trunc() as i64));
+    }
+    to_value(dynamic, ty)
 }
 
 /// Builds a type-mismatch message.
@@ -205,5 +238,53 @@ mod tests {
 
         let colour = Value::Color(Color::rgb(0x12, 0x34, 0x56));
         assert_eq!(to_value(to_dynamic(&colour), &ValueType::Color), Ok(colour));
+    }
+
+    #[test]
+    fn a_colour_may_be_an_integer_or_a_string() {
+        let expected = Ok(Value::Color(Color::rgb(0x12, 0x34, 0x56)));
+        assert_eq!(
+            to_value(Dynamic::from(0x12_3456_i64), &ValueType::Color),
+            expected
+        );
+        assert_eq!(
+            to_value(Dynamic::from("#123456".to_owned()), &ValueType::Color),
+            expected
+        );
+        assert!(to_value(Dynamic::from(-1_i64), &ValueType::Color).is_err());
+        assert!(to_value(Dynamic::from(0x100_0000_i64), &ValueType::Color).is_err());
+        assert!(to_value(Dynamic::from(true), &ValueType::Color).is_err());
+    }
+
+    #[test]
+    fn method_arguments_coerce_between_int_and_float() {
+        let int = ValueType::Int {
+            min: None,
+            max: None,
+        };
+        let float = ValueType::Float {
+            min: None,
+            max: None,
+        };
+        assert_eq!(
+            to_arg_value(Dynamic::from(2.9_f64), &int),
+            Ok(Value::Int(2))
+        );
+        assert_eq!(
+            to_arg_value(Dynamic::from(-2.9_f64), &int),
+            Ok(Value::Int(-2))
+        );
+        assert!(to_arg_value(Dynamic::from(f64::NAN), &int).is_err());
+        assert!(to_arg_value(Dynamic::from(1e30_f64), &int).is_err());
+        assert_eq!(
+            to_arg_value(Dynamic::from(3_i64), &float),
+            Ok(Value::Float(3.0))
+        );
+        assert_eq!(
+            to_arg_value(Dynamic::from(1.5_f64), &float),
+            Ok(Value::Float(1.5))
+        );
+        // A property write stays strict about ints.
+        assert!(to_value(Dynamic::from(2.5_f64), &int).is_err());
     }
 }
