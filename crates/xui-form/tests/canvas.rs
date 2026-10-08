@@ -647,3 +647,34 @@ fn canvases_on_two_forms_share_nothing() {
         );
     });
 }
+
+#[test]
+fn text_far_off_the_canvas_paints_without_overflowing() {
+    session(96, |backend, ui| {
+        let form = build(
+            ui,
+            &doc_with(vec![canvas_node("canvas1", 0, 0, &[])]),
+            false,
+            true,
+            None,
+        );
+        for (x, y) in [(1e10, 0.0), (0.0, 1e10), (-1e10, -1e10)] {
+            form.call(
+                "canvas1",
+                "text",
+                &[
+                    Value::Float(x),
+                    Value::Float(y),
+                    Value::Text("x".to_owned()),
+                    Value::Color(RED),
+                    Value::Float(1000.0),
+                ],
+            )
+            .expect("a finite coordinate is accepted");
+        }
+        fill(&form, "canvas1", [-1e10, -1e10, 2e10, 2e10], BLUE);
+        // Painting clamps instead of overflowing (a panic in debug builds).
+        pixel(backend, ui.window(), 1, 1);
+        drop(form);
+    });
+}

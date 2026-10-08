@@ -424,9 +424,15 @@ impl Area {
     }
 }
 
-/// A logical coordinate in device pixels (the cast saturates).
+/// How far from the canvas a device-pixel coordinate may lie. Scripts may
+/// pass any finite number; clamping keeps every sum and difference the
+/// painter and the toolkit compute (a rectangle's width, a text box's bottom)
+/// far from `i32` overflow, while staying well beyond any screen.
+const PX_LIMIT: i32 = 1 << 24;
+
+/// A logical coordinate in device pixels, clamped to `±PX_LIMIT`.
 fn px(value: f32, scale: f32) -> i32 {
-    (value * scale).round() as i32
+    ((value * scale).round() as i32).clamp(-PX_LIMIT, PX_LIMIT)
 }
 
 /// Replays `commands` over `background` on `surface`, clipped to it.
@@ -470,8 +476,8 @@ fn paint_scene(surface: &mut dyn Surface, background: Color, commands: &[DrawCmd
                 let rect = Rect::new(
                     left,
                     top,
-                    bounds.right.max(left + 1),
-                    top + px(size * 2.0, scale).max(1),
+                    bounds.right.max(left.saturating_add(1)),
+                    top.saturating_add(px(size * 2.0, scale).max(1)),
                 );
                 surface.draw_text(text, rect, &TextStyle::new(*color, Dip(*size)));
             }
