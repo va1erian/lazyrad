@@ -89,6 +89,7 @@ pub fn runtime_from_payload(
         .map(Report::from_diagnostic)
         .collect();
     reports.extend(check.scripts.iter().map(Report::from_compile_script));
+    reports.extend(check.lints.iter().map(Report::from_lint));
     Err(reports)
 }
 

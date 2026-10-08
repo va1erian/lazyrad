@@ -450,6 +450,9 @@ pub struct RunDiagnostic {
     pub col: usize,
     /// The human-readable description.
     pub message: String,
+    /// Whether this is a lint warning rather than an error: a warning is shown
+    /// but does not stop the project from running.
+    pub warning: bool,
 }
 
 /// Compile-checks the project on disk.
@@ -467,6 +470,7 @@ pub fn check(project_dir: &Path) -> Result<Vec<RunDiagnostic>, String> {
             line: diagnostic.line.unwrap_or(0),
             col: 0,
             message: diagnostic.message.clone(),
+            warning: false,
         })
         .collect();
     problems.extend(report.scripts.iter().map(|error| RunDiagnostic {
@@ -474,6 +478,14 @@ pub fn check(project_dir: &Path) -> Result<Vec<RunDiagnostic>, String> {
         line: error.line,
         col: error.column,
         message: error.message.clone(),
+        warning: false,
+    }));
+    problems.extend(report.lints.iter().map(|lint| RunDiagnostic {
+        file: lint.file.clone(),
+        line: lint.line,
+        col: lint.column,
+        message: lint.message.clone(),
+        warning: true,
     }));
     Ok(problems)
 }
