@@ -1222,6 +1222,7 @@ impl IdeApp {
             // A clean check clears diagnostics an earlier compile left behind.
             self.errors.clear();
             self.refresh_error_list();
+            self.refresh_markers();
             return true;
         }
         let errors = problems.iter().filter(|problem| !problem.warning).count();
@@ -1235,6 +1236,7 @@ impl IdeApp {
             .collect();
         self.errors = entries;
         self.refresh_error_list();
+        self.refresh_markers();
         for problem in &problems {
             self.log(
                 ui,
@@ -1316,6 +1318,7 @@ impl IdeApp {
             warning: report.kind == lazyrad_player::Kind::Warning,
         });
         self.refresh_error_list();
+        self.refresh_markers();
         if report.file.is_empty() {
             self.log(ui, report.message.clone());
         } else {
@@ -2540,6 +2543,22 @@ impl IdeApp {
         } else {
             for error in &errors {
                 self.log(ui, format!("{name}{}", error.label()));
+            }
+        }
+    }
+
+    /// Re-applies the Error List's entries as squiggles in every open code
+    /// editor, so a warning or error added after the editor opened shows.
+    fn refresh_markers(&self) {
+        for document in &self.documents {
+            if let DocumentView::Code(view) = &document.view {
+                let markers = self
+                    .errors
+                    .iter()
+                    .filter(|entry| entry.name == document.name)
+                    .map(ErrorEntry::marker)
+                    .collect();
+                view.editor.set_markers(markers);
             }
         }
     }
