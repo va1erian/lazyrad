@@ -47,6 +47,7 @@ mod frame;
 
 use crate::command::{Command, Dispatcher};
 use crate::compile::{self, CodeDiagnostic, CompileScheduler};
+use crate::completion::{self, LibraryFn, ScriptCompleter, ScriptContext};
 use crate::dialog::ChoiceDialog;
 use crate::edit_state::EditAvailability;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
@@ -417,6 +418,9 @@ struct CodeView {
     objects: Vec<ObjectEntry>,
     /// The index of the selected object, or `None` for a module.
     object_index: Option<usize>,
+    /// What the editor's completion sees besides the text: the form's
+    /// controls and the project's modules, refreshed after every message.
+    completion: Rc<RefCell<ScriptContext>>,
 }
 
 impl CodeView {
@@ -528,6 +532,8 @@ pub struct IdeApp {
     properties_panel: Rc<Panel<Msg>>,
     /// The control catalog shared by every designer and the property grid.
     catalog: Rc<Catalog>,
+    /// The standard library's functions, offered by code completion.
+    library: Vec<LibraryFn>,
     /// The property grid, bound to the active designer, and the layout that
     /// places it in the Properties pane. Both are rebuilt when the active form
     /// tab changes, so a closed tab's grid cannot keep editing.
@@ -670,6 +676,7 @@ impl IdeApp {
             project_panel: frame.project_panel,
             properties_panel: frame.properties_panel,
             catalog: Rc::new(lazyrad_project::lazyrad_catalog()),
+            library: Vec::new(),
             properties_grid: None,
             grid_layout: None,
             grid_form: None,
@@ -806,6 +813,32 @@ impl IdeApp {
     /// The code editors' options: the configured monospace family and size.
     /// The editor is a monospace grid, so without a monospace family it would
     /// fall back to the proportional UI font and space its tokens apart.
+    /// What completion offers in the code window of project item `name`,
+    /// reading the stdlib's functions on first use.
+    fn completion_context(&mut self, name: &str) -> ScriptContext {
+        if self.library.is_empty() {
+            self.library = completion::stdlib_functions(&self.catalog);
+        }
+        match &self.session {
+            Some(session) => completion::context_for(session, name, &self.library),
+            None => ScriptContext::default(),
+        }
+    }
+
+    /// Brings every code window's completion context up to date with the
+    /// project: controls drawn, renamed or deleted, modules added or edited.
+    fn refresh_completion(&self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        for document in &self.documents {
+            if let DocumentView::Code(view) = &document.view {
+                *view.completion.borrow_mut() =
+                    completion::context_for(session, &document.name, &self.library);
+            }
+        }
+    }
+
     fn editor_options(&self) -> EditorOptions {
         EditorOptions {
             font: FontConfig {
@@ -3047,9 +3080,13 @@ impl IdeApp {
                 let options = self.editor_options();
                 let document = name.to_owned();
                 let editor = Handle::new();
+                let completion = Rc::new(RefCell::new(self.completion_context(name)));
+                let completer =
+                    ScriptCompleter::new(Rc::clone(&self.catalog), Rc::clone(&completion));
                 let editor_build = build(move |ui| {
                     Ok(Editor::with_options(ui, Rect::default(), options)?
                         .with_highlighter(RhaiHighlighter)
+                        .with_completer(completer)
                         .on_change(move |text| {
                             Some(Msg::DocumentEdited(document.clone(), text.to_string()))
                         }))
@@ -3087,6 +3124,7 @@ impl IdeApp {
                     editor,
                     objects,
                     object_index: is_form.then_some(0),
+                    completion,
                 };
                 Ok((DocumentView::Code(Box::new(view)), title))
             }
@@ -3175,6 +3213,8 @@ impl App for IdeApp {
     type Msg = Msg;
 
     fn update(&mut self, msg: Msg, ui: &mut Ui<Msg>) {
+        // The edit-availability timer changes nothing completion reads.
+        let idle = matches!(msg, Msg::RefreshEdit);
         match msg {
             Msg::Command(command) => self.run_command(command, ui),
             Msg::Shortcut(command) => self.run_shortcut(command, ui),
@@ -3252,6 +3292,9 @@ impl App for IdeApp {
             Msg::FileCancelled => self.file_request = None,
             Msg::AppConsent(install) => self.resolve_consent(install, ui),
             Msg::AppRun(run) => self.resolve_run_offer(run, ui),
+        }
+        if !idle {
+            self.refresh_completion();
         }
     }
 }

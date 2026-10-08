@@ -335,3 +335,51 @@ fn a_text_box_keeps_the_edit_chords_and_the_window_keeps_the_file_chords() {
     })
     .expect("runs");
 }
+
+// ---- Code completion sees the project ----
+
+#[test]
+fn completion_offers_a_control_drawn_after_the_code_window_opened() {
+    in_app(|app, ui| {
+        let form = DEFAULT_FORM.to_owned();
+        app.open_document(&form, DocKind::Code).expect("code opens");
+        let editor = app.code_editor(&form).expect("the editor");
+        editor.set_text("fn f() {\n    button1.tex");
+        editor.set_caret(editor.text().chars().count());
+        assert!(
+            !editor.trigger_completion(),
+            "no button yet, so nothing to complete"
+        );
+
+        // Draw a button on the form; the message refreshes the context.
+        app.open_document(&form, DocKind::Designer)
+            .expect("designer");
+        app.update(
+            Msg::Toolbox(ToolboxMsg::Select(Tool::control("Button"))),
+            ui,
+        );
+        for msg in [
+            DesignerMsg::PointerDown {
+                x: 16,
+                y: 16,
+                ctrl: false,
+            },
+            DesignerMsg::PointerUp {
+                x: 116,
+                y: 40,
+                ctrl: false,
+            },
+        ] {
+            app.update(
+                Msg::Designer {
+                    document: form.clone(),
+                    msg,
+                },
+                ui,
+            );
+        }
+        assert!(editor.trigger_completion(), "button1.text is offered");
+        editor.close_completion();
+        assert!(!editor.is_completing());
+    });
+}

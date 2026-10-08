@@ -20,9 +20,16 @@
 //! Everything here is pure text and data, unit-tested without a `Ui`; the IDE
 //! keeps a [`ScriptContext`] up to date for each open code window.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use lazyrad_project::Catalog;
+use lazyrad_runtime::{EngineHost, FormHost, StdlibContext};
+use xui_code_editor::{CompletionItem, CompletionKind};
+use xui_form::{SetError, Value, ValueType};
+
+use crate::project::ProjectSession;
 
 /// What kind of thing a candidate is; the editor shows it as a small marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -676,9 +683,167 @@ pub fn library_functions(metadata_json: &str) -> Vec<LibraryFn> {
     out
 }
 
+/// The code editor's completer for one code window: [`complete`] over the
+/// shared catalog and the window's [`ScriptContext`], which the IDE keeps
+/// current (see [`context_for`]).
+pub struct ScriptCompleter {
+    catalog: Rc<Catalog>,
+    context: Rc<RefCell<ScriptContext>>,
+}
+
+impl ScriptCompleter {
+    /// A completer reading `context`, which the caller keeps up to date.
+    pub fn new(catalog: Rc<Catalog>, context: Rc<RefCell<ScriptContext>>) -> ScriptCompleter {
+        ScriptCompleter { catalog, context }
+    }
+}
+
+impl xui_code_editor::Completer for ScriptCompleter {
+    fn complete(&self, text: &str, caret: usize) -> Option<xui_code_editor::Completion> {
+        // The IDE only replaces the context between events, never while the
+        // editor is asking, so this borrow cannot collide.
+        let context = self.context.borrow();
+        let found = complete(&self.catalog, &context, text, caret)?;
+        Some(xui_code_editor::Completion {
+            start: found.start,
+            items: found.items.into_iter().map(editor_item).collect(),
+        })
+    }
+}
+
+/// An [`Item`] as the editor's popup shows it.
+fn editor_item(item: Item) -> CompletionItem {
+    let kind = match item.kind {
+        ItemKind::Object | ItemKind::Variable => CompletionKind::Variable,
+        ItemKind::Property => CompletionKind::Property,
+        ItemKind::Method => CompletionKind::Method,
+        ItemKind::Function => CompletionKind::Function,
+        ItemKind::Module => CompletionKind::Module,
+        ItemKind::Keyword => CompletionKind::Keyword,
+    };
+    let completion = CompletionItem::new(item.label, kind);
+    match item.detail {
+        Some(detail) => completion.with_detail(detail),
+        None => completion,
+    }
+}
+
+/// What the script of the project item `name` can see: the form's controls
+/// (for a form), the project's modules with their functions, and `library`.
+pub fn context_for(session: &ProjectSession, name: &str, library: &[LibraryFn]) -> ScriptContext {
+    let form = session.form(name);
+    let controls = form
+        .map(|form| {
+            form.nodes
+                .iter()
+                .map(|node| (node.name.clone(), node.kind.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let modules = session
+        .module_names()
+        .into_iter()
+        .filter(|module| *module != name)
+        .map(|module| {
+            let code = session.code(module).unwrap_or_default();
+            let functions = exported_functions(code);
+            (module.to_owned(), functions)
+        })
+        .collect();
+    ScriptContext {
+        controls,
+        modules,
+        library: library.to_vec(),
+        is_form: form.is_some(),
+    }
+}
+
+/// The functions a module exports: every `fn` not marked `private`.
+fn exported_functions(code: &str) -> Vec<String> {
+    let words = code_words(code);
+    script_functions(code)
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            !words
+                .windows(3)
+                .any(|w| w[0] == "private" && w[1] == "fn" && w[2] == *name)
+        })
+        .collect()
+}
+
+/// The LazyRAD standard library's functions, read once from a headless
+/// engine's metadata (only what LazyRAD registers, not Rhai's built-ins).
+pub fn stdlib_functions(catalog: &Catalog) -> Vec<LibraryFn> {
+    let host = EngineHost::new(
+        Rc::new(NoForm),
+        catalog,
+        "completion.rhai",
+        StdlibContext::headless("main_form"),
+    );
+    host.engine()
+        .gen_fn_metadata_to_json(false)
+        .map(|json| library_functions(&json))
+        .unwrap_or_default()
+}
+
+/// A form with no controls: enough to build an engine and read its stdlib.
+struct NoForm;
+
+impl FormHost for NoForm {
+    fn get(&self, _control: &str, _property: &str) -> Option<Value> {
+        None
+    }
+    fn set(&self, _control: &str, _property: &str, _value: &Value) -> Result<(), SetError> {
+        Err(SetError::UnknownWidget)
+    }
+    fn property_type(&self, _control: &str, _property: &str) -> Option<ValueType> {
+        None
+    }
+    fn names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn kind(&self, _control: &str) -> Option<String> {
+        None
+    }
+    fn property_names(&self, _control: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stdlib_is_offered_from_the_real_engine() {
+        let library = stdlib_functions(&catalog());
+        let names: Vec<&str> = library.iter().map(|f| f.name.as_str()).collect();
+        for name in ["msg_box", "now", "random"] {
+            assert!(names.contains(&name), "{name} in {names:?}");
+        }
+        assert!(!names.contains(&"len"), "Rhai built-ins are left out");
+    }
+
+    #[test]
+    fn private_module_functions_are_not_exported() {
+        let code = "fn greet() {}\nprivate fn helper() {}\n// fn hidden() {}";
+        assert_eq!(exported_functions(code), vec!["greet".to_owned()]);
+    }
+
+    #[test]
+    fn the_editor_adapter_maps_kinds_and_details() {
+        use xui_code_editor::Completer;
+        let completer =
+            ScriptCompleter::new(Rc::new(catalog()), Rc::new(RefCell::new(form_context())));
+        let found = completer.complete("ms", 2).expect("a completion");
+        assert_eq!(found.start, 0);
+        let first = &found.items[0];
+        assert_eq!(first.label, "msg_box");
+        assert_eq!(first.insert, "msg_box");
+        assert_eq!(first.kind, CompletionKind::Function);
+        assert_eq!(first.detail.as_deref(), Some("msg_box(text)"));
+    }
 
     fn catalog() -> Catalog {
         lazyrad_project::lazyrad_catalog()
