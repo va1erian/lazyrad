@@ -195,6 +195,33 @@ fn the_sample_project_validates_cleanly() {
 }
 
 #[test]
+fn an_assets_list_round_trips_and_unsafe_patterns_are_refused() {
+    let temp = TempDir::new("assets");
+    let mut project = Project::new("Assets");
+    project.items.push(ProjectItem::Module {
+        name: "m".to_owned(),
+        code: PathBuf::from("m.rhai"),
+    });
+    project.assets = vec!["songs/*.mod".to_owned(), "icons/logo.png".to_owned()];
+    project.save(temp.path()).expect("the project saves");
+
+    let loaded = Project::load(temp.path()).expect("the project loads");
+    assert_eq!(loaded.assets, project.assets, "the asset list round-trips");
+    assert!(loaded.unsafe_asset_glob().is_none());
+
+    // A pattern that could leave the project is refused at parse time.
+    let lrp = temp.path().join("Assets.lrp");
+    let text = fs::read_to_string(&lrp)
+        .expect("reads")
+        .replace("songs/*.mod", "../escape");
+    fs::write(&lrp, text).expect("writes");
+    assert!(
+        Project::load(temp.path()).is_err(),
+        "an escaping asset pattern is refused"
+    );
+}
+
+#[test]
 fn missing_startup_and_files_are_located_in_the_project_file() {
     let temp = TempDir::new("missing");
     let project = Project {
@@ -207,6 +234,7 @@ fn missing_startup_and_files_are_located_in_the_project_file() {
             code: PathBuf::from("broken_form.rhai"),
         }],
         icon: None,
+        assets: Vec::new(),
     };
     project.save(temp.path()).expect("project saves");
 
@@ -246,6 +274,7 @@ fn form_problems_are_located_in_the_form_file() {
             code: PathBuf::from("broken_form.rhai"),
         }],
         icon: None,
+        assets: Vec::new(),
     };
     project.save(temp.path()).expect("project saves");
     fs::write(temp.path().join("broken_form.rhai"), "// code\n").expect("code is written");

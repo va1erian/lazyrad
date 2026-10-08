@@ -30,7 +30,7 @@ desktop = [
 ]
 # OS file and message dialogs (`rfd`). Without it the host platform answers
 # every dialog as a cancel (see `platform::dialogs`).
-native-dialogs = ["dep:rfd"]
+native-dialogs = ["dep:rfd", "dep:pollster"]
 
 [dependencies]
 directories = { workspace = true, optional = true }
@@ -39,6 +39,7 @@ lazyrad-packager.workspace = true
 lazyrad-player.workspace = true
 lazyrad-project.workspace = true
 lazyrad-runtime = { workspace = true, features = ["metadata"] }
+pollster = { workspace = true, optional = true }
 rfd = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

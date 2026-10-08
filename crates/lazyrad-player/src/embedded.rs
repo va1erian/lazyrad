@@ -17,15 +17,55 @@
 //! exported app has no console and nowhere to print. [`show_failure`] therefore
 //! reports a startup failure in a native message box, as well as on stderr.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use lazyrad_packager::payload::ASSET_PREFIX;
 use lazyrad_packager::{Payload, PayloadError};
 use lazyrad_project::Project;
-use lazyrad_runtime::{FormRuntime, RuntimeError, check_runtime};
+use lazyrad_runtime::{FormRuntime, ProjectFiles, RuntimeError, check_runtime};
 
 use crate::Report;
+
+/// The project's files as the executable's payload holds them: an item's plain
+/// name, or an asset under the payload's `assets/` prefix.
+///
+/// It serves what [`lazyrad_runtime::DiskProject`] serves from a folder, so a
+/// script reads the same files either way: the files the project's items
+/// reference (by their exact names) and the assets (`assets/{relative}`). It
+/// never serves the `.lrp` or any other payload entry, and the payload's own
+/// `assets/` prefix is not visible to a script: asking for `assets/x` looks for
+/// the project asset `assets/x`, not the raw entry for `x`.
+struct PayloadFiles {
+    payload: Payload,
+    /// The item files the project references, by their project-relative names.
+    referenced: BTreeSet<String>,
+}
+
+impl PayloadFiles {
+    fn new(payload: Payload, project: &Project) -> PayloadFiles {
+        PayloadFiles {
+            payload,
+            referenced: project
+                .referenced_files()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .collect(),
+        }
+    }
+}
+
+impl ProjectFiles for PayloadFiles {
+    fn read(&self, relative: &str) -> Option<Vec<u8>> {
+        let entry = if self.referenced.contains(relative) {
+            relative.to_owned()
+        } else {
+            format!("{ASSET_PREFIX}{relative}")
+        };
+        self.payload.get(&entry).map(<[u8]>::to_vec)
+    }
+}
 
 /// The runtime for the project appended to `exe`, or `None` when `exe` carries
 /// no payload (an ordinary player).
@@ -66,18 +106,9 @@ pub fn runtime_from_payload(
     let project = Project::parse(Path::new(&project_entry.name), text)
         .map_err(|error| vec![Report::from_load_error(&RuntimeError::from(error))])?;
 
-    let runtime = FormRuntime::from_project(project, dir, |relative| {
-        let name = relative.to_string_lossy();
-        let data = payload.get(&name).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "the file is not in the executable's project data",
-            )
-        })?;
-        String::from_utf8(data.to_vec())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    })
-    .map_err(|error| vec![Report::from_load_error(&error)])?;
+    let files: Rc<dyn ProjectFiles> = Rc::new(PayloadFiles::new(payload.clone(), &project));
+    let runtime = FormRuntime::from_project(project, dir, files)
+        .map_err(|error| vec![Report::from_load_error(&error)])?;
 
     let check = check_runtime(&runtime);
     if check.is_empty() {
@@ -119,4 +150,69 @@ pub fn show_failure(reports: &[Report]) {
         text.push_str(&format!("... and {} more\n", reports.len() - 8));
     }
     crate::platform::show_error("This program cannot start", &text);
+}
+
+#[cfg(test)]
+mod tests {
+    use lazyrad_packager::Entry;
+    use lazyrad_project::ProjectItem;
+
+    use super::*;
+
+    fn entry(name: &str, data: &[u8]) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            data: data.to_vec(),
+        }
+    }
+
+    /// A payload for a one-module project that also ships `songs/song.mod`
+    /// and `readme.txt` as assets.
+    fn files() -> PayloadFiles {
+        let mut project = Project::new("app");
+        project.items.push(ProjectItem::Module {
+            name: "m".to_owned(),
+            code: "m.rhai".into(),
+        });
+        let payload = Payload::new(vec![
+            entry("app.lrp", b"project"),
+            entry("m.rhai", b"code"),
+            entry("assets/songs/song.mod", b"MOD"),
+            entry("assets/readme.txt", b"README"),
+            entry("assets/m.rhai", b"asset copy"),
+        ])
+        .expect("a valid payload");
+        PayloadFiles::new(payload, &project)
+    }
+
+    #[test]
+    fn item_files_and_assets_are_served_by_their_project_paths() {
+        let files = files();
+        assert_eq!(files.read("m.rhai"), Some(b"code".to_vec()));
+        assert_eq!(files.read("songs/song.mod"), Some(b"MOD".to_vec()));
+        assert_eq!(files.read("readme.txt"), Some(b"README".to_vec()));
+    }
+
+    #[test]
+    fn the_project_file_and_raw_entries_are_not_served() {
+        let files = files();
+        assert_eq!(
+            files.read("app.lrp"),
+            None,
+            "the .lrp is not a project file"
+        );
+        // `assets/` is the payload's prefix, not part of a project path: the
+        // raw entry for `readme.txt` is not reachable as `assets/readme.txt`.
+        assert_eq!(files.read("assets/readme.txt"), None);
+        assert_eq!(files.read("assets/songs/song.mod"), None);
+        assert_eq!(files.read("missing.txt"), None);
+        assert_eq!(files.read(""), None);
+    }
+
+    #[test]
+    fn an_item_name_is_read_as_the_item_not_as_an_asset_of_the_same_name() {
+        // `m.rhai` is both an item and (in this hand-made payload) an asset
+        // entry; the item wins, as it does from a folder.
+        assert_eq!(files().read("m.rhai"), Some(b"code".to_vec()));
+    }
 }

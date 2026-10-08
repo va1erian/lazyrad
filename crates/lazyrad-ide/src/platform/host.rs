@@ -11,9 +11,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-#[cfg(feature = "native-dialogs")]
-use lazyrad_runtime::platform::Filter;
 use lazyrad_runtime::platform::{self, Dialogs, Platform};
+#[cfg(feature = "native-dialogs")]
+use lazyrad_runtime::platform::{FileDone, FileFilter, Filter, dialog_filters};
 
 use super::process;
 
@@ -84,6 +84,30 @@ impl Dialogs for NativeDialogs {
             dialog = dialog.add_filter(name, extensions);
         }
         dialog.pick_file()
+    }
+
+    fn open_file_filtered(&self, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new().set_title(title);
+        for (name, extensions) in dialog_filters(filters) {
+            dialog = dialog.add_filter(name, &extensions);
+        }
+        dialog.pick_file()
+    }
+
+    /// Shows the dialog on a worker thread so the window keeps running.
+    ///
+    /// `rfd::AsyncFileDialog` is safe to start off the UI thread on every
+    /// platform (macOS hops to the main thread itself); `pollster` runs its
+    /// future to completion on the worker.
+    fn open_file_async(&self, title: &str, filters: &[FileFilter], done: FileDone) {
+        let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
+        for (name, extensions) in dialog_filters(filters) {
+            dialog = dialog.add_filter(name, &extensions);
+        }
+        platform::pick_on_worker(
+            move || pollster::block_on(dialog.pick_file()).map(|file| file.path().to_path_buf()),
+            done,
+        );
     }
 
     fn choose_folder(&self, title: &str) -> Option<PathBuf> {

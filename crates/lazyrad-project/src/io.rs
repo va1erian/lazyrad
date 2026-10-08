@@ -184,6 +184,13 @@ impl Project {
                 ),
             )));
         }
+        if let Some(bad) = project.unsafe_asset_glob() {
+            return Err(Error::Diagnostic(Diagnostic::new(
+                DiagnosticKind::ProjectFile,
+                path,
+                format!("asset pattern `{bad}` must be a relative path inside the project folder"),
+            )));
+        }
         Ok(project)
     }
 

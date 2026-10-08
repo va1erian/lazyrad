@@ -434,6 +434,42 @@ fn form_state_keeps_a_counter_between_two_clicks() {
 }
 
 #[test]
+fn a_script_reads_a_project_asset_from_a_folder() {
+    let dir = std::env::temp_dir().join(format!("lazyrad-runtime-asset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("songs")).expect("scratch directory is created");
+    std::fs::write(
+        dir.join("app.lrp"),
+        "name = \"app\"\nversion = \"1\"\nstartup = \"main_form\"\nassets = [\"songs/*.mod\"]\n\n\
+         [[items]]\nkind = \"form\"\nname = \"main_form\"\n\
+         layout = \"main_form.lfm\"\ncode = \"main_form.rhai\"\n",
+    )
+    .expect("project writes");
+    std::fs::write(
+        dir.join("main_form.lfm"),
+        "format = 1\n\n[window]\nname = \"main_form\"\ntitle = \"A\"\n\n\
+         [[node]]\nkind = \"Label\"\nname = \"result_label\"\n\
+         left = 10\ntop = 10\nwidth = 200\n",
+    )
+    .expect("form writes");
+    std::fs::write(
+        dir.join("main_form.rhai"),
+        "fn form_load() { result_label.text = file_read_text(\"songs/song.mod\"); }",
+    )
+    .expect("code writes");
+    std::fs::write(dir.join("songs/song.mod"), b"MODDATA").expect("asset writes");
+
+    let runtime = FormRuntime::load(&dir).expect("the project loads");
+    let form = capture_form(runtime, "main_form");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("MODDATA".to_owned())),
+        "a project-relative asset is readable from a folder"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_handler_observer_hears_each_successful_handler_once() {
     let runtime = FormRuntime::load(sample_dir()).expect("the sample project loads");
     let heard: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));

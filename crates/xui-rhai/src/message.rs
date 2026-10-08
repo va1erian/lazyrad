@@ -71,6 +71,29 @@ pub enum Msg {
     /// window for its form (a host's event sources, such as Messenger events
     /// on LazyOS).
     Poll,
+    /// A `Timer` control's window timer fired; run the control's `Tick`
+    /// handler.
+    Tick {
+        /// The `Timer` control that fired.
+        control: String,
+        /// The window timer that fired (`TimerId.0`). A tick still queued when
+        /// its timer was stopped or restarted names a timer the control no
+        /// longer runs, and is dropped.
+        timer: usize,
+    },
+    /// `open_file_dialog(...)`: ask the platform for a file to open. The
+    /// application shows the dialog and calls `callback` with the picked path
+    /// (or `()` when cancelled).
+    OpenFileDialog {
+        /// The form whose script asked for the dialog.
+        form: String,
+        /// The dialog's title.
+        title: String,
+        /// The filter groups, as `"name|pattern;name|pattern"`.
+        filter: String,
+        /// The Rhai function pointer to call with the picked path or `()`.
+        callback: FnPtr,
+    },
     /// The hot-reload watcher's timer fired: check the project's files for
     /// changes (issue #91). Delivered on its own timer, so it never collides
     /// with the event-source [`Msg::Poll`].

@@ -9,6 +9,9 @@
 //! snake_case:
 //!
 //! * `msg_box(text [, title [, buttons, callback]])`: an in-window message box;
+//! * `open_file_dialog(title, filter, callback)`: the platform's open-file
+//!   dialog, asynchronous like `msg_box`;
+//! * `file_read_bytes(path)`, `file_write_bytes(path, blob)` (in [`fs`]);
 //! * `app.title`, `app.path`, `app.quit()`;
 //! * `now()`, `today()`;
 //! * `random()`, `random_range(start, end)`, `seed_random(seed)`;
@@ -41,6 +44,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Position};
 use time::OffsetDateTime;
 
+use crate::files::{NoProjectFiles, ProjectFiles};
 use crate::fs_policy::FsPolicy;
 use xui_rhai::EngineHost;
 use xui_rhai::message::{Msg, MsgBoxButtons, Pending};
@@ -61,6 +65,8 @@ pub struct StdlibContext {
     pub app_path: String,
     /// Which paths the `file_*` and `dir_*` functions may touch.
     pub fs: Rc<FsPolicy>,
+    /// The project's own files, read before the filesystem.
+    pub files: Rc<dyn ProjectFiles>,
 }
 
 impl StdlibContext {
@@ -73,6 +79,7 @@ impl StdlibContext {
             app_title: "LazyRAD".to_owned(),
             app_path: String::new(),
             fs: Rc::new(FsPolicy::Unrestricted),
+            files: Rc::new(NoProjectFiles),
         }
     }
 }
@@ -94,7 +101,8 @@ pub fn register(host: &mut EngineHost, context: &StdlibContext) {
     register_time(engine);
     register_app(engine);
     register_msg_box(engine, context);
-    fs::register(engine, &context.fs);
+    register_open_file_dialog(engine, context);
+    fs::register(engine, &context.fs, &context.files);
     crate::extensions::apply(
         engine,
         &crate::extensions::ExtensionScope {
@@ -552,6 +560,39 @@ fn register_msg_box(engine: &mut Engine, context: &StdlibContext) {
     );
 }
 
+/// Registers `open_file_dialog(title, filter, callback)`.
+///
+/// Like `msg_box`, it is asynchronous: it records a [`Msg::OpenFileDialog`] and
+/// returns, and the application shows the platform's dialog and calls the
+/// callback afterwards. The callback receives the picked path as a string, or
+/// `()` when the user cancels; a picked path is granted read access to the
+/// script's sandbox, limited to that file.
+fn register_open_file_dialog(engine: &mut Engine, context: &StdlibContext) {
+    let pending = Rc::clone(&context.pending);
+    let form = context.form.clone();
+    documented_fn!(
+        engine,
+        "open_file_dialog",
+        ["title: &str", "filter: &str", "callback: Fn"],
+        [
+            "/// Asks the platform for a file to open, without blocking.",
+            "///",
+            "/// `filter` is `\"name|pattern;name|pattern\"`: groups separated by `;`,",
+            "/// each a display name and its `,`-separated patterns after a `|`.",
+            "/// The callback runs with the picked path, or `()` when the user",
+            "/// cancels. A picked file is granted read access to the sandbox."
+        ],
+        move |title: ImmutableString, filter: ImmutableString, callback: FnPtr| {
+            pending.borrow_mut().push(Msg::OpenFileDialog {
+                form: form.clone(),
+                title: title.to_string(),
+                filter: filter.to_string(),
+                callback,
+            });
+        }
+    );
+}
+
 /// Records a message box for the application to show after the handler returns.
 fn queue_msg_box(
     pending: &Pending,
@@ -584,6 +625,7 @@ mod tests {
         register_time(&mut engine);
         register_app(&mut engine);
         register_msg_box(&mut engine, context);
+        register_open_file_dialog(&mut engine, context);
         engine
     }
 
@@ -704,6 +746,7 @@ mod tests {
             .expect("metadata serialises");
         for name in [
             "msg_box",
+            "open_file_dialog",
             "join",
             "random",
             "random_range",

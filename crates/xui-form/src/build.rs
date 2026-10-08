@@ -338,13 +338,20 @@ impl<'a, M: 'static> BuildCx<'a, M> {
         handle: &Handle<W>,
         inner: P,
     ) -> Made<M> {
+        // A widget may give `enabled` its own default (a `Timer` starts
+        // disabled); every other kind keeps the common default of true.
+        let enabled = self
+            .spec
+            .property("enabled")
+            .and_then(|property| property.default.as_bool())
+            .unwrap_or(true);
         let common = Common {
             ui: self.ui.clone(),
             geometry: Rc::clone(&self.geometry),
             placement: Rc::downgrade(self.placement),
             index: self.index,
             visible: Cell::new(true),
-            enabled: Cell::new(true),
+            enabled: Cell::new(enabled),
             tab_index: Cell::new(0),
         };
         let live = Live {

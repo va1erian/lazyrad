@@ -20,6 +20,10 @@ use xui_core::units::Dip;
 
 use crate::value::{Value, ValueType};
 
+/// The longest `Timer` interval, in milliseconds: one day. A longer one is
+/// clamped, so a huge value can never wrap a 32-bit window timer.
+pub const MAX_TIMER_INTERVAL_MS: i64 = 86_400_000;
+
 /// The twelve anchor names, in the order the designer shows them.
 pub const ANCHOR_NAMES: [&str; 12] = [
     "top_left",
@@ -1098,6 +1102,48 @@ fn builtin_specs() -> Vec<WidgetSpec> {
                 Children::None,
             )
         },
+        WidgetSpec {
+            properties: vec![
+                property(
+                    "interval",
+                    ValueType::Int {
+                        min: Some(1),
+                        max: Some(MAX_TIMER_INTERVAL_MS),
+                    },
+                    Value::Int(100),
+                    CATEGORY_BEHAVIOR,
+                    "How often `Tick` is raised, in milliseconds (at most one day).",
+                ),
+                property(
+                    "enabled",
+                    ValueType::Bool,
+                    Value::Bool(false),
+                    CATEGORY_BEHAVIOR,
+                    "Whether the timer runs. It starts disabled; set it true to begin ticking.",
+                ),
+                // The designer shows a placeholder for a Timer, but a script
+                // must not be able to make it visible in the running program.
+                design_property(
+                    "visible",
+                    ValueType::Bool,
+                    Value::Bool(true),
+                    CATEGORY_BEHAVIOR,
+                    "Whether the designer shows the timer's placeholder.",
+                ),
+            ],
+            events: vec![event(
+                "Tick",
+                Vec::new(),
+                true,
+                "Raised every `interval` milliseconds while the timer is enabled.",
+            )],
+            ..widget(
+                "Timer",
+                "A non-visual timer that raises `Tick` periodically.",
+                (72.0, 20.0),
+                Children::None,
+            )
+        },
     ]
 }
 
@@ -1128,6 +1174,7 @@ mod tests {
                 "RadioGroup",
                 "Separator",
                 "Slider",
+                "Timer",
                 "ToggleButton",
             ]
         );

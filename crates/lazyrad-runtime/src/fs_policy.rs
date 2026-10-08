@@ -32,10 +32,12 @@
 //! filesystem: a differently-cased path may be denied even when the OS would
 //! open it, which fails safe.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 /// The longest script-supplied path a sandbox accepts, in bytes. A longer
 /// path is refused before any filesystem call, so a hostile script cannot
@@ -83,15 +85,17 @@ pub enum FsPolicy {
 /// A restricted view of the filesystem.
 ///
 /// A sandbox grants read and write below its private root, plus read and/or
-/// write to the extra files and directories the host lets the user pick. It is
-/// built once and then only read.
+/// write to the extra files and directories the host lets the user pick. The
+/// allowed list is shared and mutable through [`Sandbox::allow_runtime`], so a
+/// file the user picks from a running program's `open_file_dialog` can be
+/// granted after the sandbox was built; cloning a sandbox shares that list.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     /// The directory a relative request is resolved against and the only
     /// directory reachable by default.
     private_root: PathBuf,
     /// Extra user-picked files or directories and the access each grants.
-    allowed: Vec<Allowed>,
+    allowed: Rc<RefCell<Vec<Allowed>>>,
 }
 
 /// One entry the host added with [`Sandbox::allow`].
@@ -172,6 +176,18 @@ impl FsPolicy {
             FsPolicy::Sandboxed(sandbox) => sandbox.resolve(requested, access),
         }
     }
+
+    /// Grants `path` the given `access` at run time, so a file the user picked
+    /// can be read afterwards.
+    ///
+    /// On [`FsPolicy::Unrestricted`] this does nothing: every path is already
+    /// allowed. On a sandbox it adds an entry, limited to the exact file or
+    /// directory, to the shared allowed list.
+    pub fn allow_runtime(&self, path: PathBuf, access: Access) {
+        if let FsPolicy::Sandboxed(sandbox) = self {
+            sandbox.allow_runtime(path, access);
+        }
+    }
 }
 
 impl Sandbox {
@@ -183,7 +199,7 @@ impl Sandbox {
     pub fn new(private_root: PathBuf) -> Sandbox {
         Sandbox {
             private_root,
-            allowed: Vec::new(),
+            allowed: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -194,9 +210,18 @@ impl Sandbox {
     /// not exist it is treated as a file, so a to-be-created file can be
     /// allowed but not the not-yet-existing children of a missing directory.
     #[must_use]
-    pub fn allow(mut self, path: PathBuf, access: Access) -> Sandbox {
-        self.allowed.push(Allowed { path, access });
+    pub fn allow(self, path: PathBuf, access: Access) -> Sandbox {
+        self.allow_runtime(path, access);
         self
+    }
+
+    /// Grants `path` the given `access` on a sandbox that is already built.
+    ///
+    /// This is how a path the user picks in a running program is added to the
+    /// sandbox after the fact. It is shared with every clone of the sandbox, so
+    /// all of a runtime's forms see the grant.
+    pub fn allow_runtime(&self, path: PathBuf, access: Access) {
+        self.allowed.borrow_mut().push(Allowed { path, access });
     }
 
     /// The sandboxed half of [`FsPolicy::resolve`].
@@ -250,6 +275,7 @@ impl Sandbox {
             return true;
         }
         self.allowed
+            .borrow()
             .iter()
             .any(|entry| entry.grants(resolved, access))
     }

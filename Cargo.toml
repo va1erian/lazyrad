@@ -68,6 +68,10 @@ dark-light = "3"
 # same `platform::dialogs` module.
 rfd = "0.17"
 
+# Runs the async file dialog to completion on a worker thread. Already in the
+# tree through `rfd`.
+pollster = "0.4"
+
 xui-form = { path = "crates/xui-form" }
 xui-rhai = { path = "crates/xui-rhai" }
 lazyrad-project = { path = "crates/lazyrad-project" }

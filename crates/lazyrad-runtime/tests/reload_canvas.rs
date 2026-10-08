@@ -1,8 +1,10 @@
-//! Hot reload of a form that holds a `Canvas` (issue #91 with issue #104).
+//! Hot reload of a form that holds a `Canvas` (issue #91 with issue #104) and
+//! a `Timer` (with issue #90).
 //!
-//! A `Canvas` runs its own per-control frame timer. A reload drops the old
-//! form, which must kill that timer, and the new form starts its own: exactly
-//! one frame timer stays live. The offscreen backend starts no timers, so
+//! A `Canvas` runs its own per-control frame timer and a `Timer` control runs a
+//! window timer routed by the form's `Timers`. A reload drops the old form,
+//! which must kill both, and the new form starts its own: exactly one of each
+//! stays live. The offscreen backend starts no timers, so
 //! [`TimerBackend`] wraps it, hands out timer ids, records which are live and
 //! fires them on request.
 
@@ -197,7 +199,7 @@ fn sorted(mut timers: Vec<u32>) -> Vec<u32> {
     timers
 }
 
-/// The project: a label and a 60 fps canvas whose frame writes the label.
+/// The project: a label, a 60 fps canvas and a (disabled) 40 ms timer.
 fn write_project(dir: &Path, code: &str) {
     fs::write(
         dir.join("check.lrp"),
@@ -212,7 +214,8 @@ fn write_project(dir: &Path, code: &str) {
          [[node]]\nkind = \"Label\"\nname = \"result_label\"\n\
          left = 10\ntop = 10\nwidth = 200\nheight = 20\ntext = \"before\"\n\n\
          [[node]]\nkind = \"Canvas\"\nname = \"canvas1\"\n\
-         left = 10\ntop = 40\nwidth = 100\nheight = 80\nfps = 60\n",
+         left = 10\ntop = 40\nwidth = 100\nheight = 80\nfps = 60\n\n\
+         [[node]]\nkind = \"Timer\"\nname = \"timer1\"\ninterval = 40\n",
     )
     .expect("form writes");
     fs::write(dir.join("main_form.rhai"), code).expect("code writes");
@@ -281,6 +284,70 @@ fn a_reload_rebuilds_the_canvas_with_exactly_one_frame_timer() {
         form.get("result_label", "text"),
         Some(Value::Text("new frame".to_owned())),
         "the new script's canvas1_frame ran"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reload_restarts_a_timer_control_without_leaking_the_old_one() {
+    let dir = std::env::temp_dir().join(format!(
+        "lazyrad-runtime-reload-timer-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("scratch directory is created");
+    // No `canvas1_frame`, so the canvas runs no frame loop: only the Timer
+    // control's window timer and the watch tick are live.
+    write_project(
+        &dir,
+        "fn form_load() { timer1.enabled = true; }\n\
+         fn timer1_tick() { result_label.text = \"old tick\"; }",
+    );
+    let runtime = FormRuntime::load(&dir).expect("the project loads");
+    runtime.enable_watch(&dir);
+
+    let backend = Rc::new(TimerBackend::new(OffscreenBackend::new()));
+    let seen = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&seen);
+    let inner = Rc::clone(&backend);
+    let dir_for_run = dir.clone();
+    let runtime_for_run = Rc::clone(&runtime);
+    let spec = PlatformSpec::new("reload timer tests").size(Dip(320.0), Dip(200.0));
+    run_app(backend as Rc<dyn Backend>, spec, move |ui| {
+        let mut app = runtime_for_run
+            .build_app(ui, "main_form")
+            .expect("the form builds");
+        assert_eq!(sorted(inner.live()), [40, 500], "timer1 and the watch tick");
+
+        fs::write(
+            dir_for_run.join("main_form.rhai"),
+            "fn form_load() { timer1.interval = 70; timer1.enabled = true; }\n\
+             fn timer1_tick() { result_label.text = \"new tick\"; }",
+        )
+        .expect("the script is rewritten");
+        assert_eq!(runtime_for_run.check_for_changes(), ReloadOutcome::Reloaded);
+        assert!(app.reload_root(ui), "the form rebuilds");
+
+        // The old 40 ms timer died with the old form; the new one runs at 70.
+        assert_eq!(
+            sorted(inner.live()),
+            [70, 500],
+            "one timer at the new interval and one watch tick, none leaked"
+        );
+        assert!(app.is_timer_running("timer1"));
+        // A tick reaches the new script's handler, through the message queue
+        // drained after this closure.
+        inner.fire(ui.window());
+        *slot.borrow_mut() = Some(Rc::clone(app.root_form().expect("live")));
+        app
+    })
+    .expect("the event loop runs");
+
+    let form = seen.borrow_mut().take().expect("the form was captured");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("new tick".to_owned())),
+        "the new script's timer1_tick ran"
     );
     let _ = fs::remove_dir_all(&dir);
 }

@@ -12,13 +12,16 @@
 //! The crate is deliberately dependency-light: it is the shared vocabulary used
 //! by the runtime, the designer and the IDE, and never depends on any of them.
 
+pub mod assets;
 pub mod error;
 pub mod fs_safety;
+pub mod glob;
 pub mod io;
 pub mod model;
 pub mod schema;
 pub mod validate;
 
+pub use assets::collect_assets;
 pub use error::{Diagnostic, DiagnosticKind, Error};
 pub use io::{
     CODE_EXTENSION, FORM_EXTENSION, PROJECT_EXTENSION, SaveReport, load_form, parse_form,

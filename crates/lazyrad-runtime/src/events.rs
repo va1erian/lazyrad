@@ -1,43 +1,34 @@
 #![forbid(unsafe_code)]
 
-//! A form window's side of [`EventSource`]s: the timer that polls them.
+//! A form window's side of [`EventSource`]s: the sources and their poller.
 //!
-//! Each [`FormApp`](crate::FormApp) owns one [`Poller`]. After every message
-//! the window handles, [`Poller::sync`] asks the sources whether the form has
-//! work pending (a script subscribed to something, say) and starts or stops a
-//! window timer to match, so an idle form costs nothing. Each tick becomes a
-//! [`Msg::Poll`], and [`Poller::poll`] lets every source run what is ready in
-//! the form's script. Dropping the poller (the window closed) releases what
-//! the form registered.
+//! Each [`FormApp`](crate::FormApp) owns one [`Poller`], wrapped by
+//! [`crate::timers::Timers`] together with the form's `Timer` controls. The
+//! poller asks the thread's sources whether the form has work pending (a script
+//! subscribed to something, say); [`Poller::poll`] lets every source run what
+//! is ready in the form's script. Dropping the poller (the window closed)
+//! releases what the form registered. The window timer that drives it lives in
+//! [`crate::timers`], so it can share one timer mapper with the `Timer`
+//! controls.
 
 use std::rc::Rc;
 
-use xui_core::app::Ui;
-use xui_core::backend::TimerId;
-
 use crate::ScriptError;
 use crate::extensions::{self, EventSource};
-use crate::form::{FormInstance, Msg};
+use crate::form::FormInstance;
 
-/// Polls the thread's event sources for one form.
+/// The thread's event sources, polled for one form.
 pub(crate) struct Poller {
     form: String,
     sources: Vec<Rc<dyn EventSource>>,
-    timer: Option<TimerId>,
 }
 
 impl Poller {
-    /// A poller for `form`'s window. Registers the window's timer handler
-    /// only when there is a source to poll.
-    pub(crate) fn new(ui: &Ui<Msg>, form: &str) -> Poller {
-        let sources = extensions::event_sources();
-        if !sources.is_empty() {
-            ui.on_timer(|_| Some(Msg::Poll));
-        }
+    /// A poller for `form`.
+    pub(crate) fn new(form: &str) -> Poller {
         Poller {
             form: form.to_owned(),
-            sources,
-            timer: None,
+            sources: extensions::event_sources(),
         }
     }
 
@@ -46,36 +37,23 @@ impl Poller {
         Poller {
             form: String::new(),
             sources: Vec::new(),
-            timer: None,
         }
     }
 
-    /// Whether the window's timer is running.
-    pub(crate) fn is_polling(&self) -> bool {
-        self.timer.is_some()
+    /// Whether any source has work for the form.
+    pub(crate) fn active(&self) -> bool {
+        self.sources.iter().any(|source| source.active(&self.form))
     }
 
-    /// Starts the timer when a source has work for the form, stops it when
-    /// none has.
-    pub(crate) fn sync(&mut self, ui: &Ui<Msg>) {
-        let wanted = self.sources.iter().any(|source| source.active(&self.form));
-        match (wanted, self.timer) {
-            (true, None) => {
-                let interval = self
-                    .sources
-                    .iter()
-                    .map(|source| source.interval_ms())
-                    .min()
-                    .unwrap_or(50)
-                    .max(1);
-                self.timer = Some(ui.set_timer(interval));
-            }
-            (false, Some(timer)) => {
-                ui.kill_timer(timer);
-                self.timer = None;
-            }
-            _ => {}
-        }
+    /// The interval a window should poll at while a source has work, in
+    /// milliseconds: the smallest any source asks for, never below one.
+    pub(crate) fn interval(&self) -> u32 {
+        self.sources
+            .iter()
+            .map(|source| source.interval_ms())
+            .min()
+            .unwrap_or(50)
+            .max(1)
     }
 
     /// Lets every source run what is ready in `instance`'s script; returns the
@@ -92,16 +70,16 @@ impl Poller {
         errors
     }
 
-    /// Stops the polling timer and releases what the form registered.
+    /// Releases what the form registered with the event sources.
     ///
-    /// This is what a hot reload calls before rebuilding the form (issue #91):
-    /// `release` is keyed by form name, so it must run before the new
-    /// `form_load` re-subscribes, or it would drop the new subscriptions too.
-    /// Consuming `self` leaves nothing for [`Drop`] to release again.
-    pub(crate) fn release(mut self, ui: &Ui<Msg>) {
-        if let Some(timer) = self.timer.take() {
-            ui.kill_timer(timer);
-        }
+    /// A hot reload calls this (through [`Timers::reset`]) before rebuilding
+    /// the form (issue #91): `release` is keyed by form name, so it must run
+    /// before the new `form_load` re-subscribes, or it would drop the new
+    /// subscriptions too. Consuming `self` leaves nothing for [`Drop`] to
+    /// release again.
+    ///
+    /// [`Timers::reset`]: crate::timers::Timers::reset
+    pub(crate) fn release(mut self) {
         for source in &self.sources {
             source.release(&self.form);
         }

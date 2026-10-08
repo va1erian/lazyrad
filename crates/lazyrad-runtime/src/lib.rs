@@ -24,6 +24,8 @@ pub mod check;
 pub mod engine;
 mod events;
 pub mod extensions;
+mod file_dialogs;
+pub mod files;
 pub mod form;
 pub mod fs_policy;
 mod lint;
@@ -33,9 +35,11 @@ pub mod shell;
 pub mod stdlib;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+mod timers;
 
 pub use check::{CheckReport, check_project, check_runtime};
 pub use engine::{EngineHost, new_engine};
+pub use files::{DiskProject, NoProjectFiles, ProjectFiles};
 pub use form::{
     ErrorObserver, FormApp, FormRuntime, FormSource, HandlerObserver, ModuleSource, Msg,
     MsgBoxObserver, RuntimeError, run_project_with, run_runtime_with,

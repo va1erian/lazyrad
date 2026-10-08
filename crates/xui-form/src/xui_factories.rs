@@ -17,6 +17,7 @@ use xui_core::{HasText, Properties, WidgetId};
 use crate::build::{BuildCx, Factories, Made, SetError, WidgetFactory};
 use crate::doc::Node;
 use crate::live::WidgetProps;
+use crate::schema::MAX_TIMER_INTERVAL_MS;
 use crate::value::Value;
 
 impl<M: 'static> Factories<M> {
@@ -40,6 +41,7 @@ impl<M: 'static> Factories<M> {
         factories.register(SeparatorFactory);
         factories.register(HyperlinkFactory);
         factories.register(crate::canvas::CanvasFactory);
+        factories.register(TimerFactory);
         factories
     }
 }
@@ -1022,6 +1024,76 @@ impl<M: 'static> WidgetProps<M> for HyperlinkProps<M> {
 
     fn set_enabled_hint(&self, enabled: bool) {
         self.link.get().set_enabled(enabled);
+    }
+}
+
+/// `Timer`: a non-visual control that raises `Tick` periodically.
+///
+/// The timer is not a toolkit widget, so it is represented by a `Label`
+/// placeholder: the designer draws it with the node's name (so it can be
+/// selected and moved), while at run time it is hidden as soon as it is
+/// created. Because the form uses an absolute layout, the hidden placeholder
+/// never takes space from the other controls. The running timer itself lives in
+/// the form window, not in this widget.
+struct TimerFactory;
+
+impl<M: 'static> WidgetFactory<M> for TimerFactory {
+    fn kind(&self) -> &str {
+        "Timer"
+    }
+
+    fn create(&self, cx: &mut BuildCx<'_, M>, node: &Node) -> Made<M> {
+        let timer = Handle::new();
+        let design = cx.design_mode();
+        let text = if design {
+            node.name.clone()
+        } else {
+            String::new()
+        };
+        let mut build = arrange::label(text).bind(&timer);
+        if !design {
+            // Hide the placeholder at run time. `then_with` runs when the
+            // layout creates the widget, so the node is hidden before the
+            // first paint.
+            build = build.then_with(|label, ui| {
+                ui.set_visible(label.id(), false);
+                Ok(label)
+            });
+        }
+        let props = TimerProps {
+            label: timer.clone(),
+            interval: Cell::new(cx.int("interval", 100).clamp(1, MAX_TIMER_INTERVAL_MS)),
+        };
+        cx.made(build, &timer, props)
+    }
+}
+
+struct TimerProps<M: 'static> {
+    label: Handle<xui_core::Label<M>>,
+    interval: Cell<i64>,
+}
+
+impl<M: 'static> WidgetProps<M> for TimerProps<M> {
+    fn id(&self) -> WidgetId {
+        self.label.get().id()
+    }
+
+    fn get_own(&self, prop: &str) -> Option<Value> {
+        match prop {
+            "interval" => Some(Value::Int(self.interval.get())),
+            _ => None,
+        }
+    }
+
+    fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
+        match (prop, value) {
+            ("interval", Value::Int(interval)) if *interval >= 1 => {
+                self.interval.set((*interval).min(MAX_TIMER_INTERVAL_MS));
+                Ok(())
+            }
+            ("interval", _) => Err(SetError::TypeMismatch),
+            _ => Err(SetError::UnknownProperty),
+        }
     }
 }
 
