@@ -17,6 +17,7 @@ use xui_core::{HasText, Properties, WidgetId};
 use crate::build::{BuildCx, Factories, Made, SetError, WidgetFactory};
 use crate::doc::Node;
 use crate::live::WidgetProps;
+use crate::schema::MAX_TIMER_INTERVAL_MS;
 use crate::value::Value;
 
 impl<M: 'static> Factories<M> {
@@ -1061,7 +1062,7 @@ impl<M: 'static> WidgetFactory<M> for TimerFactory {
         }
         let props = TimerProps {
             label: timer.clone(),
-            interval: Cell::new(cx.int("interval", 100).max(1)),
+            interval: Cell::new(cx.int("interval", 100).clamp(1, MAX_TIMER_INTERVAL_MS)),
         };
         cx.made(build, &timer, props)
     }
@@ -1087,7 +1088,7 @@ impl<M: 'static> WidgetProps<M> for TimerProps<M> {
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError> {
         match (prop, value) {
             ("interval", Value::Int(interval)) if *interval >= 1 => {
-                self.interval.set(*interval);
+                self.interval.set((*interval).min(MAX_TIMER_INTERVAL_MS));
                 Ok(())
             }
             ("interval", _) => Err(SetError::TypeMismatch),

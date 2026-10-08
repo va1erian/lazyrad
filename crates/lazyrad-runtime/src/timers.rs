@@ -28,6 +28,10 @@ use crate::ScriptError;
 use crate::events::Poller;
 use crate::form::{FormInstance, Msg};
 
+/// How often a window looks for the answer of an open-file dialog, in
+/// milliseconds. A person takes seconds to pick a file, so this is quick enough.
+const DIALOG_POLL_MS: u32 = 50;
+
 /// What a window timer's tick means.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Route {
@@ -35,13 +39,17 @@ enum Route {
     Poll,
     /// A `Timer` control's tick.
     Tick(String),
+    /// The dialog poller's tick: collect the answers of open-file dialogs.
+    Dialogs,
 }
 
 impl Route {
     /// The message a tick raises.
     fn message(&self) -> Msg {
         match self {
-            Route::Poll => Msg::Poll,
+            // An answered dialog is delivered by the same message as work from
+            // the event sources: both mean "something arrived for this form".
+            Route::Poll | Route::Dialogs => Msg::Poll,
             Route::Tick(control) => Msg::Tick {
                 control: control.clone(),
             },
@@ -63,6 +71,8 @@ pub(crate) struct Timers {
     poller: Poller,
     /// The poller's window timer, when a source has work.
     poll_timer: Option<TimerId>,
+    /// The timer that collects open-file dialog answers while one is open.
+    dialog_timer: Option<TimerId>,
     /// Each `Timer` control's window timer, keyed by control name.
     controls: BTreeMap<String, Running>,
     /// `TimerId` to what its tick means, shared with the window's mapper.
@@ -81,6 +91,7 @@ impl Timers {
         Timers {
             poller: Poller::new(form),
             poll_timer: None,
+            dialog_timer: None,
             controls: BTreeMap::new(),
             routes,
         }
@@ -91,6 +102,7 @@ impl Timers {
         Timers {
             poller: Poller::idle(),
             poll_timer: None,
+            dialog_timer: None,
             controls: BTreeMap::new(),
             routes: Rc::new(RefCell::new(BTreeMap::new())),
         }
@@ -110,6 +122,25 @@ impl Timers {
     pub(crate) fn sync(&mut self, ui: &Ui<Msg>, form: &LiveForm<Msg>) {
         self.sync_poll(ui);
         self.sync_controls(ui, form);
+    }
+
+    /// Starts the dialog poller while an open-file dialog is waiting and stops it
+    /// once none is. A worker cannot send this window a message (`Msg` carries
+    /// script function pointers and is not `Send`), so the window looks.
+    pub(crate) fn sync_dialogs(&mut self, ui: &Ui<Msg>, waiting: bool) {
+        match (waiting, self.dialog_timer) {
+            (true, None) => {
+                let id = ui.set_timer(DIALOG_POLL_MS);
+                self.routes.borrow_mut().insert(id.0, Route::Dialogs);
+                self.dialog_timer = Some(id);
+            }
+            (false, Some(id)) => {
+                ui.kill_timer(id);
+                self.routes.borrow_mut().remove(&id.0);
+                self.dialog_timer = None;
+            }
+            _ => {}
+        }
     }
 
     /// Lets every source run what is ready in `instance`'s script.
@@ -201,8 +232,13 @@ fn interval_of(form: &LiveForm<Msg>, name: &str) -> u32 {
             Value::Int(millis) => Some(millis),
             _ => None,
         })
-        .unwrap_or(100)
-        .max(1) as u32
+        .map_or(100, clamp_interval)
+}
+
+/// `millis` as a window timer interval: at least 1, and saturating at
+/// `u32::MAX` rather than wrapping (a plain `as u32` turns 4294967296 into 0).
+fn clamp_interval(millis: i64) -> u32 {
+    millis.clamp(1, i64::from(u32::MAX)) as u32
 }
 
 #[cfg(test)]
@@ -218,6 +254,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn an_interval_saturates_instead_of_wrapping() {
+        assert_eq!(clamp_interval(-5), 1);
+        assert_eq!(clamp_interval(0), 1);
+        assert_eq!(clamp_interval(250), 250);
+        assert_eq!(clamp_interval(4_294_967_295), u32::MAX);
+        assert_eq!(
+            clamp_interval(4_294_967_296),
+            u32::MAX,
+            "2^32 must not wrap to 0"
+        );
+        assert_eq!(clamp_interval(5_000_000_000), u32::MAX);
+        assert_eq!(clamp_interval(i64::MAX), u32::MAX);
+    }
 
     #[test]
     fn a_route_maps_to_its_message() {

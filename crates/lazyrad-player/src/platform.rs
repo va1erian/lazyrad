@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use lazyrad_runtime::platform::{self, Dialogs, Platform};
 #[cfg(feature = "native-dialogs")]
-use lazyrad_runtime::platform::{FileFilter, Filter};
+use lazyrad_runtime::platform::{FileDone, FileFilter, Filter, dialog_filters};
 
 /// Installs [`PlayerPlatform`] as the process's platform.
 ///
@@ -62,11 +62,33 @@ impl Dialogs for NativeDialogs {
 
     fn open_file_filtered(&self, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
         let mut dialog = rfd::FileDialog::new().set_title(title);
-        for group in filters {
-            let patterns: Vec<&str> = group.patterns.iter().map(String::as_str).collect();
-            dialog = dialog.add_filter(&group.name, &patterns);
+        for (name, extensions) in dialog_filters(filters) {
+            dialog = dialog.add_filter(name, &extensions);
         }
         dialog.pick_file()
+    }
+
+    /// Shows the dialog on a worker thread so the window keeps running.
+    ///
+    /// `rfd::AsyncFileDialog` is safe to start off the UI thread on every
+    /// platform (macOS hops to the main thread itself); `pollster` runs its
+    /// future to completion on the worker.
+    fn open_file_async(&self, title: &str, filters: &[FileFilter], done: FileDone) {
+        let mut dialog = rfd::AsyncFileDialog::new().set_title(title);
+        for (name, extensions) in dialog_filters(filters) {
+            dialog = dialog.add_filter(name, &extensions);
+        }
+        let spawned = std::thread::Builder::new()
+            .name("open-file-dialog".to_owned())
+            .spawn(move || {
+                let picked = pollster::block_on(dialog.pick_file());
+                done(picked.map(|file| file.path().to_path_buf()));
+            });
+        if let Err(error) = spawned {
+            // `done` moved into the closure that failed to start; the caller
+            // sees a dialog that never answers, so say why.
+            eprintln!("lazyrad: cannot start the file dialog: {error}");
+        }
     }
 
     fn choose_folder(&self, _title: &str) -> Option<PathBuf> {

@@ -66,6 +66,53 @@ pub fn parse_filters(spec: &str) -> Vec<FileFilter> {
         .collect()
 }
 
+/// The extension tokens a native dialog wants for one filter group's glob
+/// patterns.
+///
+/// Scripts write filters as globs (`*.mod`, `*.*`), but native dialog toolkits
+/// (`rfd`'s `add_filter`) take bare extensions (`mod`). Each `*.ext` becomes
+/// `ext`; `*` and `*.*` mean "every file" and become the single token `*`,
+/// which swallows the rest of the group. Anything that is not a plain extension
+/// glob (`data*`, `*.{png,jpg}`, `sub/*.txt`, `*.`) cannot be expressed as an
+/// extension and is skipped. Duplicates are dropped, order is kept.
+pub fn extension_tokens(patterns: &[String]) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for pattern in patterns {
+        let pattern = pattern.trim();
+        if pattern == "*" || pattern == "*.*" {
+            return vec!["*".to_owned()];
+        }
+        let Some(extension) = pattern.strip_prefix("*.") else {
+            continue;
+        };
+        let plain = !extension.is_empty()
+            && !extension.chars().any(|c| {
+                c.is_whitespace() || matches!(c, '*' | '?' | '[' | ']' | '{' | '}' | '/' | '\\')
+            });
+        if plain && !tokens.iter().any(|token| token == extension) {
+            tokens.push(extension.to_owned());
+        }
+    }
+    tokens
+}
+
+/// The filter groups a native dialog should offer: each group's display name
+/// with its [`extension_tokens`]. A group with no usable extension is left out
+/// rather than offered as an empty filter that would hide every file.
+pub fn dialog_filters(filters: &[FileFilter]) -> Vec<(String, Vec<String>)> {
+    filters
+        .iter()
+        .filter_map(|group| {
+            let tokens = extension_tokens(&group.patterns);
+            (!tokens.is_empty()).then(|| (group.name.clone(), tokens))
+        })
+        .collect()
+}
+
+/// Called once with the file a dialog picked, or `None` when it was cancelled.
+/// It may run on any thread.
+pub type FileDone = Box<dyn FnOnce(Option<PathBuf>) + Send>;
+
 /// File, folder and message dialogs.
 ///
 /// Every method answers "cancelled" (`None`) when no dialog can be shown, so a
@@ -80,13 +127,25 @@ pub trait Dialogs: Send + Sync {
     /// The default offers only the first group, through [`Dialogs::open_file`],
     /// so an implementation that supports one filter needs nothing more.
     fn open_file_filtered(&self, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
-        match filters.first() {
-            Some(first) => {
-                let patterns: Vec<&str> = first.patterns.iter().map(String::as_str).collect();
-                self.open_file(title, Some((&first.name, &patterns)))
+        match dialog_filters(filters).first() {
+            Some((name, tokens)) => {
+                let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
+                self.open_file(title, Some((name, &tokens)))
             }
             None => self.open_file(title, None),
         }
+    }
+    /// Asks for an existing file without blocking the caller: `done` receives
+    /// the answer later, from any thread.
+    ///
+    /// A script's `open_file_dialog` uses this, so the window keeps running while
+    /// the dialog is up. An implementation must return promptly and call `done`
+    /// exactly once. The default answers at once through
+    /// [`Dialogs::open_file_filtered`], which is right for a platform whose
+    /// dialogs never block (the headless ones cancel immediately); a desktop
+    /// platform overrides it to show the dialog on a worker thread.
+    fn open_file_async(&self, title: &str, filters: &[FileFilter], done: FileDone) {
+        done(self.open_file_filtered(title, filters));
     }
     /// Asks for a folder.
     fn choose_folder(&self, title: &str) -> Option<PathBuf>;
@@ -286,6 +345,54 @@ mod tests {
         assert_eq!(filters[1].patterns, ["*"]);
         assert!(parse_filters("").is_empty());
         assert!(parse_filters(" ; ;").is_empty());
+    }
+
+    #[test]
+    fn glob_patterns_become_extension_tokens() {
+        let tokens = |patterns: &[&str]| {
+            let patterns: Vec<String> = patterns.iter().map(|p| (*p).to_owned()).collect();
+            extension_tokens(&patterns)
+        };
+        assert_eq!(tokens(&["*.mod"]), ["mod"]);
+        assert_eq!(tokens(&["*.png", " *.jpg ", "*.png"]), ["png", "jpg"]);
+        assert_eq!(tokens(&["*.tar.gz"]), ["tar.gz"]);
+        // "Every file" in either spelling wins over the rest of the group.
+        assert_eq!(tokens(&["*"]), ["*"]);
+        assert_eq!(tokens(&["*.*"]), ["*"]);
+        assert_eq!(tokens(&["*.mod", "*.*"]), ["*"]);
+        // Not a plain extension: skipped.
+        assert!(tokens(&["data*", "*.", "*.{png,jpg}", "sub/*.txt", "*.t?t", ""]).is_empty());
+        assert_eq!(tokens(&["data*", "*.mod"]), ["mod"]);
+    }
+
+    #[test]
+    fn dialog_filters_drop_groups_without_extensions() {
+        let filters = parse_filters("MOD files|*.mod;Odd|data*;All files|*.*");
+        assert_eq!(
+            dialog_filters(&filters),
+            [
+                ("MOD files".to_owned(), vec!["mod".to_owned()]),
+                ("All files".to_owned(), vec!["*".to_owned()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_async_dialog_answers_at_once() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let filters = parse_filters("MOD files|*.mod");
+        HeadlessDialogs.open_file_async(
+            "Open",
+            &filters,
+            Box::new(move |picked| {
+                let _ = sender.send(picked);
+            }),
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(None),
+            "cancelled, and already answered"
+        );
     }
 
     #[test]

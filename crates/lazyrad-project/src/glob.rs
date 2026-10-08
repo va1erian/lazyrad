@@ -12,10 +12,14 @@
 //! declare: relative, with no `..` component, no leading `/`, and no `\`.
 
 /// Whether `pattern` matches the `/`-separated `path`.
+///
+/// The cost is polynomial in the two lengths: a pattern with many wildcards
+/// (`**a**a**a**b`) cannot make the matcher backtrack exponentially.
 pub fn matches(pattern: &str, path: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let path: Vec<char> = path.chars().collect();
-    match_from(&pattern, &path)
+    let mut dead = vec![false; (pattern.len() + 1) * (path.len() + 1)];
+    match_from(&pattern, &path, 0, 0, &mut dead)
 }
 
 /// Whether `pattern` is a safe project asset pattern.
@@ -31,46 +35,77 @@ pub fn is_safe_glob(pattern: &str) -> bool {
         .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
-/// Matches `pattern` against `path`, both as character slices.
-fn match_from(pattern: &[char], path: &[char]) -> bool {
-    // `**/` matches zero or more whole directory segments.
-    if pattern.len() >= 3 && pattern[0] == '*' && pattern[1] == '*' && pattern[2] == '/' {
-        let rest = &pattern[3..];
-        if match_from(rest, path) {
-            return true;
-        }
-        return path
-            .iter()
-            .enumerate()
-            .any(|(index, character)| *character == '/' && match_from(rest, &path[index + 1..]));
-    }
-    match pattern.first() {
-        None => path.is_empty(),
-        Some('*') => {
-            // A `**` crosses directory separators; a `*` stops at one.
-            let (rest, crosses) = if pattern.get(1) == Some(&'*') {
-                (&pattern[2..], true)
-            } else {
-                (&pattern[1..], false)
-            };
-            // Try to consume zero or more characters, then match the rest.
-            let mut skip = 0;
-            loop {
-                if match_from(rest, &path[skip..]) {
-                    return true;
+/// Whether `pattern[pi..]` matches `path[si..]`.
+///
+/// `dead` records the `(pi, si)` states of a wildcard that were already tried
+/// and failed, so each is explored at most once.
+fn match_from(
+    pattern: &[char],
+    path: &[char],
+    mut pi: usize,
+    mut si: usize,
+    dead: &mut [bool],
+) -> bool {
+    let width = path.len() + 1;
+    loop {
+        let Some(&token) = pattern.get(pi) else {
+            return si == path.len();
+        };
+        match token {
+            '*' => {
+                if dead[pi * width + si] {
+                    return false;
                 }
-                match path.get(skip) {
-                    None => return false,
-                    Some('/') if !crosses => return false,
-                    Some(_) => skip += 1,
+                let matched = match_star(pattern, path, pi, si, dead);
+                if !matched {
+                    dead[pi * width + si] = true;
+                }
+                return matched;
+            }
+            '?' => {
+                if !matches!(path.get(si), Some(character) if *character != '/') {
+                    return false;
+                }
+            }
+            literal => {
+                if path.get(si) != Some(&literal) {
+                    return false;
                 }
             }
         }
-        Some('?') => {
-            matches!(path.first(), Some(character) if *character != '/')
-                && match_from(&pattern[1..], &path[1..])
+        pi += 1;
+        si += 1;
+    }
+}
+
+/// The wildcard case of [`match_from`], with `pattern[pi]` a `*`.
+fn match_star(pattern: &[char], path: &[char], pi: usize, si: usize, dead: &mut [bool]) -> bool {
+    // `**/` matches zero or more whole directory segments.
+    if pattern.get(pi + 1) == Some(&'*') && pattern.get(pi + 2) == Some(&'/') {
+        let rest = pi + 3;
+        if match_from(pattern, path, rest, si, dead) {
+            return true;
         }
-        Some(literal) => path.first() == Some(literal) && match_from(&pattern[1..], &path[1..]),
+        return (si..path.len())
+            .any(|index| path[index] == '/' && match_from(pattern, path, rest, index + 1, dead));
+    }
+    // A `**` crosses directory separators; a `*` stops at one.
+    let (rest, crosses) = if pattern.get(pi + 1) == Some(&'*') {
+        (pi + 2, true)
+    } else {
+        (pi + 1, false)
+    };
+    // Try to consume zero or more characters, then match the rest.
+    let mut skip = si;
+    loop {
+        if match_from(pattern, path, rest, skip, dead) {
+            return true;
+        }
+        match path.get(skip) {
+            None => return false,
+            Some('/') if !crosses => return false,
+            Some(_) => skip += 1,
+        }
     }
 }
 
@@ -126,5 +161,34 @@ mod tests {
         ] {
             assert!(!is_safe_glob(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_pathological_pattern_does_not_backtrack_exponentially() {
+        // Without memoization `**a**a**a**a**a**a**b` against a run of `a`s
+        // with no `b` explores an exponential number of splits.
+        let pattern = "**a**a**a**a**a**a**a**a**b";
+        let path = "a".repeat(200);
+        let started = std::time::Instant::now();
+        assert!(!matches(pattern, &path));
+        assert!(matches(pattern, &format!("{path}b")));
+        assert!(!matches("*a*a*a*a*a*a*a*a*b", &path));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn wildcards_interleaved_with_literals_still_match_correctly() {
+        assert!(matches("a*b*c", "aXXbYYc"));
+        assert!(!matches("a*b*c", "aXXbYY"));
+        assert!(matches("**/a/**/b", "x/y/a/z/b"));
+        assert!(!matches("*/b", "x/y/b"), "a `*` stops at a separator");
+        assert!(matches("**/b", "x/y/b"));
+        assert!(matches("**", ""), "a double star matches nothing too");
+        assert!(matches("*", ""));
+        assert!(!matches("?", ""));
     }
 }

@@ -35,7 +35,7 @@ use xui_core::{Lucide, Theme};
 use crate::local_paint::paint_local;
 
 /// The Iteration 1 control kinds the toolbox offers, by xui kind name.
-pub const CONTROL_KINDS: [&str; 9] = [
+pub const CONTROL_KINDS: [&str; 10] = [
     "Button",
     "Edit",
     "Label",

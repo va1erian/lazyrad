@@ -125,6 +125,43 @@ fn assets_keep_their_relative_paths_in_the_package() {
 }
 
 #[test]
+fn a_catch_all_asset_glob_builds_a_package_without_duplicates() {
+    let dir = scratch("assets-all");
+    fs::write(
+        dir.join("m0.rhai"),
+        "fn f() {}
+",
+    )
+    .unwrap();
+    fs::write(dir.join("notes.txt"), b"NOTES").unwrap();
+    let path = dir.join("app.lrp");
+    fs::write(
+        &path,
+        "name = \"app\"
+version = \"1.0.0\"
+startup = \"m0\"
+assets = [\"**\", \"*\"]
+
+         [[items]]
+kind = \"module\"
+name = \"m0\"
+code = \"m0.rhai\"
+",
+    )
+    .unwrap();
+
+    let built = build_package(&request(&path, &fake_player(0))).unwrap();
+    let package = verify(&built.bytes).unwrap();
+    assert_eq!(
+        package.files["resources/project/m0.rhai"],
+        b"fn f() {}
+"
+    );
+    assert_eq!(package.files["resources/project/notes.txt"], b"NOTES");
+    assert!(package.files.contains_key("resources/project/app.lrp"));
+}
+
+#[test]
 fn the_manifest_points_the_player_at_the_packaged_project() {
     let built = build_package(&request(&example("hello"), &fake_player(0))).unwrap();
     let package = verify(&built.bytes).unwrap();

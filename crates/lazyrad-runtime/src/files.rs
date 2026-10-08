@@ -51,6 +51,8 @@ pub struct DiskProject {
     referenced: BTreeSet<String>,
     /// The project's asset globs.
     assets: Vec<String>,
+    /// The `.lrp` itself, which is never served even when a glob matches it.
+    project_file: String,
 }
 
 impl DiskProject {
@@ -63,11 +65,15 @@ impl DiskProject {
                 .map(|path| path.to_string_lossy().replace('\\', "/"))
                 .collect(),
             assets: project.assets.clone(),
+            project_file: project.file_name(),
         }
     }
 
     /// Whether the project ships the project-relative file `relative`.
     fn ships(&self, relative: &str) -> bool {
+        if relative == self.project_file {
+            return false;
+        }
         self.referenced.contains(relative)
             || self
                 .assets
@@ -164,6 +170,18 @@ mod tests {
         // A data file the script wrote is left to the filesystem, so a read
         // goes where the write went.
         assert_eq!(files.read("notes.txt"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_disk_project_never_serves_its_project_file() {
+        let dir = scratch("lrp");
+        fs::write(dir.join("demo.lrp"), b"project").expect("project file");
+        fs::write(dir.join("main.rhai"), b"code").expect("script");
+        let files = DiskProject::new(dir.clone(), &project(&["**"]));
+
+        assert_eq!(files.read("demo.lrp"), None);
+        assert_eq!(files.read("main.rhai"), Some(b"code".to_vec()));
         let _ = fs::remove_dir_all(&dir);
     }
 

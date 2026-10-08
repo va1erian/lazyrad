@@ -24,6 +24,7 @@ pub mod check;
 pub mod engine;
 mod events;
 pub mod extensions;
+mod file_dialogs;
 pub mod files;
 pub mod form;
 pub mod fs_policy;

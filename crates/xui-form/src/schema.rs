@@ -20,6 +20,10 @@ use xui_core::units::Dip;
 
 use crate::value::{Value, ValueType};
 
+/// The longest `Timer` interval, in milliseconds: one day. A longer one is
+/// clamped, so a huge value can never wrap a 32-bit window timer.
+pub const MAX_TIMER_INTERVAL_MS: i64 = 86_400_000;
+
 /// The twelve anchor names, in the order the designer shows them.
 pub const ANCHOR_NAMES: [&str; 12] = [
     "top_left",
@@ -1104,11 +1108,11 @@ fn builtin_specs() -> Vec<WidgetSpec> {
                     "interval",
                     ValueType::Int {
                         min: Some(1),
-                        max: None,
+                        max: Some(MAX_TIMER_INTERVAL_MS),
                     },
                     Value::Int(100),
                     CATEGORY_BEHAVIOR,
-                    "How often `Tick` is raised, in milliseconds.",
+                    "How often `Tick` is raised, in milliseconds (at most one day).",
                 ),
                 property(
                     "enabled",

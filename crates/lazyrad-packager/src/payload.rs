@@ -125,11 +125,16 @@ impl Payload {
             .unwrap_or(Path::new("."));
         let lrp_name = project.file_name();
 
+        // Every name packed so far: the `.lrp` and the item files.
+        // An asset glob such as `*` or `**` also matches those, and the archive
+        // stores an asset under its project-relative path, so packing it again
+        // would duplicate the entry.
+        let mut seen = BTreeSet::new();
+        seen.insert(lrp_name.clone());
         let mut entries = vec![Entry {
             data: read_regular(&dir.join(&lrp_name), MAX_ENTRY_BYTES)?,
             name: lrp_name,
         }];
-        let mut seen = BTreeSet::new();
         for item in &project.items {
             for relative in std::iter::once(item.code()).chain(item.layout()) {
                 let name = relative.to_string_lossy().into_owned();
@@ -145,6 +150,10 @@ impl Payload {
         // has nowhere to show it, so the assets are simply left out.
         let (assets, _warnings) = lazyrad_project::collect_assets(dir, &project.assets)?;
         for relative in assets {
+            if !seen.insert(relative.clone()) {
+                // Already packed as the project file or one of its items.
+                continue;
+            }
             entries.push(Entry {
                 data: read_regular(&dir.join(&relative), MAX_ENTRY_BYTES)?,
                 name: format!("{ASSET_PREFIX}{relative}"),

@@ -54,6 +54,7 @@ use xui_form::{Catalog, FormDoc, LiveForm, Value};
 
 use lazyrad_project::{Project, lazyrad_catalog, parse_form};
 
+use crate::file_dialogs::FileDialogs;
 use crate::files::{DiskProject, NoProjectFiles, ProjectFiles};
 use crate::fs_policy::{Access, FsPolicy};
 use crate::platform;
@@ -178,6 +179,8 @@ pub struct FormRuntime {
     files: Rc<dyn ProjectFiles>,
     /// Told after every event handler that ran without error.
     observer: RefCell<Option<HandlerObserver>>,
+    /// The open-file dialogs scripts asked for and have not been answered.
+    file_dialogs: FileDialogs,
 }
 
 /// A callback told `(form, control, event)` after an event handler ran without
@@ -274,6 +277,7 @@ impl FormRuntime {
             fs: Rc::new(platform::current().fs_policy()),
             files,
             observer: RefCell::new(None),
+            file_dialogs: FileDialogs::new(),
         }))
     }
 
@@ -299,6 +303,7 @@ impl FormRuntime {
             fs: Rc::new(platform::current().fs_policy()),
             files: Rc::new(NoProjectFiles),
             observer: RefCell::new(None),
+            file_dialogs: FileDialogs::new(),
         })
     }
 
@@ -382,11 +387,14 @@ impl FormRuntime {
             runtime: Rc::clone(self),
             dialogs: Vec::new(),
             timers: Timers::new(ui, form),
+            owner: self.file_dialogs.new_owner(),
         };
         app.flush(ui);
-        // `form_load` may already have subscribed to something or enabled a
-        // timer.
-        app.timers.sync(ui, root.live_form());
+        // `form_load` may already have subscribed to something, enabled a
+        // timer or opened a file dialog.
+        app.deliver_file_dialogs(ui, &root);
+        app.flush(ui);
+        app.sync_timers(ui, &root);
         Ok(app)
     }
 
@@ -514,6 +522,17 @@ pub struct FormApp {
     /// The window's timers: the event-source poller and every `Timer` control.
     /// Dropping it releases what the form registered.
     timers: Timers,
+    /// This window's id in the runtime's open-file dialog table. Its requests
+    /// are cancelled when the window is dropped.
+    owner: u64,
+}
+
+impl Drop for FormApp {
+    fn drop(&mut self) {
+        // The window is gone: an open-file dialog still up has no callback to
+        // call, so its late answer is discarded.
+        self.runtime.file_dialogs.cancel(self.owner);
+    }
 }
 
 impl FormApp {
@@ -534,6 +553,12 @@ impl FormApp {
     /// that set it.
     pub fn is_timer_running(&self, name: &str) -> bool {
         self.timers.is_control_running(name)
+    }
+
+    /// Whether this window is waiting for the answer of an `open_file_dialog`
+    /// that is still up (its poll timer is running).
+    pub fn has_open_file_dialog(&self) -> bool {
+        self.runtime.file_dialogs.has_waiting(self.owner)
     }
 
     /// Moves every message a script left pending into the right window's queue.
@@ -579,6 +604,7 @@ impl FormApp {
                         runtime: Rc::clone(&runtime),
                         dialogs: Vec::new(),
                         timers: Timers::idle(),
+                        owner: runtime.file_dialogs.new_owner(),
                     }
                 }
             });
@@ -670,39 +696,53 @@ impl FormApp {
         self.dialogs.push(dialog);
     }
 
-    /// Shows the platform's open-file dialog for `form` and calls the script's
-    /// callback with the picked path (or `()` when cancelled).
+    /// Starts the platform's open-file dialog for this window and returns at
+    /// once; the script's callback runs when the user answers.
     ///
-    /// The dialog is synchronous: on the desktop `rfd` blocks the UI thread
-    /// while it is up, which is acceptable for the player. A picked path is
-    /// granted read access to the script's sandbox, limited to that exact
-    /// file, so a sandboxed app can read a file the user chose.
-    fn open_file_dialog(
-        &mut self,
-        ui: &mut Ui<Msg>,
-        form: &str,
-        title: &str,
-        filter: &str,
-        callback: &FnPtr,
-    ) {
-        let Some(root) = self.root.clone() else {
-            return;
-        };
+    /// The dialog does not block the window: the platform shows it on a worker
+    /// ([`platform::Dialogs::open_file_async`]) and [`FormApp::deliver_file_dialogs`]
+    /// collects the answer, from the window's poll timer while the dialog is up.
+    fn open_file_dialog(&mut self, title: &str, filter: &str, callback: &FnPtr) {
         let filters = platform::parse_filters(filter);
-        let picked = platform::current()
-            .dialogs()
-            .open_file_filtered(title, &filters);
-        let result = match picked {
-            Some(path) => {
-                self.runtime.fs.allow_runtime(path.clone(), Access::Read);
-                Dynamic::from(path.to_string_lossy().into_owned())
+        let title = title.to_owned();
+        self.runtime
+            .file_dialogs
+            .request(self.owner, callback.clone(), |done| {
+                platform::current()
+                    .dialogs()
+                    .open_file_async(&title, &filters, done);
+            });
+    }
+
+    /// Calls the callback of every open-file dialog of this window that was
+    /// answered, with the picked path (or `()` when cancelled).
+    ///
+    /// A picked path is granted read access to the script's sandbox, limited to
+    /// that exact file, so a sandboxed app can read a file the user chose. The
+    /// grant happens here, on the window that still exists, never for an answer
+    /// that arrives after the window closed.
+    fn deliver_file_dialogs(&mut self, ui: &mut Ui<Msg>, root: &Rc<FormInstance>) {
+        for (callback, picked) in self.runtime.file_dialogs.take_replies(self.owner) {
+            let result = match picked {
+                Some(path) => {
+                    self.runtime.fs.allow_runtime(path.clone(), Access::Read);
+                    Dynamic::from(path.to_string_lossy().into_owned())
+                }
+                None => Dynamic::UNIT,
+            };
+            if let Err(error) = root.call_fn(&callback, vec![result]) {
+                let located = root.locate(&error);
+                self.report_handler_error(ui, root.name(), located);
             }
-            None => Dynamic::UNIT,
-        };
-        if let Err(error) = root.call_fn(callback, vec![result]) {
-            let located = root.locate(&error);
-            self.report_handler_error(ui, form, located);
         }
+    }
+
+    /// Brings the window's timers in line with the form and with the
+    /// open-file dialogs it is waiting on.
+    fn sync_timers(&mut self, ui: &Ui<Msg>, root: &Rc<FormInstance>) {
+        self.timers.sync(ui, root.live_form());
+        let waiting = self.runtime.file_dialogs.has_waiting(self.owner);
+        self.timers.sync_dialogs(ui, waiting);
     }
 }
 
@@ -777,6 +817,7 @@ impl App for FormApp {
                 for error in self.timers.poll(&root) {
                     self.report_handler_error(ui, root.name(), error);
                 }
+                self.deliver_file_dialogs(ui, &root);
                 self.flush(ui);
             }
             Msg::Tick { control } => {
@@ -791,21 +832,24 @@ impl App for FormApp {
                 self.flush(ui);
             }
             Msg::OpenFileDialog {
-                form,
                 title,
                 filter,
                 callback,
+                ..
             } => {
-                self.open_file_dialog(ui, &form, &title, &filter, &callback);
+                self.open_file_dialog(&title, &filter, &callback);
+                // A platform whose dialogs never block answers before it returns.
+                self.deliver_file_dialogs(ui, &root);
                 self.flush(ui);
             }
             Msg::Quit => ui.quit(),
         }
         // A closed dialog no longer needs its nodes kept alive.
         self.dialogs.retain(Dialog::is_open);
-        // A handler may have subscribed to something, enabled a timer or
-        // changed an interval: bring every window timer in line with the form.
-        self.timers.sync(ui, root.live_form());
+        // A handler may have subscribed to something, enabled a timer,
+        // changed an interval or opened a file dialog: bring every window timer
+        // in line with the form.
+        self.sync_timers(ui, &root);
     }
 }
 
@@ -998,6 +1042,7 @@ pub fn run_runtime_with(
                     runtime: Rc::clone(&runtime_for_app),
                     dialogs: Vec::new(),
                     timers: Timers::idle(),
+                    owner: runtime_for_app.file_dialogs.new_owner(),
                 }
             }
         }

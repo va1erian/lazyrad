@@ -22,12 +22,13 @@ default = ["desktop", "native-dialogs"]
 desktop = ["lazyrad-runtime/desktop", "dep:xui-canvas"]
 # The native message box for an exported app that cannot start (`rfd`).
 # Without it the platform seam falls back to stderr.
-native-dialogs = ["dep:rfd"]
+native-dialogs = ["dep:rfd", "dep:pollster"]
 
 [dependencies]
 lazyrad-packager.workspace = true
 lazyrad-project.workspace = true
 lazyrad-runtime.workspace = true
+pollster = { workspace = true, optional = true }
 rfd = { workspace = true, optional = true }
 serde_json.workspace = true
 xui-canvas = { workspace = true, optional = true }

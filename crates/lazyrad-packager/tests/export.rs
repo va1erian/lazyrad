@@ -312,6 +312,31 @@ fn asset_project(scratch: &Scratch, assets: &str) -> PathBuf {
 }
 
 #[test]
+fn a_catch_all_asset_glob_does_not_repack_the_project_files() {
+    let scratch = Scratch::new("assets-all");
+    let lrp = asset_project(&scratch, "\"**\"");
+    let payload = Payload::from_project(&lrp).expect("a catch-all glob packs");
+
+    // The project file and its item are packed once, as themselves.
+    let names: Vec<&str> = payload
+        .entries()
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(names.iter().filter(|name| **name == "app.lrp").count(), 1);
+    assert_eq!(names.iter().filter(|name| **name == "m.rhai").count(), 1);
+    assert!(!names.contains(&"assets/app.lrp"));
+    assert!(!names.contains(&"assets/m.rhai"));
+    // Every other file is an asset.
+    assert_eq!(payload.get("assets/readme.txt"), Some(&b"readme"[..]));
+    assert_eq!(payload.get("assets/songs/song.mod"), Some(&b"MOD"[..]));
+    let mut unique = names.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), names.len(), "no entry is packed twice");
+}
+
+#[test]
 fn assets_are_packed_under_their_relative_paths() {
     let scratch = Scratch::new("assets");
     let stub = write_stub(&scratch);
