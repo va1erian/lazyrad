@@ -111,6 +111,36 @@ fn clicking_the_sample_hello_button_updates_the_label() {
 }
 
 #[test]
+fn the_sample_hello_uses_the_greeting_picked_in_the_combo() {
+    let runtime = FormRuntime::load(sample_dir()).expect("the sample project loads");
+    let backend = Rc::new(OffscreenBackend::new());
+    let backend_for_click = Rc::clone(&backend);
+    let capture: Rc<RefCell<Option<Rc<LiveForm<Msg>>>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&capture);
+
+    run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+        let app = runtime
+            .build_app(ui, "main_form")
+            .expect("main_form builds");
+        let form = app.root_form().expect("the form is live").clone();
+        form.set("name_edit", "text", &Value::Text("Ada".to_owned()))
+            .expect("the name field is writable");
+        form.set("greeting_combo", "selected", &Value::Int(1))
+            .expect("the combo selection is writable");
+        click(&backend_for_click, ui, &form, "hello_button");
+        *slot.borrow_mut() = Some(form);
+        app
+    })
+    .expect("the event loop runs");
+
+    let form = capture.borrow_mut().take().expect("the form was captured");
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("Hi, Ada!".to_owned()))
+    );
+}
+
+#[test]
 fn a_missing_handler_leaves_the_event_unwired() {
     let mut doc = FormDoc::new("main_form");
     let mut button = Node::new("Button", "cmdNo");
