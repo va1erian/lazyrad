@@ -230,6 +230,23 @@ mod tests {
     }
 
     #[test]
+    fn a_canvas_double_click_writes_its_frame_handler() {
+        let catalog = lazyrad_catalog();
+        let frame = catalog
+            .get("Canvas")
+            .and_then(|canvas| canvas.default_event())
+            .expect("a canvas has a default event");
+        let snippet = handler_snippet(&signature("canvas1", &frame.name), &argument_list(frame));
+        assert_eq!(snippet, "fn canvas1_frame(dt) {\n}\n");
+        let key = catalog
+            .get("Canvas")
+            .and_then(|canvas| canvas.event("KeyDown"))
+            .expect("a canvas reports keys");
+        assert_eq!(signature("canvas1", &key.name), "canvas1_key_down");
+        assert_eq!(argument_list(key), "key");
+    }
+
+    #[test]
     fn a_handler_snippet_carries_the_signature_and_args() {
         assert_eq!(
             handler_snippet("go_button_click", ""),

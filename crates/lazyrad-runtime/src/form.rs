@@ -599,7 +599,10 @@ impl FormApp {
     /// A widget handler's failure is not fatal: the error is shown in a
     /// message box (the script's own `msg_box`, non-blocking like any other)
     /// and the application keeps running, so the player's exit code stays 0.
-    /// Only a failure that prevents the window from opening is fatal.
+    /// Only a failure that prevents the window from opening is fatal. A
+    /// `Canvas`'s failing `Frame` handler also stops that canvas's frame loop
+    /// (its `fps` becomes 0), so the error is shown once rather than every
+    /// frame; the script can set `fps` again to restart it.
     fn report_handler_error(&mut self, ui: &mut Ui<Msg>, form: &str, error: ScriptError) {
         self.open_msg_box(
             ui,
@@ -676,9 +679,23 @@ impl App for FormApp {
                 args,
             } => {
                 if form.as_str() == root.name() {
-                    match root.run(&control, &event, &args) {
-                        Ok(()) => self.runtime.notify_handler(root.name(), &control, &event),
-                        Err(error) => self.report_handler_error(ui, root.name(), error),
+                    let frame = is_frame_event(root.live_form(), &control, &event);
+                    // A frame queued before its canvas's loop stopped (by a
+                    // failed frame, or the script setting `fps = 0`) is stale.
+                    if !(frame && frame_loop_stopped(root.live_form(), &control)) {
+                        match root.run(&control, &event, &args) {
+                            Ok(()) => self.runtime.notify_handler(root.name(), &control, &event),
+                            Err(error) => {
+                                // A failing frame handler would fail again on
+                                // the next frame: stop that canvas's loop so
+                                // the error is reported once, not 60 times a
+                                // second.
+                                if frame {
+                                    stop_frame_loop(root.live_form(), &control);
+                                }
+                                self.report_handler_error(ui, root.name(), error);
+                            }
+                        }
                     }
                 }
                 self.flush(ui);
@@ -726,6 +743,24 @@ impl App for FormApp {
         // A handler may have subscribed to something, or closed the last
         // subscription: run the polling timer only while there is work.
         self.poller.sync(ui);
+    }
+}
+
+/// Whether `event` on `control` is a `Canvas`'s per-frame event.
+fn is_frame_event(form: &LiveForm<Msg>, control: &str, event: &str) -> bool {
+    event == xui_form::canvas::FRAME_EVENT && form.kind(control) == Some(xui_form::canvas::KIND)
+}
+
+/// Whether the `Canvas` named `control` has no frame loop running (`fps` is 0).
+fn frame_loop_stopped(form: &LiveForm<Msg>, control: &str) -> bool {
+    form.get(control, "fps") == Some(Value::Int(0))
+}
+
+/// Stops the frame loop of the `Canvas` named `control` by setting its `fps`
+/// to 0, as the script itself would.
+fn stop_frame_loop(form: &LiveForm<Msg>, control: &str) {
+    if let Err(error) = form.set(control, "fps", &Value::Int(0)) {
+        eprintln!("lazyrad: cannot stop `{control}`'s frame loop: {error}");
     }
 }
 
@@ -995,6 +1030,93 @@ mod tests {
             capture.borrow().as_ref(),
             Some(&true),
             "a handler error opens a non-blocking message box"
+        );
+    }
+
+    /// What the frame test records after each step: the open dialogs and the
+    /// two canvases' `fps`.
+    type Observation = (usize, Option<Value>, Option<Value>);
+
+    /// A `Frame` (or other) event for `control` on `main_form`.
+    fn canvas_event(control: &str, event: &str, args: Vec<Value>) -> Msg {
+        Msg::Event {
+            form: "main_form".to_owned(),
+            control: control.to_owned(),
+            event: event.to_owned(),
+            args,
+        }
+    }
+
+    #[test]
+    fn a_failing_frame_handler_stops_its_canvas_and_is_reported_once() {
+        let mut doc = FormDoc::new("main_form");
+        for (name, left, fps) in [("canvas1", 0, 60), ("canvas2", 160, 30)] {
+            let mut canvas = Node::new("Canvas", name);
+            canvas.set_prop("left", Value::Int(left));
+            canvas.set_prop("width", Value::Int(150));
+            canvas.set_prop("height", Value::Int(100));
+            canvas.set_prop("fps", Value::Int(fps));
+            doc.insert(canvas);
+        }
+        // canvas2's handler draws on its own canvas and sets its own fps from
+        // inside the frame: the ordinary, re-entrant path.
+        let code = r##"
+            fn canvas1_frame(dt) { canvas1.clear("#000000"); let x = 1 / 0; }
+            fn canvas1_key_down(key) { canvas1.fps = 60; }
+            fn canvas2_frame(dt) {
+                canvas2.clear(0x000000);
+                canvas2.fill_rect(0, 0, 10, 10, "#ff0000");
+                canvas2.fps = 30;
+            }
+        "##;
+        let runtime =
+            FormRuntime::from_sources(vec![FormSource::new("main_form", doc, code)], Vec::new());
+        let backend = Rc::new(OffscreenBackend::new());
+        let capture: Rc<RefCell<Vec<Observation>>> = Rc::new(RefCell::new(Vec::new()));
+        let slot = Rc::clone(&capture);
+        run_app(backend as Rc<dyn Backend>, spec(), move |ui| {
+            let mut app = runtime
+                .build_app(ui, "main_form")
+                .expect("main_form builds");
+            let form = app.root_form().expect("the form is live").clone();
+            let record = |app: &FormApp| {
+                slot.borrow_mut().push((
+                    app.dialogs.len(),
+                    form.get("canvas1", "fps"),
+                    form.get("canvas2", "fps"),
+                ));
+            };
+            let frame = |control: &str| canvas_event(control, "Frame", vec![Value::Float(0.016)]);
+            // The failing frame is reported and stops canvas1's loop.
+            app.update(frame("canvas1"), ui);
+            record(&app);
+            // A frame queued before the stop is dropped, not reported again.
+            app.update(frame("canvas1"), ui);
+            record(&app);
+            // canvas2 keeps running.
+            app.update(frame("canvas2"), ui);
+            record(&app);
+            // The script restarts canvas1; its next failure is reported again.
+            app.update(
+                canvas_event("canvas1", "KeyDown", vec![Value::Text("space".to_owned())]),
+                ui,
+            );
+            app.update(frame("canvas1"), ui);
+            record(&app);
+            app
+        })
+        .expect("the event loop runs");
+
+        let stopped = Some(Value::Int(0));
+        let thirty = Some(Value::Int(30));
+        assert_eq!(
+            *capture.borrow(),
+            vec![
+                (1, stopped.clone(), thirty.clone()),
+                (1, stopped.clone(), thirty.clone()),
+                (1, stopped.clone(), thirty.clone()),
+                (2, stopped, thirty),
+            ]
         );
     }
 

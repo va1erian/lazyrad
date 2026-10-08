@@ -30,7 +30,7 @@ use xui_core::widget::Placeable;
 use crate::doc::{FormDoc, Node};
 use crate::live::{Common, Live, WidgetProps};
 use crate::placement::{Geometry, Placement, Shared, Slot};
-use crate::schema::{Catalog, EventSpec, WidgetSpec};
+use crate::schema::{Catalog, EventSpec, MethodSpec, WidgetSpec};
 use crate::value::{Value, ValueType};
 
 /// How a property write failed.
@@ -49,6 +49,26 @@ pub enum SetError {
     /// runtime, or runtime-only in the designer).
     #[error("the property is read-only here")]
     ReadOnly,
+}
+
+/// How a method call failed.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CallError {
+    /// No widget of that name exists in the form.
+    #[error("unknown widget")]
+    UnknownWidget,
+    /// The widget's kind declares no method of that name.
+    #[error("unknown method")]
+    UnknownMethod,
+    /// The arguments do not match the method's [`MethodSpec`]: the wrong
+    /// count, or a value of the wrong type or out of range. The text says
+    /// which.
+    #[error("{0}")]
+    WrongArgs(String),
+    /// The method was called correctly but could not do its work (it is not
+    /// available in design mode, say). The text says why.
+    #[error("{0}")]
+    Failed(String),
 }
 
 /// How a build failed.
@@ -130,6 +150,14 @@ pub trait LiveWidget<M: 'static> {
 
     /// Sets the widget-specific property named `prop`.
     fn set(&self, prop: &str, value: &Value) -> Result<(), SetError>;
+
+    /// Calls the method named `method` with `args`, returning its result, or
+    /// `None` for a method that returns nothing. The default knows no
+    /// methods.
+    fn call(&self, method: &str, args: &[Value]) -> Result<Option<Value>, CallError> {
+        let _ = (method, args);
+        Err(CallError::UnknownMethod)
+    }
 
     /// Every node the widget owns; the first is [`LiveWidget::id`].
     fn node_ids(&self) -> Vec<WidgetId> {
@@ -368,6 +396,30 @@ impl<M: 'static> LiveForm<M> {
         self.widget(name)
             .ok_or(SetError::UnknownWidget)?
             .set(prop, value)
+    }
+
+    /// Calls `method` on the widget named `name` with `args`, returning its
+    /// result (`None` for a method that returns nothing).
+    ///
+    /// The arguments are checked against the method's [`MethodSpec`] first:
+    /// a wrong count or type is [`CallError::WrongArgs`] and the widget is not
+    /// touched. A design-mode form refuses every call with
+    /// [`CallError::Failed`], since methods act on the running widget.
+    pub fn call(
+        &self,
+        name: &str,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, CallError> {
+        self.widget(name)
+            .ok_or(CallError::UnknownWidget)?
+            .call(method, args)
+    }
+
+    /// The method `method` on the node named `name`, if the node's kind
+    /// declares it.
+    pub fn method_spec(&self, name: &str, method: &str) -> Option<&MethodSpec> {
+        self.catalog.method(self.kind(name)?, method)
     }
 
     /// Runs `edits` against the form and applies the moves its geometry edits

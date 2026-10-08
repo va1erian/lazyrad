@@ -259,8 +259,19 @@ fn parse_value(ty: &ValueType, text: &str) -> Option<Value> {
         ValueType::Float { .. } => text.trim().parse::<f64>().ok().map(Value::Float),
         ValueType::Text { .. } => Some(Value::Text(text.to_owned())),
         ValueType::Enum { .. } => Some(Value::Enum(text.to_owned())),
+        ValueType::Color => parse_color(text.trim()).map(Value::Color),
         _ => None,
     }
+}
+
+/// Parses `#rrggbb` (the `#` is optional), the form [`format_value`] shows a
+/// colour in.
+fn parse_color(text: &str) -> Option<xui_core::Color> {
+    let hex = text.strip_prefix('#').unwrap_or(text);
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok().map(xui_core::Color::hex)
 }
 
 /// Builds the rows for `target` from `doc` and the catalog.
@@ -2004,6 +2015,25 @@ mod tests {
             Some(Value::Bool(true))
         );
         assert_eq!(parse_value(&ValueType::Bool, "maybe"), None);
+    }
+
+    #[test]
+    fn a_colour_parses_in_the_form_it_is_shown() {
+        let colour = Value::Color(xui_core::Color::rgb(0x12, 0xab, 0xff));
+        assert_eq!(
+            parse_value(&ValueType::Color, "#12abff"),
+            Some(colour.clone())
+        );
+        assert_eq!(
+            parse_value(&ValueType::Color, " 12ABFF "),
+            Some(colour.clone())
+        );
+        assert_eq!(
+            parse_value(&ValueType::Color, &format_value(&colour)),
+            Some(colour)
+        );
+        assert_eq!(parse_value(&ValueType::Color, "#12ab"), None);
+        assert_eq!(parse_value(&ValueType::Color, "#+2abff"), None);
     }
 
     #[test]

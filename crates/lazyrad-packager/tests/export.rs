@@ -72,7 +72,7 @@ fn exported_bytes(scratch: &Scratch) -> Vec<u8> {
 
 #[test]
 fn the_samples_round_trip_through_an_exported_file() {
-    for sample in ["hello", "calculator", "todo"] {
+    for sample in ["hello", "calculator", "todo", "brickbreaker"] {
         let scratch = Scratch::new(&format!("roundtrip-{sample}"));
         let stub = write_stub(&scratch);
         let output = scratch.path("app.out");

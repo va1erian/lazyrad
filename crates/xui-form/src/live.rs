@@ -10,7 +10,7 @@ use std::rc::{Rc, Weak};
 use xui_core::WidgetId;
 use xui_core::app::Ui;
 
-use crate::build::{LiveWidget, SetError};
+use crate::build::{CallError, LiveWidget, SetError};
 use crate::placement::{Geometry, Placement};
 use crate::schema::{Access, Catalog};
 use crate::value::Value;
@@ -26,6 +26,13 @@ pub(crate) trait WidgetProps<M: 'static>: 'static {
     fn get_own(&self, prop: &str) -> Option<Value>;
     /// Writes a widget-specific property.
     fn set_own(&self, prop: &str, value: &Value) -> Result<(), SetError>;
+    /// Calls a widget-specific method. [`Live`] has already checked the
+    /// argument count and types against the method's spec. The default knows
+    /// no methods.
+    fn call_own(&self, method: &str, args: &[Value]) -> Result<Option<Value>, CallError> {
+        let _ = (method, args);
+        Err(CallError::UnknownMethod)
+    }
     /// Notifies the widget that its `enabled` common property changed, so a
     /// widget with its own enabled state can dim itself. The default does
     /// nothing.
@@ -157,6 +164,43 @@ impl<M: 'static, W: WidgetProps<M>> LiveWidget<M> for Live<M, W> {
             return result;
         }
         self.inner.set_own(prop, value)
+    }
+
+    fn call(&self, method: &str, args: &[Value]) -> Result<Option<Value>, CallError> {
+        let spec = self
+            .catalog
+            .method(&self.kind, method)
+            .ok_or(CallError::UnknownMethod)?;
+        if args.len() != spec.args.len() {
+            return Err(CallError::WrongArgs(format!(
+                "{method} takes {} argument{} ({}), got {}",
+                spec.args.len(),
+                if spec.args.len() == 1 { "" } else { "s" },
+                spec.args
+                    .iter()
+                    .map(|arg| arg.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                args.len()
+            )));
+        }
+        for (index, (arg, value)) in spec.args.iter().zip(args).enumerate() {
+            if !arg.ty.accepts(value) {
+                return Err(CallError::WrongArgs(format!(
+                    "{method}: argument {} (`{}`) expects {}, got {}",
+                    index + 1,
+                    arg.name,
+                    arg.ty.type_name(),
+                    value.type_name()
+                )));
+            }
+        }
+        if self.design_mode {
+            return Err(CallError::Failed(format!(
+                "{method} cannot be called in design mode"
+            )));
+        }
+        self.inner.call_own(method, args)
     }
 
     fn node_ids(&self) -> Vec<WidgetId> {

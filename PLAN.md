@@ -181,7 +181,7 @@ completion and tooltips.
 | IO | `file` (`read_text`, `write_text`, `append`, `lines`, `exists`, `delete`), `dir`, `path` |
 | App | `app` (`path`, `title`, `version`, `args`, `quit()`), `env`, `clipboard` (text only), `screen` |
 | UI | `form` (`show`/`hide`/`show_modal`/`close`, `title`, `left`/`top`/…), `msg_box`, `input_box`, `dialogs` (open/save/colour) |
-| Controls | xui's kinds: `Label`, `Edit`/`MultilineEdit`, `Button`, `CheckBox`, `RadioGroup`, `GroupBox`, `ListView`, `ComboBox`, `Slider`, `ProgressBar`, `TreeView`, `Tabs`, `Menu`, plus a `Timer` and an image control |
+| Controls | xui's kinds: `Label`, `Edit`/`MultilineEdit`, `Button`, `CheckBox`, `RadioGroup`, `GroupBox`, `ListView`, `ComboBox`, `Slider`, `ProgressBar`, `TreeView`, `Tabs`, `Menu`, plus a `Timer`, an image control and a `Canvas` (drawing methods, a frame loop and raw input, for games; see `examples/brickbreaker`) |
 | Data (later) | `json` (parse/stringify to maps), `csv`, `settings` (per-app key/value storage) |
 
 Exported apps must not be surprising, so filesystem access is allowed by default. The

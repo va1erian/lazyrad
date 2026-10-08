@@ -18,6 +18,18 @@ xui gaps the project tracks.
 | `lazyrad-designer` | the xui form-designer surface, toolbox and property grid |
 | `lazyrad-ide` (bin) | the IDE shell |
 
+## Samples
+
+| Sample | Shows |
+|---|---|
+| `examples/hello` | a form, a handler and a standard module |
+| `examples/calculator` | many buttons sharing one module |
+| `examples/todo` | a list whose rows a script adds and removes |
+| `examples/brickbreaker` | a game on a `Canvas`: a 60 fps frame loop, keyboard and mouse input, drawing |
+
+Run one with `cargo run -p lazyrad-player -- examples/brickbreaker`, or open its
+`.lrp` in the IDE and press F5.
+
 ## Building
 
 ```text

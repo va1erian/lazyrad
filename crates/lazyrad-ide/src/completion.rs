@@ -389,7 +389,7 @@ fn member_candidates(catalog: &Catalog, context: &ScriptContext, receiver: &str)
     if context.is_form
         && let Some((_, kind)) = context.controls.iter().find(|(name, _)| name == receiver)
     {
-        let items: Vec<Item> = catalog
+        let mut items: Vec<Item> = catalog
             .property_names(kind)
             .into_iter()
             .map(|name| {
@@ -400,6 +400,18 @@ fn member_candidates(catalog: &Catalog, context: &ScriptContext, receiver: &str)
                 Item::new(name, ItemKind::Property, detail)
             })
             .collect();
+        // A control's methods (a Canvas's `fill_rect`…), with their arguments.
+        if let Some(spec) = catalog.get(kind) {
+            for method in &spec.methods {
+                let args: Vec<&str> = method.args.iter().map(|arg| arg.name.as_str()).collect();
+                let signature = format!("{}({})", method.name, args.join(", "));
+                items.push(Item::new(
+                    method.name.clone(),
+                    ItemKind::Method,
+                    Some(signature),
+                ));
+            }
+        }
         return items;
     }
     VALUE_METHODS
@@ -913,6 +925,21 @@ mod tests {
             !found.contains(&"while".to_owned()),
             "no keywords after a dot"
         );
+    }
+
+    #[test]
+    fn a_canvas_member_offers_its_methods_with_their_arguments() {
+        let context = ScriptContext {
+            controls: vec![("canvas1".to_owned(), "Canvas".to_owned())],
+            ..form_context()
+        };
+        let found = complete(&catalog(), &context, "canvas1.fill_r", 14).expect("a completion");
+        let item = &found.items[0];
+        assert_eq!(item.label, "fill_rect");
+        assert_eq!(item.kind, ItemKind::Method);
+        assert_eq!(item.detail.as_deref(), Some("fill_rect(x, y, w, h, color)"));
+        let fps = complete(&catalog(), &context, "canvas1.fp", 10).expect("a completion");
+        assert_eq!(fps.items[0].label, "fps");
     }
 
     #[test]

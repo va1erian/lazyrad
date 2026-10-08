@@ -132,7 +132,7 @@ impl PropertySpec {
     }
 }
 
-/// One argument of an event handler.
+/// One argument of an event handler or a method.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ArgSpec {
     /// The argument's name.
@@ -151,6 +151,25 @@ pub struct EventSpec {
     /// Whether this is the event a double-click opens by default.
     pub is_default: bool,
     /// Help text for completion.
+    pub description: String,
+}
+
+/// One method a widget kind exposes to scripts: `canvas1.fill_rect(...)`.
+///
+/// A method is called through [`LiveForm::call`](crate::LiveForm::call) with
+/// its arguments as typed [`Value`]s, in [`MethodSpec::args`] order. The live
+/// form checks the count and every argument's type against this spec before
+/// the widget sees the call, so a widget only handles well-typed arguments.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MethodSpec {
+    /// The method name, in snake_case.
+    pub name: String,
+    /// The arguments, in order.
+    pub args: Vec<ArgSpec>,
+    /// The type of the value the method returns, or `None` when it returns
+    /// nothing.
+    pub returns: Option<ValueType>,
+    /// Help text for completion and docs.
     pub description: String,
 }
 
@@ -193,6 +212,8 @@ pub struct WidgetSpec {
     pub properties: Vec<PropertySpec>,
     /// The events the widget raises.
     pub events: Vec<EventSpec>,
+    /// The methods a script may call on the widget; empty for most kinds.
+    pub methods: Vec<MethodSpec>,
     /// What the widget may contain.
     pub children: Children,
     /// The size a toolbox drop gives the widget, in design units.
@@ -214,6 +235,11 @@ impl WidgetSpec {
     /// The default event, if one is declared.
     pub fn default_event(&self) -> Option<&EventSpec> {
         self.events.iter().find(|spec| spec.is_default)
+    }
+
+    /// The method named `name`, if declared.
+    pub fn method(&self, name: &str) -> Option<&MethodSpec> {
+        self.methods.iter().find(|spec| spec.name == name)
     }
 }
 
@@ -370,6 +396,11 @@ impl Catalog {
         names
     }
 
+    /// The method `name` on `kind` (or an alias), if the kind declares it.
+    pub fn method(&self, kind: &str, name: &str) -> Option<&MethodSpec> {
+        self.get(kind)?.method(name)
+    }
+
     /// Whether `kind` (or an alias) is a container.
     pub fn is_container(&self, kind: &str) -> bool {
         self.get(kind).is_some_and(|spec| !spec.children.is_none())
@@ -385,7 +416,7 @@ impl Catalog {
 }
 
 /// Builds a property spec.
-fn property(
+pub(crate) fn property(
     name: &str,
     ty: ValueType,
     default: Value,
@@ -557,13 +588,14 @@ fn window_spec() -> WidgetSpec {
                 "Raised when the window is focused.",
             ),
         ],
+        methods: Vec::new(),
         children: Children::None,
         default_size: (Dip(320.0), Dip(200.0)),
     }
 }
 
 /// An unbounded int type.
-fn int_type() -> ValueType {
+pub(crate) fn int_type() -> ValueType {
     ValueType::Int {
         min: None,
         max: None,
@@ -571,7 +603,7 @@ fn int_type() -> ValueType {
 }
 
 /// An unbounded float type.
-fn float_type() -> ValueType {
+pub(crate) fn float_type() -> ValueType {
     ValueType::Float {
         min: None,
         max: None,
@@ -579,7 +611,7 @@ fn float_type() -> ValueType {
 }
 
 /// A single-line text type.
-fn text_type() -> ValueType {
+pub(crate) fn text_type() -> ValueType {
     ValueType::Text { multiline: false }
 }
 
@@ -591,7 +623,12 @@ fn enum_type(variants: &[&str]) -> ValueType {
 }
 
 /// Builds an event spec.
-fn event(name: &str, args: Vec<ArgSpec>, is_default: bool, description: &str) -> EventSpec {
+pub(crate) fn event(
+    name: &str,
+    args: Vec<ArgSpec>,
+    is_default: bool,
+    description: &str,
+) -> EventSpec {
     EventSpec {
         name: name.to_owned(),
         args,
@@ -601,7 +638,7 @@ fn event(name: &str, args: Vec<ArgSpec>, is_default: bool, description: &str) ->
 }
 
 /// Builds an event argument spec.
-fn arg(name: &str, ty: ValueType) -> ArgSpec {
+pub(crate) fn arg(name: &str, ty: ValueType) -> ArgSpec {
     ArgSpec {
         name: name.to_owned(),
         ty,
@@ -609,12 +646,18 @@ fn arg(name: &str, ty: ValueType) -> ArgSpec {
 }
 
 /// Builds a widget spec with no properties or events.
-fn widget(kind: &str, description: &str, size: (f32, f32), children: Children) -> WidgetSpec {
+pub(crate) fn widget(
+    kind: &str,
+    description: &str,
+    size: (f32, f32),
+    children: Children,
+) -> WidgetSpec {
     WidgetSpec {
         kind: kind.to_owned(),
         description: description.to_owned(),
         properties: Vec::new(),
         events: Vec::new(),
+        methods: Vec::new(),
         children,
         default_size: (Dip(size.0), Dip(size.1)),
     }
@@ -623,6 +666,7 @@ fn widget(kind: &str, description: &str, size: (f32, f32), children: Children) -
 /// The built-in widget specs, grounded in the `xui-core` widget APIs.
 fn builtin_specs() -> Vec<WidgetSpec> {
     vec![
+        crate::canvas::spec(),
         WidgetSpec {
             properties: vec![property(
                 "text",
@@ -1069,6 +1113,7 @@ mod tests {
             kinds,
             [
                 "Button",
+                "Canvas",
                 "CheckBox",
                 "ComboBox",
                 "Edit",
