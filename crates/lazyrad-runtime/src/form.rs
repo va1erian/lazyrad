@@ -1336,6 +1336,37 @@ mod tests {
     }
 
     #[test]
+    fn a_handler_calling_itself_counts_every_level() {
+        // Rhai wraps the two recursive calls but not the entry call, so the
+        // chain is the entry plus both: three levels, not two.
+        let error = crate::testing::run_on_large_stack(|| {
+            let runtime = button_form(
+                "fn go_button_click() {\n\
+                     if !(\"n\" in form.state) { form.state.n = 0; }\n\
+                     form.state.n += 1;\n\
+                     if form.state.n < 3 { go_button_click(); } else { let d = 0; 1 / d }\n\
+                 }",
+            );
+            let captured: Rc<RefCell<Option<ScriptError>>> = Rc::new(RefCell::new(None));
+            let sink = Rc::clone(&captured);
+            runtime.set_error_observer(Rc::new(move |_form, _control, _event, error| {
+                *sink.borrow_mut() = Some(error.clone());
+            }));
+            click_go(runtime);
+            captured
+                .borrow_mut()
+                .take()
+                .expect("the error was reported")
+        });
+
+        assert_eq!(
+            error.call_chain,
+            ["go_button_click", "go_button_click", "go_button_click"],
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_deeply_nested_error_reports_a_position_and_chain() {
         // A catchable error keeps Rhai's call wrappers, so the innermost
         // position and the whole `handler → helper → …` chain survive.

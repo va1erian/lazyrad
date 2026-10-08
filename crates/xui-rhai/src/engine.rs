@@ -273,10 +273,10 @@ impl EngineHost {
             .map_err(|error| {
                 let mut located = self.locate(&error);
                 // Rhai wraps a called function, not the entry call, so name the
-                // entry here: the chain then reads `handler → helper → …`.
-                if located.call_chain.first().map(String::as_str) != Some(function) {
-                    located.call_chain.insert(0, function.to_owned());
-                }
+                // entry here: the chain then reads `handler → helper → …`. A
+                // first entry with the same name is the handler calling itself,
+                // so the entry is still added.
+                located.call_chain.insert(0, function.to_owned());
                 located
             })
     }
