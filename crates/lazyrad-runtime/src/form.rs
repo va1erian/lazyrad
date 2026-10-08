@@ -658,12 +658,6 @@ struct Banner {
 const BANNER_NODE: &str = "reload_banner";
 
 impl FormApp {
-    /// A placeholder app for a window whose form could not be built: it owns no
-    /// form, so updating it quits the loop.
-    pub(crate) fn failed(runtime: Rc<FormRuntime>) -> FormApp {
-        FormApp::empty(runtime, String::new())
-    }
-
     /// The live form this window drives, when it built successfully.
     pub fn root_form(&self) -> Option<&Rc<LiveForm<Msg>>> {
         self.root.as_ref().map(|instance| instance.live_form())
@@ -676,7 +670,7 @@ impl FormApp {
 
     /// An application for a window whose form could not be built: it holds the
     /// form name so a reload can try again, but drives no form.
-    fn empty(runtime: Rc<FormRuntime>, form: String) -> FormApp {
+    pub(crate) fn empty(runtime: Rc<FormRuntime>, form: String) -> FormApp {
         FormApp {
             form,
             root: None,

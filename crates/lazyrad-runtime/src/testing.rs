@@ -323,7 +323,7 @@ fn run_session(
             }
             Err(error) => {
                 *failure_for_app.borrow_mut() = Some(error);
-                FormApp::failed(Rc::clone(&runtime_for_app))
+                FormApp::empty(Rc::clone(&runtime_for_app), startup_for_app.clone())
             }
         },
     )?;
