@@ -250,3 +250,69 @@ fn a_watch_tick_swaps_the_runtime_sources_through_the_message_path() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_failing_form_load_still_passes_the_old_state_to_form_reload() {
+    let dir = scratch("load-fails");
+    write_project(&dir, "fn form_load() { form.state.count = 5; }");
+    let runtime = FormRuntime::load(&dir).expect("the project loads");
+    runtime.enable_watch(&dir);
+
+    let runtime_for_run = Rc::clone(&runtime);
+    let dir_for_run = dir.clone();
+    let form = run_form(runtime, move |app, ui| {
+        // The new script checks and builds, but its `form_load` throws.
+        fs::write(
+            dir_for_run.join("main_form.rhai"),
+            "fn form_reload(old_state) { result_label.text = `${old_state.count}`; }\n\
+             fn form_load() { throw \"boom\"; }",
+        )
+        .expect("the script is rewritten");
+        assert_eq!(runtime_for_run.check_for_changes(), ReloadOutcome::Reloaded);
+        assert!(app.reload_root(ui), "the new form is committed");
+        assert!(
+            app.banner_text().is_some_and(|text| text.contains("boom")),
+            "the load error is reported in the banner"
+        );
+    });
+
+    assert_eq!(
+        form.get("result_label", "text"),
+        Some(Value::Text("5".to_owned())),
+        "form_reload still received the old state"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn creating_the_files_of_a_new_item_after_a_failed_reload_recovers() {
+    let dir = scratch("late-files");
+    write_project(&dir, "fn form_load() { result_label.text = \"one\"; }");
+    let runtime = FormRuntime::load(&dir).expect("the project loads");
+    runtime.enable_watch(&dir);
+
+    let dir_for_run = dir.clone();
+    run_form(runtime, move |app, ui| {
+        let mut lrp = fs::read_to_string(dir_for_run.join("check.lrp")).expect("project reads");
+        lrp.push_str(
+            "\n[[items]]\nkind = \"form\"\nname = \"second_form\"\n\
+             layout = \"second_form.lfm\"\ncode = \"second_form.rhai\"\n",
+        );
+        fs::write(dir_for_run.join("check.lrp"), lrp).expect("project writes");
+        app.update(Msg::WatchTick, ui);
+        assert!(app.banner_text().is_some(), "the missing files fail");
+
+        fs::write(
+            dir_for_run.join("second_form.lfm"),
+            "format = 1\n\n[window]\nname = \"second_form\"\n",
+        )
+        .expect("layout writes");
+        fs::write(dir_for_run.join("second_form.rhai"), "fn form_load() {}").expect("code writes");
+        app.update(Msg::WatchTick, ui);
+        assert!(
+            app.banner_text().is_none(),
+            "creating the files reloads and clears the banner"
+        );
+    });
+    let _ = fs::remove_dir_all(&dir);
+}

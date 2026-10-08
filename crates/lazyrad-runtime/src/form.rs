@@ -711,6 +711,12 @@ impl FormApp {
     /// pending callbacks are invalidated; then the new `form_load` and, when
     /// the script defines it, `form_reload(old_state)` run.
     ///
+    /// Only a project that does not check, or a form that does not build, keeps
+    /// the old form. Once the new form is built the reload is committed: a
+    /// runtime error in the new `form_load` is shown in the banner, the new
+    /// form stays, and `form_reload(old_state)` still runs so the old
+    /// `form.state` reaches the new script.
+    ///
     /// A form the project no longer declares closes a secondary window and
     /// leaves the startup form untouched. Returns whether the form was rebuilt.
     pub fn reload_root(&mut self, ui: &mut Ui<Msg>) -> bool {
@@ -747,9 +753,12 @@ impl FormApp {
         // The window's close handler must run the new form's `form_close`, not
         // the dropped old instance's (checklist 1).
         install_close_handler(&new_root, ui);
-        if let Err(error) = new_root.load() {
-            self.show_banner(ui, &[error.to_string()]);
-        } else if let Err(error) = new_root.reload(old_state) {
+        // A failing `form_load` is reported but does not undo the reload, so
+        // `form_reload` still receives the old state either way. If both fail,
+        // the load error (the first problem) is the one the banner shows.
+        let load_result = new_root.load();
+        let reload_result = new_root.reload(old_state);
+        if let Some(error) = load_result.err().or(reload_result.err()) {
             self.show_banner(ui, &[error.to_string()]);
         }
         self.poller = Poller::new(ui, &self.form);

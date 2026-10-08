@@ -24,6 +24,11 @@
 //! registered afresh. If the new script defines `fn form_reload(old_state)`, the
 //! old form's [`form.state`](crate::FormRuntime) is passed to it after
 //! `form_load`; a script that does not opt in starts with fresh state.
+//!
+//! A project that does not check keeps the running forms, but a reload that
+//! checks and builds is committed: a runtime error in the new `form_load` is
+//! reported in the banner, the new form stays, and `form_reload(old_state)`
+//! still runs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +36,7 @@ use std::rc::Rc;
 use std::time::SystemTime;
 
 use crate::check::check_project;
-use crate::form::{FormRuntime, RuntimeError};
+use crate::form::{FormRuntime, RuntimeError, open_project};
 
 /// How often the watch timer polls the project's files, in milliseconds.
 pub const WATCH_INTERVAL_MS: u32 = 500;
@@ -117,6 +122,36 @@ impl Watcher {
             .collect();
     }
 
+    /// Re-derives the watched files from the `.lrp` on disk, after a reload
+    /// failed.
+    ///
+    /// The edited project may reference files the last good one did not (a new
+    /// item whose files are not created yet). Watching them lets creating the
+    /// file trigger the next attempt, instead of leaving the failure banner up
+    /// until some other file changes. A file already watched keeps its stamp,
+    /// so a file that did not change since the failed check does not retrigger;
+    /// a newly referenced file is stamped as it is now (`None` when missing).
+    /// A `.lrp` that does not parse leaves the set as it was: the `.lrp` itself
+    /// is always watched, so fixing it triggers the next attempt.
+    pub(crate) fn refresh_from_disk(&mut self) {
+        let Ok((dir, project)) = open_project(&self.path) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = vec![dir.join(project.file_name())];
+        paths.extend(project.referenced_files().map(|file| dir.join(file)));
+        let known = std::mem::take(&mut self.files);
+        self.files = paths
+            .into_iter()
+            .map(|path| {
+                let stamp = match known.iter().find(|file| file.path == path) {
+                    Some(file) => file.stamp,
+                    None => Stamp::read(&path),
+                };
+                WatchedFile { path, stamp }
+            })
+            .collect();
+    }
+
     /// The project path to check and reload from.
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -178,7 +213,14 @@ impl FormRuntime {
                 }
                 ReloadOutcome::Reloaded
             }
-            Err(diagnostics) => ReloadOutcome::Failed(diagnostics),
+            Err(diagnostics) => {
+                // Watch the files the edited `.lrp` references, so creating a
+                // missing one triggers the next attempt.
+                if let Some(watcher) = self.watch.borrow_mut().as_mut() {
+                    watcher.refresh_from_disk();
+                }
+                ReloadOutcome::Failed(diagnostics)
+            }
         }
     }
 }
@@ -346,6 +388,46 @@ mod tests {
             runtime.check_for_changes(),
             ReloadOutcome::Unchanged,
             "a file the project no longer references is not watched"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_created_after_a_failed_reload_is_watched_and_reloads() {
+        let dir = scratch("late-file");
+        write_project(&dir, "fn form_load() {}");
+        let runtime = FormRuntime::load(&dir).expect("the project loads");
+        runtime.enable_watch(&dir);
+
+        // A new form item, before its files exist: the reload fails.
+        let mut lrp = fs::read_to_string(dir.join("check.lrp")).expect("project reads");
+        lrp.push_str(
+            "\n[[items]]\nkind = \"form\"\nname = \"second_form\"\n\
+             layout = \"second_form.lfm\"\ncode = \"second_form.rhai\"\n",
+        );
+        fs::write(dir.join("check.lrp"), lrp).expect("project writes");
+        assert!(
+            matches!(runtime.check_for_changes(), ReloadOutcome::Failed(_)),
+            "the missing files fail the reload"
+        );
+        assert_eq!(
+            runtime.check_for_changes(),
+            ReloadOutcome::Unchanged,
+            "nothing changed since the failed check"
+        );
+
+        // Creating the files is what the next check must notice.
+        fs::write(
+            dir.join("second_form.lfm"),
+            "format = 1\n\n[window]\nname = \"second_form\"\n",
+        )
+        .expect("layout writes");
+        fs::write(dir.join("second_form.rhai"), "fn form_load() {}").expect("code writes");
+        assert_eq!(runtime.check_for_changes(), ReloadOutcome::Reloaded);
+        assert!(
+            runtime.form("second_form").is_some(),
+            "the new form is live"
         );
 
         let _ = fs::remove_dir_all(&dir);
