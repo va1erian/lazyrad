@@ -15,7 +15,8 @@
 //!   placed in an `absolute()` layout by their design rectangles and anchors,
 //!   mapping events through a host-supplied [`Binder`];
 //! * **methods** ([`MethodSpec`], [`LiveForm::call`]) a script calls on a
-//!   widget, such as the [`canvas`] control's drawing calls.
+//!   widget, such as the [`canvas`] control's drawing calls or the
+//!   [`picture`] box's zoom and rotation.
 //!
 //! # Upstream intent
 //!
@@ -55,6 +56,7 @@
 pub mod build;
 pub mod canvas;
 pub mod doc;
+pub mod picture;
 pub mod schema;
 pub mod validate;
 pub mod value;

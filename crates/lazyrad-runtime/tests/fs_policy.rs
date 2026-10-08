@@ -262,6 +262,82 @@ fn an_allowed_directory_covers_its_contents_but_only_for_its_access() {
 }
 
 #[test]
+fn a_children_grant_covers_the_listing_and_its_files_only() {
+    let root = Scratch::new("children-root");
+    let outside = Scratch::new("children-picked");
+    let dir = outside.create_dir("pictures");
+    let picture = outside.write("pictures/a.png", b"x");
+    let neighbour = outside.write("pictures/b.png", b"y");
+    outside.create_dir("pictures/private");
+    let nested = outside.write("pictures/private/secret.png", b"z");
+    let parent_file = outside.write("elsewhere.png", b"w");
+    let policy = FsPolicy::Sandboxed(
+        Sandbox::new(root.path.clone()).allow_children(dir.clone(), Access::Read),
+    );
+
+    assert_eq!(policy.resolve(text(&dir), Access::Read), Ok(canon(&dir)));
+    assert_eq!(
+        policy.resolve(text(&picture), Access::Read),
+        Ok(canon(&picture))
+    );
+    assert_eq!(
+        policy.resolve(text(&neighbour), Access::Read),
+        Ok(canon(&neighbour))
+    );
+    for denied in [dir.join("private"), nested, parent_file] {
+        assert!(
+            matches!(
+                policy.resolve(text(&denied), Access::Read),
+                Err(FsError::Denied { .. })
+            ),
+            "{} is outside a children grant",
+            denied.display()
+        );
+    }
+    assert!(matches!(
+        policy.resolve(text(&picture), Access::Write),
+        Err(FsError::Denied { .. })
+    ));
+}
+
+#[test]
+fn a_children_grant_on_the_filesystem_root_grants_nothing() {
+    let root = Scratch::new("children-fsroot");
+    let fs_root = canon(&root.path)
+        .ancestors()
+        .last()
+        .expect("a root")
+        .to_path_buf();
+    let policy = FsPolicy::Sandboxed(
+        Sandbox::new(root.path.clone()).allow_children(fs_root.clone(), Access::Read),
+    );
+    assert!(matches!(
+        policy.resolve(text(&fs_root), Access::Read),
+        Err(FsError::Denied { .. })
+    ));
+}
+
+#[test]
+fn a_link_in_a_children_grant_pointing_out_is_denied() {
+    let root = Scratch::new("children-link-root");
+    let outside = Scratch::new("children-link-picked");
+    let dir = outside.create_dir("pictures");
+    let secrets = Scratch::new("children-link-secret");
+    let secret = secrets.write("secret.txt", b"x");
+    let link = dir.join("innocent.png");
+    if make_symlink(&secret, &link).is_err() {
+        return; // The platform cannot make links; nothing to test.
+    }
+    let policy = FsPolicy::Sandboxed(
+        Sandbox::new(root.path.clone()).allow_children(dir.clone(), Access::Read),
+    );
+    assert!(matches!(
+        policy.resolve(text(&link), Access::Read),
+        Err(FsError::Denied { .. })
+    ));
+}
+
+#[test]
 fn a_file_grant_does_not_cover_a_sibling() {
     let root = Scratch::new("allow-sibling-root");
     let outside = Scratch::new("allow-sibling-picked");

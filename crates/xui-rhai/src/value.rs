@@ -32,6 +32,7 @@ pub fn to_dynamic(value: &Value) -> Dynamic {
                 .map(|item| Dynamic::from(item.clone()))
                 .collect::<Array>(),
         ),
+        Value::Bytes(bytes) => Dynamic::from_blob(bytes.to_vec()),
         // `Value` is `#[non_exhaustive]`; an unknown future variant is exposed
         // as unit rather than failing the read.
         _ => Dynamic::UNIT,
@@ -99,6 +100,10 @@ pub fn to_value(dynamic: Dynamic, ty: &ValueType) -> Result<Value, String> {
             }
             Ok(Value::List(out))
         }
+        ValueType::Bytes => dynamic
+            .try_cast::<rhai::Blob>()
+            .map(|blob| Value::Bytes(blob.into()))
+            .ok_or_else(|| mismatch("a blob (bytes)", found)),
         // `ValueType` is `#[non_exhaustive]`: refuse a type this build cannot
         // decode rather than guessing.
         _ => Err(format!("unsupported property type `{}`", ty.type_name())),
@@ -233,6 +238,9 @@ mod tests {
 
     #[test]
     fn lists_and_colours_convert() {
+        let bytes = Value::Bytes(vec![1, 2, 3].into());
+        assert_eq!(to_value(to_dynamic(&bytes), &ValueType::Bytes), Ok(bytes));
+        assert!(to_value(Dynamic::from(1_i64), &ValueType::Bytes).is_err());
         let list = Value::List(vec!["a".to_owned(), "b".to_owned()]);
         assert_eq!(to_value(to_dynamic(&list), &ValueType::List), Ok(list));
 

@@ -37,6 +37,16 @@ struct Waiting {
     owner: u64,
     /// The script function to call with the answer.
     callback: FnPtr,
+    /// Whether the picked file's folder is granted along with the file.
+    folder: bool,
+}
+
+/// One collected answer: the callback, the picked path (`None` when
+/// cancelled) and whether the folder is granted too.
+pub(crate) struct Answer {
+    pub(crate) callback: FnPtr,
+    pub(crate) picked: Option<PathBuf>,
+    pub(crate) folder: bool,
 }
 
 /// Every open-file request of one runtime, shared by its windows.
@@ -70,12 +80,23 @@ impl FileDialogs {
     ///
     /// `start` may answer before it returns; the answer is then collected by the
     /// next [`FileDialogs::take_replies`].
-    pub(crate) fn request(&self, owner: u64, callback: FnPtr, start: impl FnOnce(FileDone)) {
+    pub(crate) fn request(
+        &self,
+        owner: u64,
+        callback: FnPtr,
+        folder: bool,
+        start: impl FnOnce(FileDone),
+    ) {
         let id = self.next_request.get();
         self.next_request.set(id + 1);
-        self.waiting
-            .borrow_mut()
-            .insert(id, Waiting { owner, callback });
+        self.waiting.borrow_mut().insert(
+            id,
+            Waiting {
+                owner,
+                callback,
+                folder,
+            },
+        );
         let replies = Arc::clone(&self.replies);
         start(Box::new(move |picked| {
             replies
@@ -98,7 +119,7 @@ impl FileDialogs {
     ///
     /// Another window's answers stay for it; an answer to a cancelled request
     /// is discarded.
-    pub(crate) fn take_replies(&self, owner: u64) -> Vec<(FnPtr, Option<PathBuf>)> {
+    pub(crate) fn take_replies(&self, owner: u64) -> Vec<Answer> {
         let mut replies = self
             .replies
             .lock()
@@ -113,7 +134,11 @@ impl FileDialogs {
             None => false,
             Some(request) if request.owner == owner => {
                 if let Some(request) = waiting.remove(id) {
-                    ready.push((request.callback, picked.clone()));
+                    ready.push(Answer {
+                        callback: request.callback,
+                        picked: picked.clone(),
+                        folder: request.folder,
+                    });
                 }
                 false
             }
@@ -144,7 +169,7 @@ mod tests {
     /// Starts a request that keeps its `done` for the test to release.
     fn held(dialogs: &FileDialogs, owner: u64, name: &str, slot: &Rc<RefCell<Option<FileDone>>>) {
         let slot = Rc::clone(slot);
-        dialogs.request(owner, callback(name), move |done| {
+        dialogs.request(owner, callback(name), name == "folder", move |done| {
             *slot.borrow_mut() = Some(done);
         });
     }
@@ -162,9 +187,10 @@ mod tests {
         done(Some(PathBuf::from("song.mod")));
         let ready = dialogs.take_replies(owner);
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].0.fn_name(), "picked");
+        assert_eq!(ready[0].callback.fn_name(), "picked");
+        assert!(!ready[0].folder);
         assert_eq!(
-            ready[0].1.as_deref(),
+            ready[0].picked.as_deref(),
             Some(std::path::Path::new("song.mod"))
         );
         assert!(!dialogs.has_waiting(owner));
@@ -183,7 +209,7 @@ mod tests {
             .expect("the worker finishes");
         let ready = dialogs.take_replies(owner);
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].1, None, "a cancellation");
+        assert_eq!(ready[0].picked, None, "a cancellation");
     }
 
     #[test]
@@ -225,7 +251,19 @@ mod tests {
     fn a_dialog_that_answers_immediately_is_collected_at_once() {
         let dialogs = FileDialogs::new();
         let owner = dialogs.new_owner();
-        dialogs.request(owner, callback("picked"), |done| done(None));
+        dialogs.request(owner, callback("picked"), false, |done| done(None));
         assert_eq!(dialogs.take_replies(owner).len(), 1);
+    }
+
+    #[test]
+    fn the_folder_option_travels_with_its_answer() {
+        let dialogs = FileDialogs::new();
+        let owner = dialogs.new_owner();
+        let slot = Rc::new(RefCell::new(None));
+        held(&dialogs, owner, "folder", &slot);
+        let done = slot.borrow_mut().take().expect("started");
+        done(Some(PathBuf::from("/pictures/a.png")));
+        let ready = dialogs.take_replies(owner);
+        assert!(ready[0].folder, "the option is kept per request");
     }
 }

@@ -29,6 +29,8 @@ pub mod files;
 pub mod form;
 pub mod fs_policy;
 mod lint;
+#[cfg(test)]
+mod picture_tests;
 pub mod platform;
 mod reload;
 pub mod shell;

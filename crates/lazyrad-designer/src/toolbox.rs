@@ -35,7 +35,7 @@ use xui_core::{Lucide, Theme};
 use crate::local_paint::paint_local;
 
 /// The Iteration 1 control kinds the toolbox offers, by xui kind name.
-pub const CONTROL_KINDS: [&str; 10] = [
+pub const CONTROL_KINDS: [&str; 11] = [
     "Button",
     "Edit",
     "Label",
@@ -45,6 +45,7 @@ pub const CONTROL_KINDS: [&str; 10] = [
     "ListView",
     "ComboBox",
     "Canvas",
+    "PictureBox",
     "Timer",
 ];
 
@@ -118,6 +119,7 @@ impl Tool {
                 "ListView" => Lucide::List,
                 "ComboBox" => Lucide::ChevronsUpDown,
                 "Canvas" => Lucide::Image,
+                "PictureBox" => Lucide::Eye,
                 "Timer" => Lucide::Repeat,
                 _ => Lucide::Square,
             },
@@ -468,6 +470,7 @@ mod tests {
             ("ListView", Lucide::List),
             ("ComboBox", Lucide::ChevronsUpDown),
             ("Canvas", Lucide::Image),
+            ("PictureBox", Lucide::Eye),
             ("Timer", Lucide::Repeat),
         ];
         for (kind, icon) in expected {

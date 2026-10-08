@@ -11,8 +11,11 @@
 //! * `msg_box(text [, title [, buttons, callback]])`: an in-window message box;
 //! * `open_file_dialog(title, filter, callback)`: the platform's open-file
 //!   dialog, asynchronous like `msg_box`;
+//!   `open_file_dialog(title, filter, callback, "folder")` also grants the
+//!   picked file's folder, for a viewer that pages through its neighbours;
 //! * `file_read_bytes(path)`, `file_write_bytes(path, blob)` (in [`fs`]);
-//! * `app.title`, `app.path`, `app.quit()`;
+//! * `app.title`, `app.path`, `app.documents` (the files the program was
+//!   started to open), `app.quit()`;
 //! * `now()`, `today()`;
 //! * `random()`, `random_range(start, end)`, `seed_random(seed)`;
 //! * `array.join(separator)`;
@@ -63,6 +66,8 @@ pub struct StdlibContext {
     pub app_title: String,
     /// The value `app.path` reports.
     pub app_path: String,
+    /// The files the program was started to open (`app.documents`).
+    pub documents: Vec<String>,
     /// Which paths the `file_*` and `dir_*` functions may touch.
     pub fs: Rc<FsPolicy>,
     /// The project's own files, read before the filesystem.
@@ -78,6 +83,7 @@ impl StdlibContext {
             pending: Rc::new(RefCell::new(Vec::new())),
             app_title: "LazyRAD".to_owned(),
             app_path: String::new(),
+            documents: Vec::new(),
             fs: Rc::new(FsPolicy::Unrestricted),
             files: Rc::new(NoProjectFiles),
         }
@@ -464,6 +470,7 @@ fn format_date(value: OffsetDateTime) -> String {
 pub struct App {
     title: String,
     path: String,
+    documents: Vec<String>,
     pending: Pending,
 }
 
@@ -479,6 +486,7 @@ fn app_object(context: &StdlibContext) -> App {
     App {
         title: context.app_title.clone(),
         path: context.app_path.clone(),
+        documents: context.documents.clone(),
         pending: Rc::clone(&context.pending),
     }
 }
@@ -488,6 +496,9 @@ fn register_app(engine: &mut Engine) {
     engine.register_type_with_name::<App>("App");
     engine.register_get("title", |app: &mut App| app.title.clone());
     engine.register_get("path", |app: &mut App| app.path.clone());
+    engine.register_get("documents", |app: &mut App| -> Array {
+        app.documents.iter().cloned().map(Dynamic::from).collect()
+    });
     engine.register_fn("quit", |app: &mut App| app.quit());
 }
 
@@ -588,7 +599,47 @@ fn register_open_file_dialog(engine: &mut Engine, context: &StdlibContext) {
                 title: title.to_string(),
                 filter: filter.to_string(),
                 callback,
+                folder: false,
             });
+        }
+    );
+
+    let pending = Rc::clone(&context.pending);
+    let form = context.form.clone();
+    documented_fn!(
+        engine,
+        "open_file_dialog",
+        [
+            "title: &str",
+            "filter: &str",
+            "callback: Fn",
+            "option: &str"
+        ],
+        [
+            "/// Like `open_file_dialog(title, filter, callback)`, with an option.",
+            "///",
+            "/// `\"folder\"` also grants read access to the picked file's folder (its",
+            "/// listing and the files directly in it, not subfolders), so a viewer",
+            "/// can list and open the file's neighbours (`dir_list`)."
+        ],
+        move |title: ImmutableString,
+              filter: ImmutableString,
+              callback: FnPtr,
+              option: ImmutableString|
+              -> Result<(), Box<EvalAltResult>> {
+            if option != "folder" {
+                return Err(script_error(format!(
+                    "open_file_dialog: unknown option `{option}` (expected \"folder\")"
+                )));
+            }
+            pending.borrow_mut().push(Msg::OpenFileDialog {
+                form: form.clone(),
+                title: title.to_string(),
+                filter: filter.to_string(),
+                callback,
+                folder: true,
+            });
+            Ok(())
         }
     );
 }
@@ -717,6 +768,52 @@ mod tests {
             ));
         }
         assert!(engine.run(r#"msg_box("?", "t", "maybe", |a| a);"#).is_err());
+    }
+
+    #[test]
+    fn open_file_dialog_queues_the_folder_option() {
+        let context = StdlibContext::headless("main_form");
+        let engine = engine_with(&context);
+        engine
+            .run(r#"open_file_dialog("Open", "Pictures|*.png", |p| p, "folder");"#)
+            .expect("queues");
+        engine
+            .run(r#"open_file_dialog("Open", "Pictures|*.png", |p| p);"#)
+            .expect("queues");
+        let queued = context.pending.borrow();
+        assert!(matches!(
+            &queued[0],
+            Msg::OpenFileDialog { folder: true, .. }
+        ));
+        assert!(matches!(
+            &queued[1],
+            Msg::OpenFileDialog { folder: false, .. }
+        ));
+        drop(queued);
+        assert!(
+            engine
+                .run(r#"open_file_dialog("Open", "", |p| p, "everything");"#)
+                .is_err(),
+            "an unknown option is an error"
+        );
+    }
+
+    #[test]
+    fn app_reports_its_documents() {
+        let context = StdlibContext {
+            documents: vec!["/home/user/a.png".to_owned()],
+            ..StdlibContext::headless("main_form")
+        };
+        let mut engine = engine_with(&context);
+        let app = app_object(&context);
+        engine.register_fn("the_app", move || app.clone());
+        let documents: Array = engine.eval("the_app().documents").expect("documents");
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].clone().cast::<String>(), "/home/user/a.png");
+        let empty = app_object(&StdlibContext::headless("main_form"));
+        engine.register_fn("no_docs", move || empty.clone());
+        let none: Array = engine.eval("no_docs().documents").expect("documents");
+        assert!(none.is_empty());
     }
 
     #[test]

@@ -183,6 +183,40 @@ fn canvas1_key_down(key) {
          of parameters (a fn clear(color) of your own): Rhai would call yours for \
          canvas1.clear(color) too.",
     ),
+    Block::Heading("Pictures: the PictureBox"),
+    Block::Para(
+        "A PictureBox shows a PNG, JPEG, BMP or GIF picture. Read the file's bytes with \
+         file_read_bytes and hand them to load; a file that is not a picture is an error \
+         you can catch. With fit on (the default) a large picture shrinks to the box; \
+         zoom_in, zoom_out, actual_size and best_fit change that, rotate_cw and \
+         rotate_ccw turn it, and a zoomed picture can be dragged. to_png gives the \
+         picture as shown, ready for file_write_bytes. Pass \"folder\" to \
+         open_file_dialog to be allowed to read the picked file's neighbours too.",
+    ),
+    Block::Code(
+        "fn open_button_click() {
+    open_file_dialog(\"Open a picture\", \"Pictures|*.png,*.jpg,*.bmp,*.gif\", |path| {
+        if path == () { return; }
+        try {
+            picture1.load(file_read_bytes(path));
+            label1.text = `${picture1.image_width} x ${picture1.image_height}`;
+        } catch (error) {
+            msg_box(`${error}`);
+        }
+    }, \"folder\");
+}
+
+fn picture1_wheel(delta, ctrl) {        // the wheel; ctrl tells Ctrl+wheel
+    if ctrl {
+        if delta > 0 { picture1.zoom_in(); } else { picture1.zoom_out(); }
+    }
+    label1.text = `${picture1.zoom}%`;
+}
+
+fn picture1_key_down(key) {
+    if key == \"r\" { picture1.rotate_cw(); }
+}",
+    ),
     Block::Heading("Modules"),
     Block::Para(
         "Project > Add Module adds a plain script file. Its functions can be called \
@@ -274,6 +308,9 @@ pub const CONTROL_PROPERTIES: &[(&str, &str)] = &[
     ("Edit", "tab_index"),
     ("Canvas", "fps"),
     ("Canvas", "width"),
+    ("PictureBox", "zoom"),
+    ("PictureBox", "image_width"),
+    ("PictureBox", "image_height"),
 ];
 
 /// The `(widget kind, control name, event)` triples whose handler names the
@@ -290,6 +327,8 @@ pub const CONTROL_EVENTS: &[(&str, &str, &str)] = &[
     ("Canvas", "canvas1", "MouseDown"),
     ("Canvas", "canvas1", "MouseUp"),
     ("Canvas", "canvas1", "MouseMove"),
+    ("PictureBox", "picture1", "Wheel"),
+    ("PictureBox", "picture1", "KeyDown"),
 ];
 
 /// The tutorial's code samples, in order.

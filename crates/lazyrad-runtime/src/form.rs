@@ -535,6 +535,11 @@ impl FormInstance {
             pending: Rc::clone(&runtime.pending),
             app_title: runtime.project().name.clone(),
             app_path: runtime.path().display().to_string(),
+            documents: platform::current()
+                .documents()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
             fs: Rc::clone(&runtime.fs),
             files: Rc::clone(&runtime.files),
         };
@@ -979,12 +984,12 @@ impl FormApp {
     /// The dialog does not block the window: the platform shows it on a worker
     /// ([`platform::Dialogs::open_file_async`]) and [`FormApp::deliver_file_dialogs`]
     /// collects the answer, from the window's poll timer while the dialog is up.
-    fn open_file_dialog(&mut self, title: &str, filter: &str, callback: &FnPtr) {
+    fn open_file_dialog(&mut self, title: &str, filter: &str, callback: &FnPtr, folder: bool) {
         let filters = platform::parse_filters(filter);
         let title = title.to_owned();
         self.runtime
             .file_dialogs
-            .request(self.owner, callback.clone(), |done| {
+            .request(self.owner, callback.clone(), folder, |done| {
                 platform::current()
                     .dialogs()
                     .open_file_async(&title, &filters, done);
@@ -995,14 +1000,27 @@ impl FormApp {
     /// answered, with the picked path (or `()` when cancelled).
     ///
     /// A picked path is granted read access to the script's sandbox, limited to
-    /// that exact file, so a sandboxed app can read a file the user chose. The
-    /// grant happens here, on the window that still exists, never for an answer
-    /// that arrives after the window closed.
+    /// that exact file, so a sandboxed app can read a file the user chose; with
+    /// the `"folder"` option the file's folder is granted read access too (its
+    /// listing and the files directly in it, never its subfolders), so a
+    /// viewer can list and open the file's neighbours. The grant happens here,
+    /// on the window that still exists, never for an answer that arrives after
+    /// the window closed.
     fn deliver_file_dialogs(&mut self, ui: &mut Ui<Msg>, root: &Rc<FormInstance>) {
-        for (callback, picked) in self.runtime.file_dialogs.take_replies(self.owner) {
-            let result = match picked {
+        for answer in self.runtime.file_dialogs.take_replies(self.owner) {
+            let callback = answer.callback;
+            let result = match answer.picked {
                 Some(path) => {
                     self.runtime.fs.allow_runtime(path.clone(), Access::Read);
+                    // The folder's listing and the files directly in it, not
+                    // its subfolders (and nothing for a file in `/`).
+                    if answer.folder
+                        && let Some(folder) = path.parent().filter(|p| !p.as_os_str().is_empty())
+                    {
+                        self.runtime
+                            .fs
+                            .allow_children_runtime(folder.to_path_buf(), Access::Read);
+                    }
                     Dynamic::from(path.to_string_lossy().into_owned())
                 }
                 None => Dynamic::UNIT,
@@ -1165,9 +1183,10 @@ impl FormApp {
                 title,
                 filter,
                 callback,
+                folder,
                 ..
             } => {
-                self.open_file_dialog(&title, &filter, &callback);
+                self.open_file_dialog(&title, &filter, &callback, folder);
                 // A platform whose dialogs never block answers before it returns.
                 self.deliver_file_dialogs(ui, &root);
                 self.flush(ui);
