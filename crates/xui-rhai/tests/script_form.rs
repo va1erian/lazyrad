@@ -205,3 +205,78 @@ fn a_parse_error_is_located_before_the_form_is_built() {
     assert_eq!((error.file.as_str(), error.line), ("frmMain.rhai", 2));
     assert!(error.column > 0);
 }
+
+#[test]
+fn build_deferred_defers_form_load_and_reload_carries_state() {
+    /// The three label values the test reads at each reload step.
+    #[derive(Default)]
+    struct Snapshots {
+        before: Option<Value>,
+        after_load: Option<Value>,
+        after_reload: Option<Value>,
+    }
+
+    let doc = greeting_doc();
+    let backend: Rc<dyn Backend> = Rc::new(OffscreenBackend::new());
+    let catalog = Catalog::xui();
+    let spec = PlatformSpec::new("xui-rhai reload test").size(Dip(320.0), Dip(200.0));
+    let observed: Rc<RefCell<Option<Snapshots>>> = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&observed);
+    run_app(backend, spec, move |ui| {
+        // The old form leaves state behind.
+        let old = ScriptForm::build(
+            ui,
+            &doc,
+            &catalog,
+            ScriptSource {
+                name: "frmMain",
+                code: "fn form_load() { form.state.count = 7; }",
+                file: "frmMain.rhai",
+            },
+            (),
+            |_| Ok(()),
+        )
+        .expect("the old form builds");
+        let old_state = old.state();
+
+        // The new form is built without running form_load.
+        let new = ScriptForm::build_deferred(
+            ui,
+            &doc,
+            &catalog,
+            ScriptSource {
+                name: "frmMain",
+                code: "fn form_load() { result_label.text = \"loaded\"; }\n\
+                       fn form_reload(old) { result_label.text = `state ${old.count}`; }",
+                file: "frmMain.rhai",
+            },
+            (),
+            |_| Ok(()),
+        )
+        .expect("the new form builds");
+        let mut snapshots = Snapshots {
+            before: new.live_form().get("result_label", "text"),
+            ..Snapshots::default()
+        };
+        new.load().expect("form_load runs");
+        snapshots.after_load = new.live_form().get("result_label", "text");
+        new.reload(old_state).expect("form_reload runs");
+        snapshots.after_reload = new.live_form().get("result_label", "text");
+        *slot.borrow_mut() = Some(snapshots);
+        TestApp
+    })
+    .expect("run_app succeeds");
+
+    let snapshots = observed.borrow_mut().take().expect("captured");
+    assert_eq!(
+        snapshots.before,
+        Some(Value::Text("before".to_owned())),
+        "build_deferred must not run form_load"
+    );
+    assert_eq!(snapshots.after_load, Some(Value::Text("loaded".to_owned())));
+    assert_eq!(
+        snapshots.after_reload,
+        Some(Value::Text("state 7".to_owned())),
+        "form_reload receives the old state"
+    );
+}

@@ -225,7 +225,7 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
     }
 
     for item in &project.items {
-        if let (Some(layout), Some(form)) = (item.layout(), runtime.forms.get(item.name())) {
+        if let (Some(layout), Some(form)) = (item.layout(), runtime.form(item.name())) {
             report.diagnostics.extend(
                 form.doc
                     .validate(runtime.catalog())
@@ -236,12 +236,13 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
     }
 
     let engine = check_engine();
-    let project_modules: BTreeSet<String> = runtime
+    let sources = runtime.sources.borrow();
+    let project_modules: BTreeSet<String> = sources
         .modules
         .iter()
         .map(|module| module.name.clone())
         .collect();
-    let controls: BTreeMap<String, BTreeSet<String>> = runtime
+    let controls: BTreeMap<String, BTreeSet<String>> = sources
         .forms
         .iter()
         .map(|(name, form)| {
@@ -256,7 +257,7 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
         })
         .collect();
 
-    let sources = runtime
+    let scripts = sources
         .forms
         .values()
         .map(|form| {
@@ -266,14 +267,14 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
                 form.name.as_str(),
             )
         })
-        .chain(runtime.modules.iter().map(|module| {
+        .chain(sources.modules.iter().map(|module| {
             (
                 module.file.as_str(),
                 module.source.as_str(),
                 module.name.as_str(),
             )
         }));
-    for (file, source, name) in sources {
+    for (file, source, name) in scripts {
         match engine.compile(source) {
             Ok(ast) => {
                 let supplied = supplied(controls_for(&controls, name));

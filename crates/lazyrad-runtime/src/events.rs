@@ -69,6 +69,22 @@ impl Poller {
         }
         errors
     }
+
+    /// Releases what the form registered with the event sources.
+    ///
+    /// A hot reload calls this (through [`Timers::reset`]) before rebuilding
+    /// the form (issue #91): `release` is keyed by form name, so it must run
+    /// before the new `form_load` re-subscribes, or it would drop the new
+    /// subscriptions too. Consuming `self` leaves nothing for [`Drop`] to
+    /// release again.
+    ///
+    /// [`Timers::reset`]: crate::timers::Timers::reset
+    pub(crate) fn release(mut self) {
+        for source in &self.sources {
+            source.release(&self.form);
+        }
+        self.sources.clear();
+    }
 }
 
 impl Drop for Poller {

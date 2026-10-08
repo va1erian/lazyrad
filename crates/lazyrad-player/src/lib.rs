@@ -68,9 +68,10 @@ pub type BackendFactory<'a> =
 /// Reads the command line and runs the program on the desktop `winit` backend,
 /// returning the process exit code.
 ///
-/// `lazyrad-player <project dir | .lrp>` runs a project; with no argument the
-/// player opens an empty window, which is the shell M0 used to prove the
-/// windowed path works.
+/// `lazyrad-player <project dir | .lrp>` runs a project; `--watch` before the
+/// path polls its files and reloads its forms as they change (issue #91); with
+/// no argument the player opens an empty window, which is the shell M0 used to
+/// prove the windowed path works.
 #[cfg(feature = "desktop")]
 pub fn run_cli() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -104,9 +105,10 @@ pub fn run_with_backend(args: &[String], make_backend: BackendFactory<'_>) -> i3
     match args {
         [] => run_empty_window(make_backend),
         [flag, path] if flag == "--check" => check_only(Path::new(path)),
-        [path] => run_project(Path::new(path), make_backend),
+        [flag, path] if flag == "--watch" => run_project(Path::new(path), true, make_backend),
+        [path] if !path.starts_with("--") => run_project(Path::new(path), false, make_backend),
         _ => {
-            eprintln!("usage: lazyrad-player <project dir | .lrp> [--check]");
+            eprintln!("usage: lazyrad-player [--watch | --check] <project dir | .lrp>");
             EXIT_COMPILE
         }
     }
@@ -183,7 +185,10 @@ fn run_empty_window(make_backend: BackendFactory<'_>) -> i32 {
 }
 
 /// Checks, loads and runs the project named by `path`.
-fn run_project(path: &Path, make_backend: BackendFactory<'_>) -> i32 {
+///
+/// With `watch` set (the `--watch` flag) the runtime polls the project's files
+/// and reloads its forms as they change (issue #91).
+fn run_project(path: &Path, watch: bool, make_backend: BackendFactory<'_>) -> i32 {
     let report = match check_project(path) {
         Ok(report) => report,
         Err(error) => {
@@ -212,6 +217,10 @@ fn run_project(path: &Path, make_backend: BackendFactory<'_>) -> i32 {
             return EXIT_COMPILE;
         }
     };
+
+    if watch {
+        runtime.enable_watch(path);
+    }
 
     match run_on(runtime, make_backend) {
         Ok(()) => EXIT_OK,

@@ -50,3 +50,24 @@ fn extra_arguments_are_a_usage_error() {
     });
     assert_eq!(code, EXIT_COMPILE);
 }
+
+#[test]
+fn watch_before_a_project_enables_hot_reload() {
+    let mut created = 0;
+    let code = run_with_backend(&["--watch".to_owned(), sample("hello")], &mut |runtime| {
+        let runtime = runtime.expect("a project run hands over its runtime");
+        assert!(runtime.watch_enabled(), "--watch enables hot reload");
+        created += 1;
+        Ok(Rc::new(OffscreenBackend::new()) as Rc<dyn Backend>)
+    });
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(created, 1);
+}
+
+#[test]
+fn watch_without_a_project_is_a_usage_error() {
+    let code = run_with_backend(&["--watch".to_owned()], &mut |_| {
+        panic!("no backend for a usage error")
+    });
+    assert_eq!(code, EXIT_COMPILE);
+}

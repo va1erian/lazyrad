@@ -114,6 +114,28 @@ impl Timers {
         }
     }
 
+    /// Stops every window timer, releases what the form registered with the
+    /// event sources, and starts over for `form` with a fresh mapper.
+    ///
+    /// A hot reload calls this before the rebuilt form's `form_load`, so no tick
+    /// of the old form's timers reaches the new script and the new form's
+    /// subscriptions are its own. Installing the mapper again also covers a
+    /// window whose first build failed, whose timers were idle.
+    pub(crate) fn reset(&mut self, ui: &Ui<Msg>, form: &str) {
+        let controls = std::mem::take(&mut self.controls);
+        let ids = self
+            .poll_timer
+            .take()
+            .into_iter()
+            .chain(self.dialog_timer.take())
+            .chain(controls.into_values().map(|running| running.id));
+        for id in ids {
+            ui.kill_timer(id);
+        }
+        let old = std::mem::replace(self, Timers::new(ui, form));
+        old.poller.release();
+    }
+
     /// Whether the window is polling the host's event sources for its form.
     pub(crate) fn is_polling(&self) -> bool {
         self.poll_timer.is_some()

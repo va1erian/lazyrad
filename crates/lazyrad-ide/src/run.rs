@@ -117,6 +117,23 @@ impl LaunchError {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayerLauncher;
 
+/// The command that launches `player` on `project_dir`, watching it so a save
+/// reloads the running program instead of needing a restart (issue #91).
+fn player_command(player: &Path, project_dir: &Path) -> Command {
+    let mut command = Command::new(player);
+    command
+        .arg("--watch")
+        .arg(project_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The IDE is a GUI-subsystem app, so Windows would give the console-subsystem
+    // player a console window of its own; its output is piped back to the IDE
+    // instead, so don't create one.
+    platform::current().prepare_player_command(&mut command);
+    command
+}
+
 impl Launcher for PlayerLauncher {
     fn launch(
         &self,
@@ -125,17 +142,7 @@ impl Launcher for PlayerLauncher {
         run: RunId,
         sink: EventSink,
     ) -> Result<Box<dyn ChildProcess>, LaunchError> {
-        let mut command = Command::new(player);
-        command
-            .arg(project_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // The IDE is a GUI-subsystem app, so Windows would give the
-        // console-subsystem player a console window of its own; its output is
-        // piped back to the IDE instead, so don't create one.
-        platform::current().prepare_player_command(&mut command);
-        let mut child = command
+        let mut child = player_command(player, project_dir)
             .spawn()
             .map_err(|source| LaunchError::new(player, source))?;
 
@@ -841,6 +848,20 @@ mod tests {
         assert!(
             killed.get(),
             "a dropped IDE does not leave a program running"
+        );
+    }
+
+    #[test]
+    fn the_player_is_launched_watching_the_project() {
+        let command = player_command(Path::new("player"), Path::new("proj"));
+        let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                std::ffi::OsStr::new("--watch"),
+                std::ffi::OsStr::new("proj")
+            ],
+            "the IDE runs the player with hot reload on"
         );
     }
 

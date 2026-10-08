@@ -135,8 +135,8 @@ impl TestApp {
             Ok(name) => name,
             Err(_) => runtime
                 .form_names()
+                .into_iter()
                 .next()
-                .map(str::to_owned)
                 .ok_or_else(|| RuntimeError::UnknownForm(String::new()))?,
         };
         run_session(&runtime, &startup, test)
@@ -323,7 +323,7 @@ fn run_session(
             }
             Err(error) => {
                 *failure_for_app.borrow_mut() = Some(error);
-                FormApp::failed(Rc::clone(&runtime_for_app))
+                FormApp::empty(Rc::clone(&runtime_for_app), startup_for_app.clone())
             }
         },
     )?;

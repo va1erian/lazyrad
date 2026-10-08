@@ -30,6 +30,7 @@ pub mod form;
 pub mod fs_policy;
 mod lint;
 pub mod platform;
+mod reload;
 pub mod shell;
 pub mod stdlib;
 #[cfg(any(test, feature = "testing"))]
@@ -46,6 +47,7 @@ pub use form::{
 #[cfg(feature = "desktop")]
 pub use form::{run_project, run_runtime};
 pub use fs_policy::{Access, FsError, FsPolicy, Sandbox};
+pub use reload::{ReloadOutcome, WATCH_INTERVAL_MS};
 pub use stdlib::StdlibContext;
 pub use xui_rhai::message::{MsgBoxButtons, Pending};
 pub use xui_rhai::{FormHost, ScriptError};
