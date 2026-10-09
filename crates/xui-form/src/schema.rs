@@ -701,7 +701,7 @@ fn builtin_specs() -> Vec<WidgetSpec> {
                     text_type(),
                     Value::Text(String::new()),
                     CATEGORY_APPEARANCE,
-                    "A Lucide outline name (\"chevron-left\", \"zoom-in\"), drawn before the caption; empty for none.",
+                    "A Lucide outline name (\"chevron-left\", \"search\"), drawn before the caption; empty for none.",
                 ),
             ],
             events: vec![event(
