@@ -17,6 +17,7 @@ use xui_core::{HasText, Properties, WidgetId};
 use crate::build::{BuildCx, Factories, Made, SetError, WidgetFactory};
 use crate::doc::Node;
 use crate::live::WidgetProps;
+use crate::lucide_names;
 use crate::schema::MAX_TIMER_INTERVAL_MS;
 use crate::value::Value;
 
@@ -100,16 +101,26 @@ impl<M: 'static> WidgetFactory<M> for ButtonFactory {
 
     fn create(&self, cx: &mut BuildCx<'_, M>, _node: &Node) -> Made<M> {
         let button = Handle::new();
+        let icon = cx.text("icon");
         let mut build = arrange::button(cx.text("text")).bind(&button);
+        if let Some(outline) = lucide_names::from_name(&icon) {
+            build = build.icon(outline);
+        }
         if let Some(handler) = cx.handler("Click") {
             build = build.then(move |button| button.on_click(move || handler(&[])));
         }
-        cx.made(build, &button.clone(), ButtonProps { button })
+        let props = ButtonProps {
+            button: button.clone(),
+            icon: RefCell::new(icon),
+        };
+        cx.made(build, &button.clone(), props)
     }
 }
 
 struct ButtonProps<M: 'static> {
     button: Handle<xui_core::Button<M>>,
+    /// The name as set, so `get` reads back what the form holds.
+    icon: RefCell<String>,
 }
 
 impl<M: 'static> WidgetProps<M> for ButtonProps<M> {
@@ -120,6 +131,7 @@ impl<M: 'static> WidgetProps<M> for ButtonProps<M> {
     fn get_own(&self, prop: &str) -> Option<Value> {
         match prop {
             "text" => Some(Value::Text(self.button.get().text())),
+            "icon" => Some(Value::Text(self.icon.borrow().clone())),
             _ => None,
         }
     }
@@ -130,7 +142,12 @@ impl<M: 'static> WidgetProps<M> for ButtonProps<M> {
                 self.button.get().set_text(text);
                 Ok(())
             }
-            ("text", _) => Err(SetError::TypeMismatch),
+            ("icon", Value::Text(name)) => {
+                self.button.get().set_icon(lucide_names::from_name(name));
+                *self.icon.borrow_mut() = name.clone();
+                Ok(())
+            }
+            ("text" | "icon", _) => Err(SetError::TypeMismatch),
             _ => Err(SetError::UnknownProperty),
         }
     }
