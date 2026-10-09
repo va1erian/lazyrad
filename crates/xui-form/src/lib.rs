@@ -62,6 +62,7 @@ pub mod validate;
 pub mod value;
 
 mod live;
+mod lucide_names;
 mod placement;
 mod xui_factories;
 

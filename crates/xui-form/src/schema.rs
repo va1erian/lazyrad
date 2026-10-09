@@ -688,13 +688,22 @@ fn builtin_specs() -> Vec<WidgetSpec> {
             )
         },
         WidgetSpec {
-            properties: vec![property(
-                "text",
-                text_type(),
-                Value::Text(String::new()),
-                CATEGORY_APPEARANCE,
-                "The button's caption.",
-            )],
+            properties: vec![
+                property(
+                    "text",
+                    text_type(),
+                    Value::Text(String::new()),
+                    CATEGORY_APPEARANCE,
+                    "The button's caption.",
+                ),
+                property(
+                    "icon",
+                    text_type(),
+                    Value::Text(String::new()),
+                    CATEGORY_APPEARANCE,
+                    "A Lucide outline name (\"chevron-left\", \"zoom-in\"), drawn before the caption; empty for none.",
+                ),
+            ],
             events: vec![event(
                 "Click",
                 Vec::new(),
