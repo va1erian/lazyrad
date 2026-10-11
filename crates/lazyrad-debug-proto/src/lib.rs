@@ -706,10 +706,7 @@ mod tests {
             panic!("a text line");
         };
         assert!(text.contains('\u{fffd}'));
-        assert!(matches!(
-            decode_command(text),
-            Err(DecodeError::NotJson(_))
-        ));
+        assert!(matches!(decode_command(text), Err(DecodeError::NotJson(_))));
     }
 
     #[test]
@@ -742,10 +739,7 @@ mod tests {
                 value: "v".repeat(100),
             })
             .collect();
-        let big = Event::Stopped(Stop {
-            locals,
-            ..stop()
-        });
+        let big = Event::Stopped(Stop { locals, ..stop() });
         let line = encode_event(&big);
         assert!(line.len() <= MAX_EVENT_BYTES, "{} bytes", line.len());
         let Ok(Event::Stopped(trimmed)) = decode_event(&line) else {

@@ -33,14 +33,16 @@
 //! override) and otherwise looks for `lazyrad-player[.exe]` next to the IDE
 //! executable.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use lazyrad_debug_proto::{DecodeError, Event, decode_event};
 use lazyrad_player::Report;
 use lazyrad_runtime::check_project;
 
@@ -59,6 +61,8 @@ pub enum RunEvent {
     Output(String),
     /// A JSON diagnostic the player wrote on stderr.
     Diagnostic(Report),
+    /// A debug-protocol event the player wrote on stdout (debug runs only).
+    Debug(Event),
     /// The process ended, with its exit code when the platform reports one.
     Exited(Option<i32>),
 }
@@ -66,6 +70,41 @@ pub enum RunEvent {
 /// Where a launcher delivers its child's events. The real launcher wraps the
 /// window's [`Proxy`](xui_core::app::Proxy); tests capture into a vector.
 pub type EventSink = Arc<dyn Fn(RunId, RunEvent) + Send + Sync + 'static>;
+
+/// How the player is started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchMode {
+    /// `--watch`: run the program with hot reload. The player's stdin is not
+    /// used.
+    Run,
+    /// `--debug`: run it under the debugger. The player's stdin carries
+    /// commands ([`ChildProcess::send_line`]) and its stdout carries protocol
+    /// events ([`RunEvent::Debug`]).
+    Debug,
+}
+
+/// Why a line could not be handed to the child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendError {
+    /// This launcher's children cannot receive input.
+    Unsupported,
+    /// There is no running child.
+    NotRunning,
+    /// The child is gone or closed its input.
+    Closed,
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            SendError::Unsupported => "this platform's launcher cannot send input to the program",
+            SendError::NotRunning => "no program is running",
+            SendError::Closed => "the program has closed its input",
+        })
+    }
+}
+
+impl std::error::Error for SendError {}
 
 /// A child process the run state can end and observe.
 pub trait ChildProcess {
@@ -78,11 +117,22 @@ pub trait ChildProcess {
     /// threaded [`PlayerLauncher`] needs nothing here. LazyOS cannot share a
     /// pipe descriptor with another thread, so its launcher polls instead.
     fn poll(&mut self) {}
+    /// Queues one line (the newline is added) for the child's stdin and
+    /// returns at once, without waiting for the child to read it.
+    ///
+    /// A launcher that cannot send input keeps this default, so a launcher
+    /// written before debugging existed still compiles; it also cannot start a
+    /// [`LaunchMode::Debug`] child. A partial write is the implementation's to
+    /// queue; `Err` means the line was not and will not be sent.
+    fn send_line(&mut self, _line: &str) -> Result<(), SendError> {
+        Err(SendError::Unsupported)
+    }
 }
 
 /// Spawns the player and streams its output back through an [`EventSink`].
 pub trait Launcher {
-    /// Launches `player` on `project_dir`, stamping every event with `run`.
+    /// Launches `player` on `project_dir` in [`LaunchMode::Run`], stamping every
+    /// event with `run`.
     fn launch(
         &self,
         player: &Path,
@@ -90,6 +140,31 @@ pub trait Launcher {
         run: RunId,
         sink: EventSink,
     ) -> Result<Box<dyn ChildProcess>, LaunchError>;
+
+    /// Launches `player` in `mode`.
+    ///
+    /// The default serves [`LaunchMode::Run`] through [`Launcher::launch`] and
+    /// refuses [`LaunchMode::Debug`], so a launcher that does not know about
+    /// debugging fails loudly instead of running without a debugger.
+    fn launch_with(
+        &self,
+        player: &Path,
+        project_dir: &Path,
+        run: RunId,
+        sink: EventSink,
+        mode: LaunchMode,
+    ) -> Result<Box<dyn ChildProcess>, LaunchError> {
+        match mode {
+            LaunchMode::Run => self.launch(player, project_dir, run, sink),
+            LaunchMode::Debug => Err(LaunchError::new(
+                player,
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "this platform's launcher cannot run a program under the debugger",
+                ),
+            )),
+        }
+    }
 }
 
 /// Why a child could not be started.
@@ -117,14 +192,23 @@ impl LaunchError {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayerLauncher;
 
-/// The command that launches `player` on `project_dir`, watching it so a save
-/// reloads the running program instead of needing a restart (issue #91).
-fn player_command(player: &Path, project_dir: &Path) -> Command {
+/// The command that launches `player` on `project_dir`.
+///
+/// [`LaunchMode::Run`] passes `--watch`, so a save reloads the running program
+/// instead of needing a restart (issue #91). [`LaunchMode::Debug`] passes
+/// `--debug` (which watches too) and pipes stdin for the debug commands.
+fn player_command(player: &Path, project_dir: &Path, mode: LaunchMode) -> Command {
     let mut command = Command::new(player);
     command
-        .arg("--watch")
+        .arg(match mode {
+            LaunchMode::Run => "--watch",
+            LaunchMode::Debug => "--debug",
+        })
         .arg(project_dir)
-        .stdin(Stdio::null())
+        .stdin(match mode {
+            LaunchMode::Run => Stdio::null(),
+            LaunchMode::Debug => Stdio::piped(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // The IDE is a GUI-subsystem app, so Windows would give the console-subsystem
@@ -142,12 +226,24 @@ impl Launcher for PlayerLauncher {
         run: RunId,
         sink: EventSink,
     ) -> Result<Box<dyn ChildProcess>, LaunchError> {
-        let mut child = player_command(player, project_dir)
+        self.launch_with(player, project_dir, run, sink, LaunchMode::Run)
+    }
+
+    fn launch_with(
+        &self,
+        player: &Path,
+        project_dir: &Path,
+        run: RunId,
+        sink: EventSink,
+        mode: LaunchMode,
+    ) -> Result<Box<dyn ChildProcess>, LaunchError> {
+        let mut child = player_command(player, project_dir, mode)
             .spawn()
             .map_err(|source| LaunchError::new(player, source))?;
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let stdin = child.stdin.take();
         let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
             let _ = child.kill();
             let _ = child.wait();
@@ -156,13 +252,23 @@ impl Launcher for PlayerLauncher {
                 std::io::Error::other("the player's output pipes are unavailable"),
             ));
         };
+        if mode == LaunchMode::Debug && stdin.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LaunchError::new(
+                player,
+                std::io::Error::other("the player's input pipe is unavailable"),
+            ));
+        }
+        let input = stdin.map(StdinWriter::start);
 
         let child = Arc::new(Mutex::new(child));
         let running = Arc::new(AtomicBool::new(true));
 
         let stdout_sink = Arc::clone(&sink);
+        let debugging = mode == LaunchMode::Debug;
         let stdout_reader = spawn_thread("lazyrad-player-stdout", move || {
-            read_stdout(stdout, run, stdout_sink);
+            read_stdout(stdout, run, stdout_sink, debugging);
         });
         let stderr_sink = Arc::clone(&sink);
         let stderr_reader = spawn_thread("lazyrad-player-stderr", move || {
@@ -198,7 +304,11 @@ impl Launcher for PlayerLauncher {
             return Err(LaunchError::new(player, error));
         }
 
-        Ok(Box::new(SpawnedChild { child, running }))
+        Ok(Box::new(SpawnedChild {
+            child,
+            running,
+            input,
+        }))
     }
 }
 
@@ -207,6 +317,8 @@ impl Launcher for PlayerLauncher {
 struct SpawnedChild {
     child: Arc<Mutex<Child>>,
     running: Arc<AtomicBool>,
+    /// The debug run's stdin; `None` for a plain run.
+    input: Option<StdinWriter>,
 }
 
 impl ChildProcess for SpawnedChild {
@@ -216,6 +328,59 @@ impl ChildProcess for SpawnedChild {
 
     fn is_running(&mut self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    fn send_line(&mut self, line: &str) -> Result<(), SendError> {
+        if !self.running.load(Ordering::SeqCst) {
+            return Err(SendError::Closed);
+        }
+        self.input
+            .as_ref()
+            .ok_or(SendError::Unsupported)?
+            .send(line)
+    }
+}
+
+/// Writes lines to the child's stdin from a thread, so the window never waits
+/// on a full pipe. Dropping it closes the pipe, which tells a debugging player
+/// that its IDE is gone.
+struct StdinWriter {
+    lines: Sender<String>,
+    broken: Arc<AtomicBool>,
+}
+
+impl StdinWriter {
+    fn start(mut stdin: ChildStdin) -> StdinWriter {
+        let (lines, queue) = mpsc::channel::<String>();
+        let broken = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&broken);
+        let spawned = spawn_thread("lazyrad-player-stdin", move || {
+            for line in queue {
+                let written = stdin
+                    .write_all(line.as_bytes())
+                    .and_then(|()| stdin.write_all(b"\n"))
+                    .and_then(|()| stdin.flush());
+                if written.is_err() {
+                    // The child closed its end (it exited or died).
+                    flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        });
+        if spawned.is_err() {
+            broken.store(true, Ordering::SeqCst);
+        }
+        StdinWriter { lines, broken }
+    }
+
+    fn send(&self, line: &str) -> Result<(), SendError> {
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(SendError::Closed);
+        }
+        self.lines.send(line.to_owned()).map_err(|_| {
+            self.broken.store(true, Ordering::SeqCst);
+            SendError::Closed
+        })
     }
 }
 
@@ -235,10 +400,31 @@ fn kill(child: &Arc<Mutex<Child>>) -> std::io::Result<()> {
     guard.wait().map(|_| ())
 }
 
-/// Reads `pipe` line by line, reporting each as [`RunEvent::Output`].
-fn read_stdout(pipe: ChildStdout, run: RunId, sink: EventSink) {
+/// Reads `pipe` line by line, reporting each through [`stdout_event`].
+fn read_stdout(pipe: ChildStdout, run: RunId, sink: EventSink, debugging: bool) {
     for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-        sink(run, RunEvent::Output(line));
+        sink(run, stdout_event(line, debugging));
+    }
+}
+
+/// How a line the player wrote on stdout is reported.
+///
+/// In a debug run a line that is a protocol event becomes
+/// [`RunEvent::Debug`]; a line that looks like one but speaks another protocol
+/// version is reported as a notice, so skew is visible; everything else is the
+/// program's own output.
+pub fn stdout_event(line: String, debugging: bool) -> RunEvent {
+    if !debugging || !line.starts_with('{') {
+        return RunEvent::Output(line);
+    }
+    match decode_event(&line) {
+        Ok(event) => RunEvent::Debug(event),
+        Err(DecodeError::Version { found: Some(found) }) => RunEvent::Output(format!(
+            "[debugger] the player speaks debug protocol {found}, this IDE speaks {}",
+            lazyrad_debug_proto::PROTOCOL_VERSION
+        )),
+        // No version at all is a program printing its own JSON.
+        Err(_) => RunEvent::Output(line),
     }
 }
 
@@ -401,11 +587,31 @@ impl RunState {
         project_dir: &Path,
         sink: EventSink,
     ) -> Result<RunId, LaunchError> {
+        self.start_with(launcher, player, project_dir, sink, LaunchMode::Run)
+    }
+
+    /// [`RunState::start`] in an explicit [`LaunchMode`].
+    pub fn start_with(
+        &mut self,
+        launcher: &dyn Launcher,
+        player: &Path,
+        project_dir: &Path,
+        sink: EventSink,
+        mode: LaunchMode,
+    ) -> Result<RunId, LaunchError> {
         let id = self.next;
-        let child = launcher.launch(player, project_dir, id, sink)?;
+        let child = launcher.launch_with(player, project_dir, id, sink, mode)?;
         self.next += 1;
         self.active = Some(Active { id, child });
         Ok(id)
+    }
+
+    /// Sends one line to the running child's stdin without blocking.
+    pub fn send_line(&mut self, line: &str) -> Result<(), SendError> {
+        match self.active.as_mut() {
+            Some(active) => active.child.send_line(line),
+            None => Err(SendError::NotRunning),
+        }
     }
 
     /// Lets the running child do its polling work (see [`ChildProcess::poll`]).
@@ -853,7 +1059,7 @@ mod tests {
 
     #[test]
     fn the_player_is_launched_watching_the_project() {
-        let command = player_command(Path::new("player"), Path::new("proj"));
+        let command = player_command(Path::new("player"), Path::new("proj"), LaunchMode::Run);
         let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
         assert_eq!(
             args,
@@ -863,6 +1069,212 @@ mod tests {
             ],
             "the IDE runs the player with hot reload on"
         );
+    }
+
+    #[test]
+    fn a_debug_run_passes_debug_instead_of_watch() {
+        let command = player_command(Path::new("player"), Path::new("proj"), LaunchMode::Debug);
+        let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                std::ffi::OsStr::new("--debug"),
+                std::ffi::OsStr::new("proj")
+            ]
+        );
+    }
+
+    #[test]
+    fn stdout_lines_are_protocol_only_in_a_debug_run() {
+        let line = lazyrad_debug_proto::encode_event(&Event::Resumed);
+        assert_eq!(
+            stdout_event(line.clone(), true),
+            RunEvent::Debug(Event::Resumed)
+        );
+        assert_eq!(
+            stdout_event(line.clone(), false),
+            RunEvent::Output(line),
+            "a plain run never decodes"
+        );
+        // Program output, including JSON that is not the protocol.
+        for text in [
+            "hello",
+            r#"{"name":"Ada"}"#,
+            "{",
+            r#"{"v":1,"event":"nope"}"#,
+        ] {
+            assert_eq!(
+                stdout_event(text.to_owned(), true),
+                RunEvent::Output(text.to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn a_player_speaking_another_version_is_reported_not_misread() {
+        let skewed = r#"{"v":7,"event":"resumed"}"#.to_owned();
+        let RunEvent::Output(text) = stdout_event(skewed, true) else {
+            panic!("a notice");
+        };
+        assert!(
+            text.contains("protocol 7") && text.contains("[debugger]"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_launcher_without_debug_support_refuses_to_debug_and_cannot_send() {
+        let launcher = FakeLauncher::new();
+        let (sink, _) = collector();
+        let mut state = RunState::new();
+        let refused = state.start_with(
+            &launcher,
+            Path::new("player"),
+            Path::new("proj"),
+            sink.clone(),
+            LaunchMode::Debug,
+        );
+        assert!(refused.is_err(), "no silent run without a debugger");
+        assert!(!state.is_running());
+        assert!(launcher.calls.borrow().is_empty());
+
+        // A plain run still works, and its child cannot take input.
+        state
+            .start_with(
+                &launcher,
+                Path::new("player"),
+                Path::new("proj"),
+                sink,
+                LaunchMode::Run,
+            )
+            .expect("a plain run launches");
+        assert_eq!(state.send_line("{}"), Err(SendError::Unsupported));
+    }
+
+    #[test]
+    fn sending_with_nothing_running_is_an_error() {
+        let mut state = RunState::new();
+        assert_eq!(state.send_line("{}"), Err(SendError::NotRunning));
+    }
+
+    /// A child that records what it was sent.
+    struct Recording {
+        sent: Rc<RefCell<Vec<String>>>,
+        fail_after: usize,
+    }
+
+    impl ChildProcess for Recording {
+        fn kill(&mut self) {}
+        fn is_running(&mut self) -> bool {
+            true
+        }
+        fn send_line(&mut self, line: &str) -> Result<(), SendError> {
+            if self.sent.borrow().len() >= self.fail_after {
+                return Err(SendError::Closed);
+            }
+            self.sent.borrow_mut().push(line.to_owned());
+            Ok(())
+        }
+    }
+
+    struct RecordingLauncher {
+        sent: Rc<RefCell<Vec<String>>>,
+        fail_after: usize,
+    }
+
+    impl Launcher for RecordingLauncher {
+        fn launch(
+            &self,
+            _: &Path,
+            _: &Path,
+            _: RunId,
+            _: EventSink,
+        ) -> Result<Box<dyn ChildProcess>, LaunchError> {
+            Ok(Box::new(Recording {
+                sent: Rc::clone(&self.sent),
+                fail_after: self.fail_after,
+            }))
+        }
+
+        fn launch_with(
+            &self,
+            player: &Path,
+            project_dir: &Path,
+            run: RunId,
+            sink: EventSink,
+            _: LaunchMode,
+        ) -> Result<Box<dyn ChildProcess>, LaunchError> {
+            self.launch(player, project_dir, run, sink)
+        }
+    }
+
+    #[test]
+    fn lines_reach_the_active_child_and_a_closed_child_reports_it() {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let launcher = RecordingLauncher {
+            sent: Rc::clone(&sent),
+            fail_after: 2,
+        };
+        let (sink, _) = collector();
+        let mut state = RunState::new();
+        state
+            .start_with(
+                &launcher,
+                Path::new("p"),
+                Path::new("d"),
+                sink,
+                LaunchMode::Debug,
+            )
+            .unwrap();
+        assert_eq!(state.send_line("one"), Ok(()));
+        assert_eq!(state.send_line("two"), Ok(()));
+        assert_eq!(state.send_line("three"), Err(SendError::Closed));
+        assert_eq!(*sent.borrow(), ["one", "two"]);
+    }
+
+    /// A command that exits at once, so its stdin pipe is closed by the time
+    /// anything is written. (A test of the pipe itself: only the program to
+    /// run differs per platform.)
+    fn exits_immediately() -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "exit", "0"]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            command
+        }
+    }
+
+    #[test]
+    fn writing_to_a_dead_child_fails_instead_of_blocking_or_panicking() {
+        let mut child = exits_immediately()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a shell starts");
+        let stdin = child.stdin.take().expect("piped stdin");
+        let _ = child.wait();
+        let writer = StdinWriter::start(stdin);
+
+        // The first write may be accepted by the OS before the broken pipe is
+        // noticed; within a moment every send must report the closed pipe.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut failed = false;
+        while std::time::Instant::now() < deadline {
+            if writer.send("{\"v\":1,\"cmd\":\"continue\"}") == Err(SendError::Closed) {
+                failed = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(failed, "a write to a dead child must surface as Closed");
+        assert_eq!(writer.send("again"), Err(SendError::Closed), "and stays so");
     }
 
     #[test]

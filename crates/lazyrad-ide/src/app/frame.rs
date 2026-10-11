@@ -14,13 +14,13 @@ use std::rc::Rc;
 use lazyrad_designer::Toolbox;
 use xui_core::app::Ui;
 use xui_core::arrange::{
-    Entry, Handle, IntoEntry, Layout, LayoutExt, build, column, label, list, panel, row, split,
-    toolbar, tree_view,
+    Entry, Handle, IntoEntry, Layout, LayoutExt, build, button, column, edit, label, list, panel,
+    row, split, tabs, toolbar, tree_view,
 };
 use xui_core::backend::Result as UiResult;
 use xui_core::geometry::Rect;
 use xui_core::layout::Insets;
-use xui_core::widget::{Label, ListView, Panel, Split, Toolbar, TreeView};
+use xui_core::widget::{Edit, Label, ListView, Panel, Split, Tabs, Toolbar, TreeView};
 use xui_core::{Dip, dip};
 
 use super::{
@@ -32,6 +32,11 @@ use super::{
 const TITLE_PAD: Dip = dip(4.0);
 /// The height of the Output pane's log line.
 const OUTPUT_LINE: Dip = dip(24.0);
+/// The Immediate pane's input row height, the Evaluate button's width and the
+/// gap between them.
+const IMMEDIATE_ROW: Dip = dip(30.0);
+const IMMEDIATE_BUTTON: Dip = dip(88.0);
+const IMMEDIATE_GAP: Dip = dip(6.0);
 
 /// The frame's widgets the app keeps reaching after the layout is mounted.
 pub(super) struct Frame {
@@ -47,7 +52,19 @@ pub(super) struct Frame {
     pub(super) output: Rc<Label<Msg>>,
     pub(super) error_list: Rc<ListView<Msg>>,
     pub(super) status: Rc<Label<Msg>>,
+    /// The bottom area's tabs (Output, Locals, Call Stack, Immediate).
+    pub(super) bottom_tabs: Rc<Tabs<Msg>>,
+    pub(super) locals_list: Rc<ListView<Msg>>,
+    pub(super) stack_list: Rc<ListView<Msg>>,
+    pub(super) immediate_list: Rc<ListView<Msg>>,
+    pub(super) immediate_edit: Rc<Edit<Msg>>,
 }
+
+/// The bottom area's tab pages, in order. Selecting a page by index goes
+/// through these constants.
+pub(super) const TAB_OUTPUT: usize = 0;
+pub(super) const TAB_LOCALS: usize = 1;
+pub(super) const TAB_IMMEDIATE: usize = 3;
 
 /// The handles [`build`] fills as the layout is mounted.
 #[derive(Default)]
@@ -65,6 +82,11 @@ struct Handles {
     output: Handle<Label<Msg>>,
     error_list: Handle<ListView<Msg>>,
     status: Handle<Label<Msg>>,
+    bottom_tabs: Handle<Tabs<Msg>>,
+    locals_list: Handle<ListView<Msg>>,
+    stack_list: Handle<ListView<Msg>>,
+    immediate_list: Handle<ListView<Msg>>,
+    immediate_edit: Handle<Edit<Msg>>,
 }
 
 /// Mounts the frame as the window's content. The split positions are set
@@ -98,6 +120,11 @@ pub(super) fn mount(ui: &Ui<Msg>) -> UiResult<Frame> {
         output: h.output.get(),
         error_list: h.error_list.get(),
         status: h.status.get(),
+        bottom_tabs: h.bottom_tabs.get(),
+        locals_list: h.locals_list.get(),
+        stack_list: h.stack_list.get(),
+        immediate_list: h.immediate_list.get(),
+        immediate_edit: h.immediate_edit.get(),
     })
 }
 
@@ -148,16 +175,47 @@ fn outer(h: &Handles) -> Entry<Msg> {
         .on_moved(|position| Msg::PaneMoved(PaneSlot::Right, position.value()))
         .bind(&h.centre);
 
-    let output = filled(panel(
-        column().children((
-            label("Output").bind(&h.output).height(OUTPUT_LINE),
-            list()
-                .on_activate(Msg::ErrorActivated)
-                .bind(&h.error_list)
-                .fill(1),
-        )),
+    // The bottom area: the Output pane with its Error List, and the debugger's
+    // Locals, Call Stack and Immediate panes as tabs beside it.
+    let output = column().children((
+        label("Output").bind(&h.output).height(OUTPUT_LINE),
+        list()
+            .on_activate(Msg::ErrorActivated)
+            .bind(&h.error_list)
+            .fill(1),
     ));
-    let rest = split(filled(centre), output)
+    let locals = column().child(list().bind(&h.locals_list).fill(1));
+    let stack = column().child(
+        list()
+            .on_activate(Msg::StackActivated)
+            .bind(&h.stack_list)
+            .fill(1),
+    );
+    let immediate = column().children((
+        list().bind(&h.immediate_list).fill(1),
+        row()
+            .gap(IMMEDIATE_GAP)
+            .children((
+                edit()
+                    .placeholder("Expression to evaluate in the stopped frame")
+                    .on_change(Msg::ImmediateChanged)
+                    .bind(&h.immediate_edit)
+                    .fill(1),
+                button("Evaluate")
+                    .on_click(Msg::ImmediateEvaluate)
+                    .fixed(IMMEDIATE_BUTTON),
+            ))
+            .height(IMMEDIATE_ROW),
+    ));
+    let bottom = filled(
+        tabs()
+            .page("Output", output)
+            .page("Locals", locals)
+            .page("Call Stack", stack)
+            .page("Immediate", immediate)
+            .bind(&h.bottom_tabs),
+    );
+    let rest = split(filled(centre), bottom)
         .stacked()
         .min(dip(200.0), dip(40.0))
         .on_moved(|position| Msg::PaneMoved(PaneSlot::Output, position.value()))

@@ -34,6 +34,7 @@ native-dialogs = ["dep:rfd", "dep:pollster"]
 
 [dependencies]
 directories = { workspace = true, optional = true }
+lazyrad-debug-proto.workspace = true
 lazyrad-designer.workspace = true
 lazyrad-packager.workspace = true
 lazyrad-player.workspace = true

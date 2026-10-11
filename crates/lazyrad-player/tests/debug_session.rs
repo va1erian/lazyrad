@@ -54,7 +54,10 @@ impl DebugTransport for Ide {
 
 /// A one-form project whose `form_load` has a loop worth stopping in.
 fn project(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lazyrad-player-debug-{label}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "lazyrad-player-debug-{label}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch directory");
     std::fs::write(
@@ -110,7 +113,9 @@ fn a_breakpoint_in_form_load_stops_the_player_and_continue_finishes_it() {
     assert_eq!(code, EXIT_OK);
     assert!(watching, "--debug keeps hot reload on");
     let heard = ide.heard.borrow();
-    assert!(matches!(heard.first(), Some(Event::Ready { player }) if player.starts_with("lazyrad-player")));
+    assert!(
+        matches!(heard.first(), Some(Event::Ready { player }) if player.starts_with("lazyrad-player"))
+    );
     let stops: Vec<_> = heard
         .iter()
         .filter_map(|event| match event {
@@ -131,7 +136,10 @@ fn a_breakpoint_in_form_load_stops_the_player_and_continue_finishes_it() {
         "{:?}",
         stops[0].locals
     );
-    assert!(matches!(heard.last(), Some(Event::Exited { code: 0 })), "{heard:?}");
+    assert!(
+        matches!(heard.last(), Some(Event::Exited { code: 0 })),
+        "{heard:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

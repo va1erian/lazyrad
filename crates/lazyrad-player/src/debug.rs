@@ -187,22 +187,20 @@ impl DebugTransport for ReaderTransport {
     }
 
     fn wait(&self) -> Incoming {
-        loop {
-            let received = {
-                let channel = self.channel.borrow();
-                channel.as_ref().map(Receiver::recv)
-            };
-            match received {
-                Some(Ok(Item::Incoming(item))) => return item,
-                Some(Ok(Item::Failed)) | None => {
-                    *self.channel.borrow_mut() = None;
-                    return self.direct_wait();
-                }
-                Some(Err(_)) => {
-                    *self.channel.borrow_mut() = None;
-                    self.direct.borrow_mut().closed = true;
-                    return Incoming::Closed;
-                }
+        let received = {
+            let channel = self.channel.borrow();
+            channel.as_ref().map(Receiver::recv)
+        };
+        match received {
+            Some(Ok(Item::Incoming(item))) => item,
+            Some(Ok(Item::Failed)) | None => {
+                *self.channel.borrow_mut() = None;
+                self.direct_wait()
+            }
+            Some(Err(_)) => {
+                *self.channel.borrow_mut() = None;
+                self.direct.borrow_mut().closed = true;
+                Incoming::Closed
             }
         }
     }
@@ -387,7 +385,11 @@ mod tests {
         );
         assert_eq!(transport.wait(), Incoming::Command(Command::Stop));
         assert!(!transport.is_threaded());
-        assert_eq!(transport.poll(), Incoming::Empty, "cannot poll without a thread");
+        assert_eq!(
+            transport.poll(),
+            Incoming::Empty,
+            "cannot poll without a thread"
+        );
         assert_eq!(transport.wait(), Incoming::Closed);
     }
 

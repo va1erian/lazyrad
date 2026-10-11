@@ -609,7 +609,8 @@ mod tests {
 
     #[test]
     fn debug_on_a_missing_project_is_a_compile_error_without_a_window() {
-        let dir = std::env::temp_dir().join(format!("lazyrad-player-no-debug-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("lazyrad-player-no-debug-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch directory is created");
         let args = vec!["--debug".to_owned(), dir.display().to_string()];

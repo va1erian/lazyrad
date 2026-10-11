@@ -38,16 +38,21 @@ use xui_core::geometry::Point;
 use xui_core::layout::Insets;
 use xui_core::units::Px;
 use xui_core::widget::{
-    ComboBox, Dialog, DialogAction, HasText, Label, ListModel, ListView, Menu, MenuId, MenuScope,
-    Panel, Split, Tabs, TreeView,
+    ComboBox, Dialog, DialogAction, Edit, HasText, Label, ListModel, ListView, Menu, MenuId,
+    MenuScope, Panel, Split, Tabs, TreeView,
 };
 use xui_core::{Dip, Lucide, Rect, dip};
 
+mod debug;
 mod frame;
+
+#[cfg(test)]
+mod debug_tests;
 
 use crate::command::{Command, Dispatcher};
 use crate::compile::{self, CodeDiagnostic, CompileScheduler};
 use crate::completion::{self, LibraryFn, ScriptCompleter, ScriptContext};
+use crate::debugging::{Breakpoints, DebugPhase};
 use crate::dialog::ChoiceDialog;
 use crate::edit_state::EditAvailability;
 use crate::explorer::{DoubleClick, Explorer, ExplorerItem};
@@ -55,7 +60,7 @@ use crate::file_dialogs::{self, Asked, FileRequest, InWindowDialogs};
 use crate::platform::dialogs;
 use crate::procedures::{self, ObjectEntry};
 use crate::project::{DEFAULT_PROJECT, ProjectSession};
-use crate::run::{self, RunEvent, RunId, RunState};
+use crate::run::{self, LaunchMode, RunEvent, RunId, RunState};
 use crate::settings::{Settings, ThemeChoice};
 use crate::start_page::StartPage;
 use crate::{make_app, make_exe};
@@ -168,6 +173,12 @@ pub enum Msg {
     },
     /// A running program reported output, a diagnostic or its exit.
     Run(RunId, RunEvent),
+    /// A Call Stack row was activated (double-click or Return).
+    StackActivated(usize),
+    /// The Immediate pane's input changed.
+    ImmediateChanged(String),
+    /// The Immediate pane's Evaluate button was pressed.
+    ImmediateEvaluate,
     /// The in-window file dialog was accepted with this path.
     FileChosen(PathBuf),
     /// The in-window file dialog was cancelled.
@@ -379,12 +390,27 @@ const TOOLBAR: &[ToolbarItem] = &[
         command: Command::RunEnd,
         label: Some("End"),
     },
+    ToolbarItem {
+        icon: Lucide::Bug,
+        command: Command::RunDebug,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::Pause,
+        command: Command::RunBreak,
+        label: None,
+    },
+    ToolbarItem {
+        icon: Lucide::SkipForward,
+        command: Command::StepOver,
+        label: None,
+    },
 ];
 
 /// The [`TOOLBAR`] indices that start a new group, drawn with a separator
-/// before them: file | undo/redo | clipboard | run. xui separators take no item
-/// index, so `on_click` indices still map straight into [`TOOLBAR`].
-const TOOLBAR_GROUP_STARTS: &[usize] = &[4, 6, 9];
+/// before them: file | undo/redo | clipboard | run | debug. xui separators take
+/// no item index, so `on_click` indices still map straight into [`TOOLBAR`].
+const TOOLBAR_GROUP_STARTS: &[usize] = &[4, 6, 9, 11];
 
 /// The five context-menu entries, in id order.
 const CONTEXT_MENU: &[(usize, ContextAction)] = &[
@@ -614,6 +640,17 @@ pub struct IdeApp {
     launcher: Rc<dyn run::Launcher>,
     /// The one running child, if any (issue #16).
     run: RunState,
+    /// The project's breakpoints, by item name. IDE-session state: never
+    /// written to the project, never part of a document's text or undo.
+    breakpoints: Breakpoints,
+    /// The stopped program's stop, call stack and the Immediate history.
+    debug: debug::DebugView,
+    /// The bottom area's tabs and the debugger panes in them.
+    bottom_tabs: Rc<Tabs<Msg>>,
+    locals_list: Rc<ListView<Msg>>,
+    stack_list: Rc<ListView<Msg>>,
+    immediate_list: Rc<ListView<Msg>>,
+    immediate_edit: Rc<Edit<Msg>>,
     /// Set when saving the settings on exit failed; the next Exit quits
     /// without saving, so a read-only config directory cannot trap the user.
     exit_save_failed: bool,
@@ -734,6 +771,13 @@ impl IdeApp {
             status: frame.status,
             launcher: Rc::new(run::PlayerLauncher),
             run: RunState::new(),
+            breakpoints: Breakpoints::new(),
+            debug: debug::DebugView::default(),
+            bottom_tabs: frame.bottom_tabs,
+            locals_list: frame.locals_list,
+            stack_list: frame.stack_list,
+            immediate_list: frame.immediate_list,
+            immediate_edit: frame.immediate_edit,
             exit_save_failed: false,
         };
 
@@ -894,17 +938,23 @@ impl IdeApp {
             title.push('*');
         }
         if self.run.is_running() {
-            title.push_str(" [run]");
+            title.push_str(if self.dispatcher.debug_phase() == DebugPhase::Stopped {
+                " [break]"
+            } else {
+                " [run]"
+            });
         }
         ui.set_window_title(&title);
     }
 
     /// Updates the status bar's Design/Run text.
     fn update_status(&self, ui: &Ui<Msg>) {
-        let state = if self.run.is_running() {
-            "Run"
-        } else {
+        let state = if !self.run.is_running() {
             "Design"
+        } else if self.dispatcher.debug_phase() == DebugPhase::Stopped {
+            "Break"
+        } else {
+            "Run"
         };
         self.status.set_text(state);
         ui.invalidate(self.status.id());
@@ -1033,7 +1083,29 @@ impl IdeApp {
             | Command::Paste
             | Command::Delete
             | Command::SelectAll => self.dispatch_edit(command, ui),
-            Command::RunStart => self.start_run(ui),
+            // Start also continues a stopped program (F5).
+            Command::RunStart | Command::RunContinue
+                if self.dispatcher.debug_phase() == DebugPhase::Stopped =>
+            {
+                self.resume_with(lazyrad_debug_proto::Command::Continue, ui);
+            }
+            Command::RunStart => {
+                let mode = self.start_mode();
+                self.start_run(ui, mode, false);
+            }
+            Command::RunDebug => self.start_run(ui, LaunchMode::Debug, true),
+            Command::RunContinue => self.log(ui, "The program is not stopped."),
+            Command::RunBreak => self.request_break(ui),
+            Command::StepInto => {
+                self.resume_with(lazyrad_debug_proto::Command::StepInto, ui);
+            }
+            Command::StepOver => {
+                self.resume_with(lazyrad_debug_proto::Command::StepOver, ui);
+            }
+            Command::StepOut => {
+                self.resume_with(lazyrad_debug_proto::Command::StepOut, ui);
+            }
+            Command::ToggleBreakpoint => self.toggle_breakpoint(ui),
             Command::RunEnd => self.end_run(ui),
             Command::ThemeLight => self.set_theme(ui, ThemeChoice::Light),
             Command::ThemeDark => self.set_theme(ui, ThemeChoice::Dark),
@@ -1090,7 +1162,13 @@ impl IdeApp {
     /// A failure at any step cancels the run: a save that fails leaves the
     /// previous state intact, a compile check that finds problems fills the
     /// Error List, and a failed spawn logs and stays in Design.
-    fn start_run(&mut self, ui: &mut Ui<Msg>) {
+    ///
+    /// `mode` is how the player runs. `explicit` says the user asked for the
+    /// debugger by name (Start with Debugging): when the platform's launcher
+    /// cannot debug, an explicit request fails, while the implicit one that
+    /// Start makes because breakpoints exist falls back to a plain run and
+    /// says so.
+    fn start_run(&mut self, ui: &mut Ui<Msg>, mode: LaunchMode, explicit: bool) {
         if self.run.is_running() {
             self.log(ui, "A program is already running.");
             return;
@@ -1136,13 +1214,41 @@ impl IdeApp {
         let sink: run::EventSink = Arc::new(move |run, event| {
             let _ = proxy.send(Msg::Run(run, event));
         });
-        match self.run.start(self.launcher.as_ref(), &player, &dir, sink) {
+        let mut started =
+            self.run
+                .start_with(self.launcher.as_ref(), &player, &dir, sink.clone(), mode);
+        let mut mode = mode;
+        if let Err(error) = &started
+            && mode == LaunchMode::Debug
+            && !explicit
+            && error.source.kind() == std::io::ErrorKind::Unsupported
+        {
+            self.log(
+                ui,
+                "This platform cannot run a program under the debugger: breakpoints are ignored.",
+            );
+            mode = LaunchMode::Run;
+            started =
+                self.run
+                    .start_with(self.launcher.as_ref(), &player, &dir, sink, LaunchMode::Run);
+        }
+        match started {
             Ok(_) => {
+                self.debug.in_flight.clear();
                 self.dispatcher.set_running(true);
+                if mode == LaunchMode::Debug {
+                    self.dispatcher.set_debug_phase(DebugPhase::Running);
+                }
                 self.refresh_menu();
                 self.update_title(ui);
                 self.update_status(ui);
-                self.log(ui, format!("Running {name}..."));
+                if mode == LaunchMode::Debug {
+                    self.log(ui, format!("Debugging {name}..."));
+                    // Queued on the pipe; the player reads it once it is up.
+                    self.send_all_breakpoints(ui);
+                } else {
+                    self.log(ui, format!("Running {name}..."));
+                }
                 self.notify(&IdeEvent::RunStarted(name.clone()));
             }
             Err(error) => self.log(ui, format!("The program could not start: {error}")),
@@ -1292,6 +1398,9 @@ impl IdeApp {
     /// Restores the Design state after a run stops.
     fn after_run_stopped(&mut self, ui: &Ui<Msg>) {
         self.dispatcher.set_running(false);
+        // The stop line, the panes and any evaluation in flight belong to the
+        // run that just ended.
+        self.clear_debug_state(ui);
         self.refresh_menu();
         self.update_title(ui);
         self.update_status(ui);
@@ -1309,6 +1418,7 @@ impl IdeApp {
         match event {
             RunEvent::Output(line) => self.log(ui, line),
             RunEvent::Diagnostic(report) => self.on_run_diagnostic(report, ui),
+            RunEvent::Debug(event) => self.on_debug_event(event, ui),
             RunEvent::Exited(code) => {
                 self.run.finished(run);
                 self.after_run_stopped(ui);
@@ -1701,6 +1811,8 @@ impl IdeApp {
     fn adopt_project(&mut self, session: ProjectSession, ui: &mut Ui<Msg>) {
         // A running program belongs to the old project, so it is ended first.
         self.stop_run(ui);
+        // Breakpoints name items of the old project.
+        self.breakpoints.clear();
         let name = session.name().to_owned();
         let dir = session.dir().to_path_buf();
         let startup = session.startup().to_owned();
@@ -1772,6 +1884,9 @@ impl IdeApp {
             Err(error) => self.log(ui, format!("Save failed: {error}")),
         }
         self.update_title(ui);
+        // A hot reload follows a save; hand the player the lines as the saved
+        // files count them.
+        self.resend_breakpoints_after_save(ui);
     }
 
     /// Saves the project to a chosen `.lrp` location.
@@ -1857,6 +1972,7 @@ impl IdeApp {
     /// Drops the project, closes its documents and disables project commands.
     fn close_project(&mut self, ui: &mut Ui<Msg>) {
         self.stop_run(ui);
+        self.breakpoints.clear();
         self.session = None;
         self.prompt = None;
         self.context_target = None;
@@ -2541,15 +2657,9 @@ impl IdeApp {
             }));
         self.refresh_error_list();
         if let Some(editor) = self.code_editor(name) {
-            let markers = errors
-                .iter()
-                .map(|diagnostic| {
-                    let line = diagnostic.line.saturating_sub(1);
-                    let col = diagnostic.col.saturating_sub(1);
-                    Marker::new(line, col, col + 1, MarkerKind::Error)
-                })
-                .collect();
-            editor.set_markers(markers);
+            // Diagnostics were just stored in `self.errors`, beside the
+            // breakpoints and the stop line.
+            editor.set_markers(self.markers_for(name));
         }
         if errors.is_empty() {
             self.log(ui, format!("{name}: no syntax errors."));
@@ -2563,17 +2673,7 @@ impl IdeApp {
     /// Re-applies the Error List's entries as squiggles in every open code
     /// editor, so a warning or error added after the editor opened shows.
     fn refresh_markers(&self) {
-        for document in &self.documents {
-            if let DocumentView::Code(view) = &document.view {
-                let markers = self
-                    .errors
-                    .iter()
-                    .filter(|entry| entry.name == document.name)
-                    .map(ErrorEntry::marker)
-                    .collect();
-                view.editor.set_markers(markers);
-            }
-        }
+        self.refresh_all_markers();
     }
 
     /// Rebuilds the Error List rows from the collected diagnostics.
@@ -2885,6 +2985,8 @@ impl IdeApp {
 
     /// Removes an item and closes its documents.
     fn remove_item(&mut self, name: &str, ui: &mut Ui<Msg>) {
+        // The file name goes with the item, so read it first.
+        let file = self.code_file_of(name);
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -2895,6 +2997,8 @@ impl IdeApp {
         // A compile of the removed item may still be running; its result must
         // not bring the item's errors back.
         self.diagnostics.borrow_mut().invalidate(name);
+        // Its breakpoints go with it; a debug run is told its file has none.
+        self.forget_breakpoints_of(name, file, ui);
         self.documents.retain(|document| document.name != name);
         self.errors.retain(|entry| entry.name != name);
         self.refresh_error_list();
@@ -2918,6 +3022,12 @@ impl IdeApp {
             Ok(()) => {
                 // A compile still running under the old name is stale.
                 self.diagnostics.borrow_mut().invalidate(old);
+                self.breakpoints.rename(old, new);
+                if let Some((at, _)) = &mut self.debug.at
+                    && at == old
+                {
+                    *at = new.to_owned();
+                }
                 for document in &mut self.documents {
                     if document.name == old {
                         document.name = new.to_owned();
@@ -3179,14 +3289,9 @@ impl IdeApp {
                     .unwrap_or_default()
                     .to_owned();
                 editor.set_text(&source);
-                // Re-apply diagnostics an earlier compile left for this item.
-                let markers: Vec<Marker> = self
-                    .errors
-                    .iter()
-                    .filter(|entry| entry.name == name)
-                    .map(ErrorEntry::marker)
-                    .collect();
-                editor.set_markers(markers);
+                // Re-apply diagnostics an earlier compile left for this item,
+                // and its breakpoints and stop line.
+                editor.set_markers(self.markers_for(name));
                 self.schedule_compile(name, &source);
 
                 let view = CodeView {
@@ -3323,6 +3428,16 @@ impl App for IdeApp {
                     ));
                 }
                 self.schedule_compile(&name, &text);
+                // Breakpoints and the stop line follow the edit: compare with
+                // the text before this change.
+                let previous = self
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.code(&name))
+                    .map(str::to_owned);
+                if let Some(previous) = previous {
+                    self.follow_edit(&name, &previous, &text);
+                }
                 if let Some(session) = self.session.as_mut() {
                     session.set_code(&name, text);
                 }
@@ -3366,6 +3481,9 @@ impl App for IdeApp {
                 self.open_default_handler(&form, &target, ui);
             }
             Msg::Run(run, event) => self.on_run_event(run, event, ui),
+            Msg::StackActivated(row) => self.stack_activated(row, ui),
+            Msg::ImmediateChanged(text) => self.debug.input = text,
+            Msg::ImmediateEvaluate => self.immediate_evaluate(ui),
             Msg::FileChosen(path) => {
                 if let Some(request) = self.file_request.take() {
                     self.file_chosen(request, path, ui);
@@ -3539,11 +3657,17 @@ fn build_menu(
                 .command(&mut ids, Command::ProjectProperties, "P&roperties");
         });
         bar.submenu(ids.plain(), "&Run", |run| {
-            run.command(&mut ids, Command::RunStart, "&Start").command(
-                &mut ids,
-                Command::RunEnd,
-                "&End",
-            );
+            run.command(&mut ids, Command::RunStart, "&Start")
+                .command(&mut ids, Command::RunDebug, "Start with &Debugging")
+                .command(&mut ids, Command::RunContinue, "&Continue")
+                .command(&mut ids, Command::RunBreak, "&Break")
+                .command(&mut ids, Command::RunEnd, "&End")
+                .separator()
+                .command(&mut ids, Command::StepInto, "Step &Into")
+                .command(&mut ids, Command::StepOver, "Step &Over")
+                .command(&mut ids, Command::StepOut, "Step O&ut")
+                .separator()
+                .command(&mut ids, Command::ToggleBreakpoint, "Toggle Break&point");
         });
         *filled.borrow_mut() = ids.map;
     };
@@ -3697,14 +3821,19 @@ mod tests {
     use xui_core::run_app;
 
     #[test]
-    fn the_toolbar_groups_are_file_edit_clipboard_and_run() {
+    fn the_toolbar_groups_are_file_edit_clipboard_run_and_debug() {
         let starts: Vec<Command> = TOOLBAR_GROUP_STARTS
             .iter()
             .map(|&index| TOOLBAR[index].command)
             .collect();
         assert_eq!(
             starts,
-            [Command::Undo, Command::Cut, Command::RunStart],
+            [
+                Command::Undo,
+                Command::Cut,
+                Command::RunStart,
+                Command::RunDebug
+            ],
             "each group starts where its first command is"
         );
         assert!(
@@ -3775,6 +3904,9 @@ mod tests {
                 Command::Paste,
                 Command::RunStart,
                 Command::RunEnd,
+                Command::RunDebug,
+                Command::RunBreak,
+                Command::StepOver,
             ],
             "the toolbar order does not drift"
         );
@@ -3798,7 +3930,7 @@ mod tests {
             }
         }
 
-        // Only Run and End keep a visible label.
+        // Only Run and End keep a visible label (the debug group is icon-only).
         let labelled: Vec<Option<&str>> = TOOLBAR.iter().map(|entry| entry.label).collect();
         assert_eq!(
             labelled,
@@ -3813,7 +3945,10 @@ mod tests {
                 None,
                 None,
                 Some("Run"),
-                Some("End")
+                Some("End"),
+                None,
+                None,
+                None,
             ]
         );
 
@@ -3832,6 +3967,9 @@ mod tests {
                 Lucide::ClipboardPaste,
                 Lucide::Play,
                 Lucide::Square,
+                Lucide::Bug,
+                Lucide::Pause,
+                Lucide::SkipForward,
             ]
         );
     }
@@ -4266,7 +4404,7 @@ mod tests {
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::ok());
 
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             assert!(app.is_running());
             assert!(app.dispatcher.is_running());
             assert_eq!(app.status.text(), "Run");
@@ -4334,7 +4472,7 @@ mod tests {
             let launcher = Rc::new(StubLauncher::ok());
             app.launcher = launcher.clone();
 
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
 
             assert!(!app.is_running(), "a compile error does not start");
             assert!(!app.errors.is_empty(), "the Error List shows the problem");
@@ -4364,7 +4502,7 @@ mod tests {
             let launcher = Rc::new(StubLauncher::ok());
             app.launcher = launcher.clone();
 
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
 
             assert!(!app.is_running(), "a failed save does not start");
             assert_eq!(launcher.launches.get(), 0, "no process was spawned");
@@ -4394,7 +4532,7 @@ mod tests {
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::failing());
 
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
 
             assert!(!app.is_running());
             assert_eq!(app.status.text(), "Design");
@@ -4435,7 +4573,7 @@ mod tests {
 
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::ok());
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             assert!(app.is_running());
 
             let layout = std::fs::read_to_string(dir.join(format!("{form}.lfm")))
@@ -4471,7 +4609,7 @@ mod tests {
                 .expect("the form opens in a designer");
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::ok());
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             assert!(app.is_running());
 
             let controls = |app: &IdeApp| {
@@ -4510,7 +4648,7 @@ mod tests {
             app.refresh_explorer(ui);
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::ok());
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             assert!(app.is_running());
 
             let has = |app: &IdeApp, name: &str| {
@@ -4557,7 +4695,7 @@ mod tests {
             app.dispatcher.set_project_open(true);
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::ok());
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             let id = app.run.run_id().expect("a run id");
             let tabs = app.documents.len();
 
@@ -4601,10 +4739,10 @@ mod tests {
             app.settings.player_path = Some(player_stub(&dir));
             app.launcher = Rc::new(StubLauncher::ok());
 
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             let first = app.run.run_id().expect("a run id");
             app.end_run(ui);
-            app.start_run(ui);
+            app.start_run(ui, LaunchMode::Run, false);
             let second = app.run.run_id().expect("a run id");
             assert_ne!(first, second, "a run id is never reused");
 

@@ -1174,6 +1174,7 @@ dependencies = [
  "dark-light",
  "directories",
  "embed-resource",
+ "lazyrad-debug-proto",
  "lazyrad-designer",
  "lazyrad-packager",
  "lazyrad-player",
