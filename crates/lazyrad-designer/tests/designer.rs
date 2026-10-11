@@ -960,7 +960,17 @@ fn a_form_larger_than_its_viewport_scrolls_and_clamps() {
         },
     );
     assert_eq!(scrolled, (30, 40));
-    assert!(clamped.0 > 30 && clamped.1 > 40, "the far corner is reachable");
-    assert!(clamped.0 < 100_000 && clamped.1 < 100_000, "clamped to the form");
-    assert_eq!(fitting, (0, 0), "a viewport that fits the form resets the scroll");
+    assert!(
+        clamped.0 > 30 && clamped.1 > 40,
+        "the far corner is reachable"
+    );
+    assert!(
+        clamped.0 < 100_000 && clamped.1 < 100_000,
+        "clamped to the form"
+    );
+    assert_eq!(
+        fitting,
+        (0, 0),
+        "a viewport that fits the form resets the scroll"
+    );
 }
