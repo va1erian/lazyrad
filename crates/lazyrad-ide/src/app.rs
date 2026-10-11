@@ -2997,6 +2997,7 @@ impl IdeApp {
             }
             // `select` raises no change message, so rebind the grid here.
             self.refresh_property_grid(&docs_ui);
+            self.fit_designers(&docs_ui);
             return Ok(());
         }
 
@@ -3028,7 +3029,16 @@ impl IdeApp {
         // Bring the new document to the front (page 0 is the Start Page).
         tabs.select(self.documents.len());
         self.refresh_property_grid(&docs_ui);
+        self.fit_designers(&docs_ui);
         Ok(())
+    }
+
+    /// Lays the window out and gives each designer its page size. Selecting a
+    /// tab raises no layout message, so a newly shown designer would otherwise
+    /// stay unclipped until the next resize.
+    fn fit_designers(&self, ui: &Ui<Msg>) {
+        ui.relayout();
+        self.clip_designer_pages(ui);
     }
 
     /// Builds the widgets behind a document in a new page of `tabs`,
