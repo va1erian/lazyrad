@@ -39,6 +39,7 @@ use xui_core::backend::{
 use xui_core::geometry::{Point, Rect};
 use xui_core::message::{Key, MouseButton};
 use xui_core::units::{Dip, Px};
+use xui_core::widget::scrollbar::{self, Orientation, Scroll, ThumbState, TrackHit};
 use xui_core::widget::{Control, Panel};
 use xui_core::{Color, Theme};
 use xui_form::{
@@ -97,6 +98,20 @@ pub enum DesignerMsg {
         /// The cursor y in design units.
         y: i64,
     },
+    /// A scrollbar was dragged or paged to `offset` device pixels.
+    Scroll {
+        /// Whether the vertical bar (rather than the horizontal one).
+        vertical: bool,
+        /// The new scroll offset in device pixels.
+        offset: i32,
+    },
+    /// The mouse wheel rolled over the form.
+    Wheel {
+        /// Notches rolled; positive is away from the user (scroll up).
+        delta: i32,
+        /// Whether to scroll sideways.
+        horizontal: bool,
+    },
     /// A relevant key was pressed.
     Key {
         /// The logical key.
@@ -141,6 +156,22 @@ type RenameSink = Rc<dyn Fn(&str, &str)>;
 /// the target; the host does the work on its own message path.
 type DoubleClickSink = Rc<dyn Fn(&Target)>;
 
+/// One of the designer's two scrollbars: the node it paints and drags on, and
+/// the state the painter and the drag share.
+struct ScrollBarNode<M: 'static> {
+    node: Control<M>,
+    state: Rc<BarState>,
+}
+
+/// A scrollbar's geometry, written by the designer's layout and read by the
+/// bar's painter and event mapper.
+struct BarState {
+    track: Cell<Rect>,
+    scroll: Cell<Scroll>,
+    /// The pointer coordinate and offset a thumb drag started at.
+    drag: Cell<Option<(i32, i32)>>,
+}
+
 /// The binder used for the design preview; design mode never consults it.
 struct NoopBinder;
 
@@ -180,6 +211,16 @@ pub struct Designer<M: 'static> {
     on_rename: RefCell<Option<RenameSink>>,
     on_double_click: RefCell<Option<DoubleClickSink>>,
     design_mode: Cell<bool>,
+    /// The handle the designer was built with: the scrollbars are its
+    /// children, outside the design-mode scope and the clip of the host.
+    page_ui: Ui<M>,
+    /// The size of the area the designer shows, in device pixels; `(0, 0)`
+    /// until the host sets it, which leaves the form unclipped.
+    viewport: Cell<(i32, i32)>,
+    /// How far the form is scrolled, in device pixels.
+    offset: Cell<(i32, i32)>,
+    vbar: ScrollBarNode<M>,
+    hbar: ScrollBarNode<M>,
 }
 
 impl<M: 'static> Designer<M> {
@@ -197,6 +238,7 @@ impl<M: 'static> Designer<M> {
         catalog: Rc<Catalog>,
         wrap: impl Fn(DesignerMsg) -> M + 'static,
     ) -> Result<Designer<M>, DesignerError> {
+        let wrap: Rc<dyn Fn(DesignerMsg) -> M> = Rc::new(wrap);
         let surface = Rc::new(RefCell::new(Surface::new(
             doc,
             Rc::clone(&catalog),
@@ -219,6 +261,9 @@ impl<M: 'static> Designer<M> {
             column().child(arrange::panel(absolute()).bind(&panel).fill(1)),
         )?;
 
+        let vbar = create_bar(ui, Orientation::Vertical, &wrap)?;
+        let hbar = create_bar(ui, Orientation::Horizontal, &wrap)?;
+
         let designer = Designer {
             ui: scoped,
             host,
@@ -231,11 +276,16 @@ impl<M: 'static> Designer<M> {
             factories: Factories::xui(),
             binder: NoopBinder,
             catalog,
-            wrap: Rc::new(wrap),
+            wrap,
             on_selection: RefCell::new(Vec::new()),
             on_rename: RefCell::new(None),
             on_double_click: RefCell::new(None),
             design_mode: Cell::new(true),
+            page_ui: ui.clone(),
+            viewport: Cell::new((0, 0)),
+            offset: Cell::new((0, 0)),
+            vbar,
+            hbar,
         };
         designer.rebuild(ui)?;
         Ok(designer)
@@ -360,8 +410,112 @@ impl<M: 'static> Designer<M> {
         self.surface.borrow().can_redo()
     }
 
+    /// Sets the size, in device pixels, of the area the designer is shown in.
+    /// A form larger than it is clipped to it and scrolled with scrollbars.
+    pub fn set_viewport(&self, width: i32, height: i32) {
+        self.viewport.set((width.max(0), height.max(0)));
+        self.layout_scroll();
+    }
+
+    /// How far the form is scrolled, in device pixels.
+    pub fn scroll_offset(&self) -> (i32, i32) {
+        self.offset.get()
+    }
+
+    /// Scrolls to an offset in device pixels, clamped to the form.
+    pub fn scroll_to(&self, x: i32, y: i32) {
+        self.offset.set((x, y));
+        self.layout_scroll();
+    }
+
+    /// Places the form, its clip and the scrollbars for the viewport, keeping
+    /// the offset within the form.
+    fn layout_scroll(&self) {
+        let (vw, vh) = self.viewport.get();
+        let ui = &self.page_ui;
+        let (cw, ch) = self.form_px(&self.ui);
+        if vw <= 0 || vh <= 0 {
+            ui.set_clip(self.host.id(), None);
+            self.vbar.node.set_visible(false);
+            self.hbar.node.set_visible(false);
+            return;
+        }
+        let t = scrollbar::THICKNESS.to_px(ui.dpi()).value();
+        let mut need_v = ch > vh;
+        let need_h = cw > vw - if need_v { t } else { 0 };
+        if need_h && !need_v {
+            need_v = ch > vh - t;
+        }
+        let view_w = vw - if need_v { t } else { 0 };
+        let view_h = vh - if need_h { t } else { 0 };
+        let (ox, oy) = self.offset.get();
+        let ox = ox.clamp(0, (cw - view_w).max(0));
+        let oy = oy.clamp(0, (ch - view_h).max(0));
+        self.offset.set((ox, oy));
+
+        // The host's position places the form; its clip, in the host's own
+        // coordinates, is the part of the form that is visible.
+        ui.apply_moves(&[(self.host.id(), Rect::new(-ox, -oy, -ox + cw, -oy + ch))]);
+        ui.set_clip(
+            self.host.id(),
+            Some(Rect::new(ox, oy, ox + view_w, oy + view_h)),
+        );
+
+        let place = |bar: &ScrollBarNode<M>, shown: bool, rect: Rect, scroll: Scroll| {
+            bar.state.track.set(Rect::from_size(rect.size()));
+            bar.state.scroll.set(scroll);
+            bar.node.set_visible(shown);
+            if shown {
+                bar.node.set_bounds(rect);
+                bar.node.invalidate();
+            }
+        };
+        place(
+            &self.vbar,
+            need_v,
+            Rect::new(vw - t, 0, vw, view_h),
+            Scroll {
+                viewport: view_h,
+                content: ch,
+                offset: oy,
+            },
+        );
+        place(
+            &self.hbar,
+            need_h,
+            Rect::new(0, vh - t, view_w, vh),
+            Scroll {
+                viewport: view_w,
+                content: cw,
+                offset: ox,
+            },
+        );
+    }
+
     /// Handles one designer message from the overlay.
     pub fn update(&self, msg: DesignerMsg, ui: &Ui<M>) {
+        match msg {
+            DesignerMsg::Scroll { vertical, offset } => {
+                let (x, y) = self.offset.get();
+                if vertical {
+                    self.scroll_to(x, offset);
+                } else {
+                    self.scroll_to(offset, y);
+                }
+                return;
+            }
+            DesignerMsg::Wheel { delta, horizontal } => {
+                let step = Dip(48.0).to_px(ui.dpi()).value() * delta;
+                let (x, y) = self.offset.get();
+                if horizontal {
+                    self.scroll_to(x - step, y);
+                } else {
+                    self.scroll_to(x, y - step);
+                }
+                return;
+            }
+            _ => {}
+        }
         let overlay = self.id();
         let before = gesture_marks(&self.surface.borrow());
         let outcome = match msg {
@@ -392,6 +546,7 @@ impl<M: 'static> Designer<M> {
             DesignerMsg::Key { key, ctrl, shift } => {
                 self.surface.borrow_mut().key(KeyPress { key, ctrl, shift })
             }
+            DesignerMsg::Scroll { .. } | DesignerMsg::Wheel { .. } => Outcome::none(),
         };
         if matches!(msg, DesignerMsg::PointerUp { .. }) {
             ui.release_capture();
@@ -783,6 +938,7 @@ impl<M: 'static> Designer<M> {
             (self.host.id(), host),
             (self.id(), Rect::new(0, 0, width, height)),
         ]);
+        self.layout_scroll();
     }
 
     /// The form's device-pixel size.
@@ -835,6 +991,102 @@ fn renamed_nodes(before: &FormDoc, after: &FormDoc) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Creates one scrollbar node under `ui`'s parent: a painter for the track and
+/// thumb, and an event mapper that turns a drag or a click on the track into a
+/// [`DesignerMsg::Scroll`]. The designer's layout places and shows it.
+fn create_bar<M: 'static>(
+    ui: &Ui<M>,
+    orientation: Orientation,
+    wrap: &Rc<dyn Fn(DesignerMsg) -> M>,
+) -> Result<ScrollBarNode<M>, BackendError> {
+    let node = Control::new(ui, &NodeSpec::new(NodeKind::Custom, Rect::default()))?;
+    node.set_visible(false);
+    let state = Rc::new(BarState {
+        track: Cell::new(Rect::default()),
+        scroll: Cell::new(Scroll {
+            viewport: 0,
+            content: 0,
+            offset: 0,
+        }),
+        drag: Cell::new(None),
+    });
+    let vertical = orientation == Orientation::Vertical;
+
+    let theme = ui.theme_handle();
+    let painted = Rc::clone(&state);
+    node.set_painter(Rc::new(move |canvas| {
+        let track = canvas.bounds();
+        scrollbar::paint_state(
+            canvas,
+            track,
+            painted.scroll.get(),
+            orientation,
+            theme.get(),
+            ThumbState::Normal,
+        );
+    }));
+
+    let ui = ui.clone();
+    let id = node.id();
+    let wrap = Rc::clone(wrap);
+    let events = Rc::clone(&state);
+    node.on_events(move |event| {
+        let scroll = events.scroll.get();
+        let track = events.track.get();
+        let dpi = ui.dpi();
+        let along = |x: i32, y: i32| if vertical { y } else { x };
+        let offset = match event {
+            Event::MouseDown {
+                x,
+                y,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let pointer = along(*x, *y);
+                match scrollbar::hit(track, scroll, orientation, pointer, dpi)? {
+                    TrackHit::Thumb => {
+                        events.drag.set(Some((pointer, scroll.offset)));
+                        ui.set_capture(id);
+                        return None;
+                    }
+                    TrackHit::Before => {
+                        scrollbar::paged_offset(scroll, -1, scroll.viewport.max(1))
+                    }
+                    TrackHit::After => scrollbar::paged_offset(scroll, 1, scroll.viewport.max(1)),
+                }
+            }
+            Event::MouseMove { x, y, .. } => {
+                let (start, base) = events.drag.get()?;
+                scrollbar::offset_from_drag(
+                    track,
+                    scroll,
+                    orientation,
+                    base,
+                    start,
+                    along(*x, *y),
+                    dpi,
+                )
+            }
+            Event::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => {
+                if events.drag.take().is_some() {
+                    ui.release_capture();
+                }
+                return None;
+            }
+            Event::CaptureChanged => {
+                events.drag.set(None);
+                return None;
+            }
+            _ => return None,
+        };
+        Some(wrap(DesignerMsg::Scroll { vertical, offset }))
+    });
+    Ok(ScrollBarNode { node, state })
+}
+
 /// Translates a local overlay event into a [`DesignerMsg`], dropping events the
 /// designer does not use.
 fn designer_message<M: 'static>(event: &Event, ui: &Ui<M>) -> Option<DesignerMsg> {
@@ -874,6 +1126,15 @@ fn designer_message<M: 'static>(event: &Event, ui: &Ui<M>) -> Option<DesignerMsg
         } => Some(DesignerMsg::DoubleClick {
             x: to(*x),
             y: to(*y),
+        }),
+        Event::MouseWheel {
+            delta,
+            horizontal,
+            modifiers,
+            ..
+        } if !modifiers.ctrl => Some(DesignerMsg::Wheel {
+            delta: i32::from(*delta),
+            horizontal: *horizontal || modifiers.shift,
         }),
         Event::KeyDown {
             key,
