@@ -1233,21 +1233,11 @@ mod tests {
     }
 
     /// A command that exits at once, so its stdin pipe is closed by the time
-    /// anything is written. (A test of the pipe itself: only the program to
-    /// run differs per platform.)
+    /// anything is written: this test binary, asked only to list its tests.
     fn exits_immediately() -> Command {
-        #[cfg(windows)]
-        {
-            let mut command = Command::new("cmd");
-            command.args(["/C", "exit", "0"]);
-            command
-        }
-        #[cfg(not(windows))]
-        {
-            let mut command = Command::new("sh");
-            command.args(["-c", "exit 0"]);
-            command
-        }
+        let mut command = Command::new(std::env::current_exe().expect("the test binary"));
+        command.args(["--list", "--quiet"]);
+        command
     }
 
     #[test]
