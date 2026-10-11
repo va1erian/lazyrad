@@ -92,6 +92,10 @@ pub enum SendError {
     NotRunning,
     /// The child is gone or closed its input.
     Closed,
+    /// The child is alive but not reading: its input queue is full, so the
+    /// line was not queued. A polling launcher can say this; a threaded one
+    /// never does.
+    Full,
 }
 
 impl std::fmt::Display for SendError {
@@ -100,6 +104,7 @@ impl std::fmt::Display for SendError {
             SendError::Unsupported => "this platform's launcher cannot send input to the program",
             SendError::NotRunning => "no program is running",
             SendError::Closed => "the program has closed its input",
+            SendError::Full => "the program is not reading its input",
         })
     }
 }

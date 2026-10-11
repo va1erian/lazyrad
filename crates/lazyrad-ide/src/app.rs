@@ -523,6 +523,30 @@ pub enum IdeEvent {
     PackageFailed(String),
     /// The installed app was started; carries its system name.
     AppLaunched(String),
+    /// The program under the debugger stopped (a host's serial evidence).
+    DebugStopped {
+        /// Why it stopped.
+        kind: StopKind,
+        /// The project item stopped in, `""` when the file is not an item.
+        item: String,
+        /// The one-based line.
+        line: usize,
+        /// How many locals the Locals pane now lists.
+        locals: usize,
+    },
+}
+
+/// Why a debugged program stopped, as an [`IdeEvent::DebugStopped`] reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopKind {
+    /// A breakpoint was reached.
+    Breakpoint,
+    /// A step command finished.
+    Step,
+    /// The user asked it to break.
+    Break,
+    /// A script error stopped it.
+    Error,
 }
 
 /// A built package waiting for the user's consent.

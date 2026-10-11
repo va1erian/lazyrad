@@ -395,6 +395,49 @@ fn a_stop_in_a_file_that_is_not_open_opens_it() {
 }
 
 #[test]
+fn a_stop_is_reported_to_the_host_with_its_kind_and_locals() {
+    with_ide("observer", |app, ui, _| {
+        let seen: Rc<RefCell<Vec<IdeEvent>>> = Rc::default();
+        let sink = Rc::clone(&seen);
+        app.set_observer(Rc::new(move |event| sink.borrow_mut().push(event.clone())));
+        app.run_command(Command::RunDebug, ui);
+        deliver(
+            app,
+            ui,
+            Event::Stopped(stop_at("main_form.rhai", 3, StopReason::Breakpoint)),
+        );
+        deliver(
+            app,
+            ui,
+            Event::Stopped(stop_at("main_form.rhai", 4, StopReason::Step)),
+        );
+        let stops: Vec<IdeEvent> = seen
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, IdeEvent::DebugStopped { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                IdeEvent::DebugStopped {
+                    kind: StopKind::Breakpoint,
+                    item: FORM.to_owned(),
+                    line: 3,
+                    locals: 1,
+                },
+                IdeEvent::DebugStopped {
+                    kind: StopKind::Step,
+                    item: FORM.to_owned(),
+                    line: 4,
+                    locals: 1,
+                },
+            ]
+        );
+    });
+}
+
+#[test]
 fn a_stop_in_an_unknown_file_is_reported_without_marking_anything() {
     with_ide("unknownstop", |app, ui, _| {
         app.run_command(Command::RunDebug, ui);

@@ -45,7 +45,7 @@ use xui_core::backend::Backend;
 
 pub use app::{
     ContextAction, DocKind, IdeApp, IdeEvent, IdeObserver, Msg, PaneSlot, PromptKind, SaveChoice,
-    default_platform_spec, shortcut_message,
+    StopKind, default_platform_spec, shortcut_message,
 };
 pub use command::{Command, Dispatcher, Shortcut};
 pub use edit_state::EditAvailability;

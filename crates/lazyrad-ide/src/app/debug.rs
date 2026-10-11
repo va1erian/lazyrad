@@ -35,7 +35,7 @@ use xui_core::app::Ui;
 use xui_core::widget::HasText;
 
 use super::frame::{TAB_IMMEDIATE, TAB_LOCALS, TAB_OUTPUT};
-use super::{IdeApp, Msg};
+use super::{IdeApp, IdeEvent, Msg, StopKind};
 use crate::debugging::{DebugPhase, frame_row, local_row, shift_lines};
 use crate::run::{LaunchMode, SendError};
 
@@ -433,6 +433,17 @@ impl IdeApp {
             editor.goto(line.saturating_sub(1), 0);
         }
         self.bottom_tabs.select(TAB_LOCALS);
+        self.notify(&IdeEvent::DebugStopped {
+            kind: match stop.reason {
+                StopReason::Breakpoint => StopKind::Breakpoint,
+                StopReason::Step => StopKind::Step,
+                StopReason::Pause => StopKind::Break,
+                StopReason::Exception => StopKind::Error,
+            },
+            item: item.unwrap_or_default(),
+            line,
+            locals: stop.locals.len(),
+        });
     }
 
     /// A Call Stack row was activated: show that frame's code.
