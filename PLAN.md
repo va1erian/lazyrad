@@ -111,8 +111,10 @@ function is missing, the event is not wired.
 Rhai functions are pure: **they cannot see variables from the enclosing scope**, so
 `name_edit.text = "x"` inside `fn hello_button_click()` would normally fail. LazyRAD
 gets around this with an `Engine::on_var` resolver. When a name is not found, the
-resolver looks it up among the active form's controls, then the form itself (`form`),
-then globals such as `app`. Controls are registered custom types that wrap an `Rc`
+resolver looks it up among the script's top-level `let`/`const` variables (kept after
+the top-level code runs, as shared values so an assignment in one handler is seen by
+all), then the active form's controls, then the form itself (`form`), then globals
+such as `app`. Controls are registered custom types that wrap an `Rc`
 handle, so a property setter changes the live widget. (A value *returned* by `on_var`
 is read-only in Rhai, so the resolver pushes the control into the scope instead.)
 

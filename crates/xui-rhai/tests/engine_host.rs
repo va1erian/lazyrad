@@ -405,52 +405,101 @@ fn a_string_index_reads_and_writes_a_real_property() {
     });
 }
 
-/// Compiles and prepares `source`, calls `bad`, and returns the error.
-fn prepared_error(source: &str) -> xui_rhai::ScriptError {
+/// Compiles and prepares `source`, then runs `f` with the host and AST.
+fn prepared<T>(source: &str, f: impl FnOnce(&xui_rhai::EngineHost, &rhai::AST) -> T) -> T {
     let doc = greeting_doc();
     run_form(&doc, |host, _form| {
         let ast = host.compile(source).expect("compiles");
         let ast = host.prepare(&ast).expect("top-level code runs");
-        host.call(&ast, "bad").expect_err("the handler fails")
+        f(host, &ast)
     })
 }
 
 #[test]
-fn a_top_level_let_used_in_a_handler_gets_a_form_state_hint() {
-    let error = prepared_error(
-        "let chiage = 0;
-fn bad() {
-    chiage += 1;
-}",
+fn a_handler_reads_and_assigns_a_top_level_let() {
+    prepared(
+        "let count = 10;
+fn bump() { count += 1; }
+fn read() { count }",
+        |host, ast| {
+            let _ = host.call(ast, "bump").expect("bump");
+            let _ = host.call(ast, "bump").expect("bump");
+            let value = host.call(ast, "read").expect("read");
+            assert_eq!(value.as_int().expect("an int"), 12);
+        },
     );
-    assert!(
-        error.message.contains("Variable not found: chiage"),
-        "{}",
-        error.message
-    );
-    assert!(
-        error.message.contains(
-            "'chiage' is a top-level variable; functions can't see those. \
-             Keep values between events in form.state (e.g. form.state.chiage)."
-        ),
-        "{}",
-        error.message
-    );
-    assert_eq!(error.line, 3);
 }
 
 #[test]
-fn any_other_unknown_variable_keeps_the_plain_message() {
-    let error = prepared_error(
-        "let chiage = 0;
+fn a_top_level_collection_is_one_shared_value_across_handlers() {
+    prepared(
+        "let items = [];
+let table = #{};
+fn add(n) { items.push(n); table[`k${n}`] = n; }
+fn total() { let sum = 0; for i in items { sum += i; } sum + table.len() }",
+        |host, ast| {
+            for n in 1..=3 {
+                let _ = host.call_with(ast, "add", vec![n.into()]).expect("add");
+            }
+            let value = host.call(ast, "total").expect("total");
+            assert_eq!(value.as_int().expect("an int"), 6 + 3);
+        },
+    );
+}
+
+#[test]
+fn a_top_level_const_is_visible_but_not_assignable() {
+    prepared(
+        "const LIMIT = 5;
+fn read() { LIMIT }
+fn bad() { LIMIT = 6; }",
+        |host, ast| {
+            let value = host.call(ast, "read").expect("read");
+            assert_eq!(value.as_int().expect("an int"), 5);
+            host.call(ast, "bad").expect_err("a constant is read-only");
+        },
+    );
+}
+
+#[test]
+fn a_local_or_parameter_shadows_a_top_level_let() {
+    prepared(
+        "let n = 1;
+fn shadow(n) { n += 100; n }
+fn local() { let n = 7; n }
+fn top() { n }",
+        |host, ast| {
+            let out = host
+                .call_with(ast, "shadow", vec![5_i64.into()])
+                .expect("shadow");
+            assert_eq!(out.as_int().expect("an int"), 105);
+            let out = host.call(ast, "local").expect("local");
+            assert_eq!(out.as_int().expect("an int"), 7);
+            let out = host.call(ast, "top").expect("top");
+            assert_eq!(
+                out.as_int().expect("an int"),
+                1,
+                "the top-level n is untouched"
+            );
+        },
+    );
+}
+
+#[test]
+fn an_unknown_variable_keeps_the_plain_message() {
+    prepared(
+        "let count = 0;
 fn bad() {
     other += 1;
 }",
+        |host, ast| {
+            let error = host.call(ast, "bad").expect_err("the handler fails");
+            assert!(
+                error.message.contains("Variable not found: other"),
+                "{}",
+                error.message
+            );
+            assert_eq!(error.line, 3);
+        },
     );
-    assert!(
-        error.message.contains("Variable not found: other"),
-        "{}",
-        error.message
-    );
-    assert!(!error.message.contains("top-level"), "{}", error.message);
 }

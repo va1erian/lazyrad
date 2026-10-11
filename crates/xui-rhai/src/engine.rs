@@ -11,8 +11,17 @@
 //!
 //! Rhai functions cannot see the enclosing scope, so `name_edit.text` inside
 //! `fn hello_button_click()` would not resolve by itself. [`EngineHost`] installs an
-//! [`Engine::on_var`] resolver that, for an unknown name, looks up the active
-//! form's controls, then `form`, then the registered globals.
+//! [`Engine::on_var`] resolver that, for an unknown name, looks up the script's
+//! top-level variables, then the active form's controls, then `form`, then the
+//! registered globals.
+//!
+//! # Top-level variables
+//!
+//! After [`EngineHost::prepare`] runs a script's top-level code, every `let` and
+//! `const` it declared is kept as a *shared* value (the same representation a
+//! closure capture uses). The resolver hands that shared value to a function
+//! that names it, so `score += 1` in a handler updates the one variable every
+//! other handler reads, with no copy to write back.
 //!
 //! The resolver *pushes the value into the scope* rather than returning it. A
 //! value returned from `on_var` is marked read-only by Rhai, so a setter such as
@@ -33,7 +42,7 @@
 //! pause) terminate a running script at the next progress check.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use rhai::{AST, Dynamic, Engine, Map, Scope};
@@ -101,9 +110,10 @@ pub struct EngineHost {
     /// Every module registered through [`EngineHost::register_module`], so
     /// `import "name" as …` can resolve them again after a later registration.
     modules: rhai::module_resolvers::StaticModuleResolver,
-    /// Names bound by top-level `let`/`const` in the prepared script. Functions
-    /// cannot see them, so an unknown-variable error for one gets a hint.
-    top_level_vars: RefCell<BTreeSet<String>>,
+    /// The prepared script's top-level `let`/`const` bindings, as shared values
+    /// the resolver pushes into a function's scope on first use. The flag is
+    /// whether the binding is a constant.
+    top_level: Rc<RefCell<BTreeMap<String, (Dynamic, bool)>>>,
 }
 
 impl EngineHost {
@@ -145,12 +155,23 @@ impl EngineHost {
             }
         });
 
+        let top_level: Rc<RefCell<BTreeMap<String, (Dynamic, bool)>>> =
+            Rc::new(RefCell::new(BTreeMap::new()));
+        let top_level_resolver = Rc::clone(&top_level);
         let globals_resolver = Rc::clone(&globals);
         engine.on_var(move |name, _index, mut context| {
             if context.scope_mut().contains(name) {
                 return Ok(None);
             }
-            if let Some(control) = controls.get(name) {
+            if let Some((value, constant)) = top_level_resolver.borrow().get(name) {
+                // A variable is shared: a clone is another handle on the same
+                // cell, so an assignment in a handler is seen everywhere.
+                if *constant {
+                    context.scope_mut().push_constant(name, value.clone());
+                } else {
+                    context.scope_mut().push(name, value.clone());
+                }
+            } else if let Some(control) = controls.get(name) {
                 context.scope_mut().push(name, control.clone());
             } else if name == "form" {
                 context.scope_mut().push(name, form.clone());
@@ -167,7 +188,7 @@ impl EngineHost {
             globals,
             state,
             modules: rhai::module_resolvers::StaticModuleResolver::new(),
-            top_level_vars: RefCell::new(BTreeSet::new()),
+            top_level,
         };
         setup.setup(&mut host);
         host
@@ -241,18 +262,31 @@ impl EngineHost {
     /// calling handlers on the full script would re-run its top-level code on
     /// every event. The returned AST keeps the functions and only the `import`
     /// statements, so `import "util" as util` aliases still resolve in handlers.
+    ///
+    /// The top-level `let`/`const` bindings outlive the run: each is kept as a
+    /// shared value and offered to functions through the resolver, so a handler
+    /// reads and assigns them like any other variable.
     pub fn prepare(&self, ast: &AST) -> Result<AST, ScriptError> {
+        // Replace, not extend: a host can prepare several scripts in turn, and a
+        // binding must not leak from the previous script into this one's run.
+        self.top_level.borrow_mut().clear();
+        let mut scope = Scope::new();
         self.engine
-            .run_ast_with_scope(&mut Scope::new(), ast)
+            .run_ast_with_scope(&mut scope, ast)
             .map_err(|error| ScriptError::from_eval(&self.file, &error))?;
-        // Replace, not extend: a host can prepare several scripts in turn, and
-        // the hint must only name the current script's top-level `let`s.
-        *self.top_level_vars.borrow_mut() = ast
-            .statements()
-            .iter()
-            .filter_map(|statement| match statement {
-                rhai::Stmt::Var(binding, ..) => Some(binding.0.name.to_string()),
-                _ => None,
+        // A later binding of the same name shadows an earlier one, as in Rhai.
+        *self.top_level.borrow_mut() = scope
+            .iter_raw()
+            .map(|(name, constant, value)| {
+                // A constant stays a plain value: Rhai's read-only check does
+                // not apply through a shared handle, so sharing one would let
+                // a handler assign it.
+                let value = if constant {
+                    value.clone()
+                } else {
+                    value.clone().into_shared()
+                };
+                (name.to_owned(), (value, constant))
             })
             .collect();
         let imports = ast
@@ -298,23 +332,9 @@ impl EngineHost {
             })
     }
 
-    /// Locates a runtime error from a handler, adding a hint when the missing
-    /// variable is one a top-level `let` declared (functions cannot see those).
+    /// Locates a runtime error from a handler.
     fn locate(&self, error: &rhai::EvalAltResult) -> ScriptError {
-        let mut located = ScriptError::from_eval(&self.file, error);
-        let mut inner = error;
-        while let rhai::EvalAltResult::ErrorInFunctionCall(_, _, next, _) = inner {
-            inner = next;
-        }
-        if let rhai::EvalAltResult::ErrorVariableNotFound(name, _) = inner {
-            if self.top_level_vars.borrow().contains(name) {
-                located.message.push_str(&format!(
-                    "\n'{name}' is a top-level variable; functions can't see those. \
-                     Keep values between events in form.state (e.g. form.state.{name})."
-                ));
-            }
-        }
-        located
+        ScriptError::from_eval(&self.file, error)
     }
 
     /// Compiles `source` into a Rhai module named `name` and registers it.

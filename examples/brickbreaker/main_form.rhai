@@ -3,49 +3,66 @@
 // Controls: Left/Right (or A/D) or the mouse move the paddle, Space or a
 // click launches the ball, P pauses.
 //
-// Functions cannot see top-level variables, so the whole game lives in
-// form.state. Each event copies it into a local map `s`, works on it through
-// functions called in method style (`s.update(dt)` runs `fn update(dt)` with
-// `this` bound to `s`) and stores it back once at the end.
+// The game's state is plain top-level variables. Every function and handler
+// below reads and assigns them directly (`score += 10`), so there is nothing
+// to pass around or store back.
 //
 // The game's modes: "title" (before the first serve), "ready" (the ball sits
 // on the paddle), "playing", "paused", "over" and "won".
 
+// ---- State -----------------------------------------------------------------
+
+const PADDLE_W = 96.0;
+const PADDLE_H = 14.0;
+const BALL_R = 7.0;
+const MAX_SPEED = 650.0;
+
+// The canvas size is only known once the form is built, so form_load sets
+// width, height and the paddle's row through new_game().
+let width = 0.0;
+let height = 0.0;
+let mode = "title";
+let score = 0;
+let lives = 3;
+let paddle_x = 0.0;
+let paddle_y = 0.0;
+let ball_x = 0.0;
+let ball_y = 0.0;
+let ball_vx = 0.0;
+let ball_vy = 0.0;
+let speed = 300.0;               // pixels per second; it creeps up during play
+let bricks = [];
+let bricks_left = 0;
+
 // ---- Events ----------------------------------------------------------------
 
 fn form_load() {
-    form.state = new_game();
+    new_game();
     game_canvas.focus();          // so the arrow keys reach the canvas
 }
 
 fn game_canvas_frame(dt) {
-    let s = form.state;
-    s.update(dt);
-    s.draw();
-    form.state = s;
+    update(dt);
+    draw();
 }
 
 fn game_canvas_key_down(key) {
-    let s = form.state;
     if key == "space" {
-        s = s.start_or_launch();
+        start_or_launch();
     } else if key == "p" {
-        s.toggle_pause();
+        toggle_pause();
     }
-    form.state = s;
 }
 
 fn game_canvas_mouse_move(x, y) {
-    let s = form.state;
-    if s.mode != "paused" {
-        s.paddle_x = clamp(x - s.paddle_w / 2.0, 0.0, s.width - s.paddle_w);
+    if mode != "paused" {
+        paddle_x = clamp(x - PADDLE_W / 2.0, 0.0, width - PADDLE_W);
     }
-    form.state = s;
 }
 
 fn game_canvas_mouse_down(x, y, button) {
     if button == "left" {
-        form.state = form.state.start_or_launch();
+        start_or_launch();
     }
 }
 
@@ -53,38 +70,31 @@ fn game_canvas_mouse_down(x, y, button) {
 
 // A fresh game: three lives, a full wall of bricks, the ball on the paddle.
 fn new_game() {
-    let s = #{
-        width: game_canvas.width.to_float(),
-        height: game_canvas.height.to_float(),
-        mode: "title",
-        score: 0,
-        lives: 3,
-        paddle_w: 96.0, paddle_h: 14.0, paddle_x: 0.0, paddle_y: 0.0,
-        ball_x: 0.0, ball_y: 0.0, ball_vx: 0.0, ball_vy: 0.0, ball_r: 7.0,
-        speed: 300.0,             // pixels per second; it creeps up during play
-        bricks: [],
-        bricks_left: 0,
-    };
-    s.paddle_x = (s.width - s.paddle_w) / 2.0;
-    s.paddle_y = s.height - 40.0;
-    s.bricks = make_bricks(s.width);
-    s.bricks_left = s.bricks.len();
-    s.stick_ball();
-    s
+    width = game_canvas.width.to_float();
+    height = game_canvas.height.to_float();
+    mode = "title";
+    score = 0;
+    lives = 3;
+    speed = 300.0;
+    paddle_x = (width - PADDLE_W) / 2.0;
+    paddle_y = height - 40.0;
+    bricks = make_bricks();
+    bricks_left = bricks.len();
+    stick_ball();
 }
 
 // Six rainbow rows of ten bricks; the top two rows take two hits.
-fn make_bricks(width) {
+fn make_bricks() {
     let colors = [[231, 76, 60], [230, 126, 34], [241, 196, 15],
                   [46, 204, 113], [52, 152, 219], [155, 89, 182]];
     let columns = 10;
     let margin = 16.0;
     let gap = 4.0;
     let w = (width - 2.0 * margin - gap * (columns - 1)) / columns;
-    let bricks = [];
+    let wall = [];
     for row in 0..colors.len() {
         for column in 0..columns {
-            bricks.push(#{
+            wall.push(#{
                 x: margin + column * (w + gap),
                 y: 64.0 + row * 24.0,
                 w: w,
@@ -95,57 +105,55 @@ fn make_bricks(width) {
             });
         }
     }
-    bricks
+    wall
 }
 
 // ---- Rules -----------------------------------------------------------------
 
 // Space or a click: start a new game after the last one ended, then serve.
 fn start_or_launch() {
-    let s = this;
-    if s.mode == "over" || s.mode == "won" {
-        s = new_game();
+    if mode == "over" || mode == "won" {
+        new_game();
     }
-    if s.mode == "title" || s.mode == "ready" {
+    if mode == "title" || mode == "ready" {
         // Serve straight up, give or take a few degrees.
         let angle = (random() - 0.5) * 0.6;
-        s.ball_vx = s.speed * sin(angle);
-        s.ball_vy = -s.speed * cos(angle);
-        s.mode = "playing";
+        ball_vx = speed * sin(angle);
+        ball_vy = -speed * cos(angle);
+        mode = "playing";
     }
-    s
 }
 
 fn toggle_pause() {
-    if this.mode == "playing" {
-        this.mode = "paused";
-    } else if this.mode == "paused" {
-        this.mode = "playing";
+    if mode == "playing" {
+        mode = "paused";
+    } else if mode == "paused" {
+        mode = "playing";
     }
 }
 
 // Puts the ball on top of the paddle's middle.
 fn stick_ball() {
-    this.ball_x = this.paddle_x + this.paddle_w / 2.0;
-    this.ball_y = this.paddle_y - this.ball_r - 1.0;
+    ball_x = paddle_x + PADDLE_W / 2.0;
+    ball_y = paddle_y - BALL_R - 1.0;
 }
 
 // Advances the game by `dt` seconds.
 fn update(dt) {
-    if this.mode != "title" && this.mode != "ready" && this.mode != "playing" {
+    if mode != "title" && mode != "ready" && mode != "playing" {
         return;
     }
-    this.move_paddle(dt);
-    if this.mode != "playing" {
-        this.stick_ball();
+    move_paddle(dt);
+    if mode != "playing" {
+        stick_ball();
         return;
     }
-    this.speed = min(this.speed + 4.0 * dt, 650.0);
+    speed = min(speed + 4.0 * dt, MAX_SPEED);
     // Small steps, so a fast ball cannot skip through a 20-pixel brick.
-    let steps = max(1, (this.speed * dt / 4.0).ceiling().to_int());
+    let steps = max(1, (speed * dt / 4.0).ceiling().to_int());
     for step in 0..steps {
-        this.move_ball(dt / steps);
-        if this.mode != "playing" {
+        move_ball(dt / steps);
+        if mode != "playing" {
             break;
         }
     }
@@ -155,53 +163,53 @@ fn move_paddle(dt) {
     let direction = 0.0;
     if game_canvas.is_key_down("left") || game_canvas.is_key_down("a") { direction -= 1.0; }
     if game_canvas.is_key_down("right") || game_canvas.is_key_down("d") { direction += 1.0; }
-    let x = this.paddle_x + direction * 480.0 * dt;
-    this.paddle_x = clamp(x, 0.0, this.width - this.paddle_w);
+    let x = paddle_x + direction * 480.0 * dt;
+    paddle_x = clamp(x, 0.0, width - PADDLE_W);
 }
 
 fn move_ball(dt) {
-    let r = this.ball_r;
-    this.ball_x += this.ball_vx * dt;
-    this.ball_y += this.ball_vy * dt;
+    let r = BALL_R;
+    ball_x += ball_vx * dt;
+    ball_y += ball_vy * dt;
 
     // The side walls and the bottom of the score bar.
-    if this.ball_x < r { this.ball_x = r; this.ball_vx = abs(this.ball_vx); }
-    if this.ball_x > this.width - r { this.ball_x = this.width - r; this.ball_vx = -abs(this.ball_vx); }
-    if this.ball_y < 32.0 + r { this.ball_y = 32.0 + r; this.ball_vy = abs(this.ball_vy); }
+    if ball_x < r { ball_x = r; ball_vx = abs(ball_vx); }
+    if ball_x > width - r { ball_x = width - r; ball_vx = -abs(ball_vx); }
+    if ball_y < 32.0 + r { ball_y = 32.0 + r; ball_vy = abs(ball_vy); }
 
     // The paddle: the further from its middle the ball lands, the wider the
     // angle it leaves at (up to about 60 degrees).
-    if this.ball_vy > 0.0 && rects_overlap(this.ball_x - r, this.ball_y - r, 2.0 * r, 2.0 * r,
-                                           this.paddle_x, this.paddle_y, this.paddle_w, this.paddle_h) {
-        let middle = this.paddle_x + this.paddle_w / 2.0;
-        let offset = clamp((this.ball_x - middle) / (this.paddle_w / 2.0), -1.0, 1.0);
-        this.ball_vx = this.speed * sin(offset * 1.05);
-        this.ball_vy = -this.speed * cos(offset * 1.05);
-        this.ball_y = this.paddle_y - r;
+    if ball_vy > 0.0 && rects_overlap(ball_x - r, ball_y - r, 2.0 * r, 2.0 * r,
+                                      paddle_x, paddle_y, PADDLE_W, PADDLE_H) {
+        let middle = paddle_x + PADDLE_W / 2.0;
+        let offset = clamp((ball_x - middle) / (PADDLE_W / 2.0), -1.0, 1.0);
+        ball_vx = speed * sin(offset * 1.05);
+        ball_vy = -speed * cos(offset * 1.05);
+        ball_y = paddle_y - r;
     }
 
-    this.hit_brick();
+    hit_brick();
 
     // Missed: lose a life, or the game.
-    if this.ball_y - r > this.height {
-        this.lives -= 1;
-        if this.lives > 0 {
-            this.mode = "ready";
-            this.stick_ball();
+    if ball_y - r > height {
+        lives -= 1;
+        if lives > 0 {
+            mode = "ready";
+            stick_ball();
         } else {
-            this.mode = "over";
+            mode = "over";
         }
     }
 }
 
 // Bounces the ball off the first brick it touches and damages that brick.
 fn hit_brick() {
-    let r = this.ball_r;
-    let left = this.ball_x - r;
-    let top = this.ball_y - r;
+    let r = BALL_R;
+    let left = ball_x - r;
+    let top = ball_y - r;
     let size = 2.0 * r;
-    for i in 0..this.bricks.len() {
-        let b = this.bricks[i];
+    for i in 0..bricks.len() {
+        let b = bricks[i];
         if b.hits > 0 && rects_overlap(left, top, size, size, b.x, b.y, b.w, b.h) {
             // Bounce along the axis the ball went in least.
             let push_x = min(left + size - b.x, b.x + b.w - left);
@@ -209,25 +217,25 @@ fn hit_brick() {
             // Bounce, and move the ball just outside the brick on that side,
             // so the next step cannot hit the same brick again.
             if push_x < push_y {
-                let from_left = this.ball_x < b.x + b.w / 2.0;
-                this.ball_vx = if from_left { -abs(this.ball_vx) } else { abs(this.ball_vx) };
-                this.ball_x = if from_left { b.x - r } else { b.x + b.w + r };
+                let from_left = ball_x < b.x + b.w / 2.0;
+                ball_vx = if from_left { -abs(ball_vx) } else { abs(ball_vx) };
+                ball_x = if from_left { b.x - r } else { b.x + b.w + r };
             } else {
-                let from_above = this.ball_y < b.y + b.h / 2.0;
-                this.ball_vy = if from_above { -abs(this.ball_vy) } else { abs(this.ball_vy) };
-                this.ball_y = if from_above { b.y - r } else { b.y + b.h + r };
+                let from_above = ball_y < b.y + b.h / 2.0;
+                ball_vy = if from_above { -abs(ball_vy) } else { abs(ball_vy) };
+                ball_y = if from_above { b.y - r } else { b.y + b.h + r };
             }
-            this.bricks[i].hits = b.hits - 1;
+            bricks[i].hits = b.hits - 1;
             if b.hits == 1 {
-                this.score += b.points;
-                this.bricks_left -= 1;
+                score += b.points;
+                bricks_left -= 1;
             } else {
-                this.score += 5;
+                score += 5;
             }
-            this.speed = min(this.speed + 6.0, 650.0);
-            this.keep_speed();
-            if this.bricks_left == 0 {
-                this.mode = "won";
+            speed = min(speed + 6.0, MAX_SPEED);
+            keep_speed();
+            if bricks_left == 0 {
+                mode = "won";
             }
             return;
         }
@@ -236,10 +244,10 @@ fn hit_brick() {
 
 // Rescales the ball's velocity to the current speed, keeping its direction.
 fn keep_speed() {
-    let length = sqrt(this.ball_vx * this.ball_vx + this.ball_vy * this.ball_vy);
+    let length = sqrt(ball_vx * ball_vx + ball_vy * ball_vy);
     if length > 0.0 {
-        this.ball_vx = this.ball_vx / length * this.speed;
-        this.ball_vy = this.ball_vy / length * this.speed;
+        ball_vx = ball_vx / length * speed;
+        ball_vy = ball_vy / length * speed;
     }
 }
 
@@ -247,16 +255,15 @@ fn keep_speed() {
 
 fn draw() {
     game_canvas.clear("#101018");
-    this.draw_bricks();
-    game_canvas.fill_round_rect(this.paddle_x, this.paddle_y, this.paddle_w, this.paddle_h,
-                                7, "#ecf0f1");
-    game_canvas.fill_circle(this.ball_x, this.ball_y, this.ball_r, "#ffe066");
-    this.draw_score_bar();
-    this.draw_message();
+    draw_bricks();
+    game_canvas.fill_round_rect(paddle_x, paddle_y, PADDLE_W, PADDLE_H, 7, "#ecf0f1");
+    game_canvas.fill_circle(ball_x, ball_y, BALL_R, "#ffe066");
+    draw_score_bar();
+    draw_message();
 }
 
 fn draw_bricks() {
-    for b in this.bricks {
+    for b in bricks {
         if b.hits > 0 {
             // A brick that still takes two hits is drawn darker.
             let k = if b.hits > 1 { 0.55 } else { 1.0 };
@@ -271,30 +278,30 @@ fn draw_bricks() {
 }
 
 fn draw_score_bar() {
-    game_canvas.fill_rect(0, 0, this.width, 32, "#1c1c2c");
-    game_canvas.text(12, 7, `Score: ${this.score}`, "#ffffff", 16);
-    for i in 0..this.lives {
-        game_canvas.fill_circle(this.width - 20 - i * 18, 16, 6, "#e74c3c");
+    game_canvas.fill_rect(0, 0, width, 32, "#1c1c2c");
+    game_canvas.text(12, 7, `Score: ${score}`, "#ffffff", 16);
+    for i in 0..lives {
+        game_canvas.fill_circle(width - 20 - i * 18, 16, 6, "#e74c3c");
     }
 }
 
 // The banner for the modes that wait for the player.
 fn draw_message() {
-    let y = this.height / 2.0 + 20.0;
-    if this.mode == "title" {
+    let y = height / 2.0 + 20.0;
+    if mode == "title" {
         centered("BRICK BREAKER", y - 30.0, 32, "#f5b041");
         centered("Press Space or click to start", y + 16.0, 16, "#ffffff");
         centered("Left/Right or the mouse to move · P to pause", y + 40.0, 13, "#9aa0b4");
-    } else if this.mode == "ready" {
+    } else if mode == "ready" {
         centered("Press Space to launch", y, 16, "#ffffff");
-    } else if this.mode == "paused" {
+    } else if mode == "paused" {
         centered("Paused — press P", y, 20, "#ffffff");
-    } else if this.mode == "over" {
+    } else if mode == "over" {
         centered("Game over — press Space", y, 24, "#e74c3c");
-        centered(`Final score: ${this.score}`, y + 34.0, 16, "#ffffff");
-    } else if this.mode == "won" {
+        centered(`Final score: ${score}`, y + 34.0, 16, "#ffffff");
+    } else if mode == "won" {
         centered("You win!", y, 32, "#2ecc71");
-        centered(`Score: ${this.score} — press Space to play again`, y + 44.0, 16, "#ffffff");
+        centered(`Score: ${score} — press Space to play again`, y + 44.0, 16, "#ffffff");
     }
 }
 

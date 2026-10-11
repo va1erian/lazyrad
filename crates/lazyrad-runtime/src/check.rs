@@ -143,6 +143,7 @@ pub fn check_project(path: impl AsRef<Path>) -> Result<CheckReport, RuntimeError
                 report.lints.extend(crate::lint::script(
                     &ast,
                     &file,
+                    !item.is_form(),
                     &supplied,
                     &project_modules,
                     &engine,
@@ -265,6 +266,7 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
                 form.code_file.as_str(),
                 form.code.as_str(),
                 form.name.as_str(),
+                false,
             )
         })
         .chain(sources.modules.iter().map(|module| {
@@ -272,15 +274,17 @@ pub fn check_runtime(runtime: &FormRuntime) -> CheckReport {
                 module.file.as_str(),
                 module.source.as_str(),
                 module.name.as_str(),
+                true,
             )
         }));
-    for (file, source, name) in scripts {
+    for (file, source, name, module) in scripts {
         match engine.compile(source) {
             Ok(ast) => {
                 let supplied = supplied(controls_for(&controls, name));
                 report.lints.extend(crate::lint::script(
                     &ast,
                     file,
+                    module,
                     &supplied,
                     &project_modules,
                     &engine,
@@ -423,24 +427,51 @@ mod tests {
     }
 
     #[test]
-    fn a_top_level_const_used_in_a_function_is_a_lint() {
+    fn a_top_level_const_used_in_a_form_function_is_not_a_lint() {
         let dir = scratch("lint-const");
         write_project(
             &dir,
-            "const GREETING = \"hi\";\nfn hello() { greeting_label.text = GREETING; }\n",
+            "const GREETING = \"hi\";
+fn hello() { greeting_label.text = GREETING; }
+",
         );
 
         let report = check_project(&dir).expect("the project loads");
-        assert!(
-            report.is_empty(),
-            "a lint does not stop the project running"
+        assert!(report.is_empty(), "{report:?}");
+        assert!(report.warnings().is_empty(), "{:?}", report.warnings());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_module_const_used_in_a_module_function_is_a_lint() {
+        let dir = scratch("lint-module-const");
+        write_project(
+            &dir,
+            "fn ok() {}
+",
         );
+        let mut project = fs::read_to_string(dir.join("check.lrp")).expect("project reads");
+        project.push_str(
+            "
+[[items]]
+kind = \"module\"
+name = \"util\"
+code = \"util.rhai\"
+",
+        );
+        fs::write(dir.join("check.lrp"), project).expect("project writes");
+        fs::write(
+            dir.join("util.rhai"),
+            "const GREETING = \"hi\";
+fn hello() { return GREETING; }
+",
+        )
+        .expect("module writes");
+
+        let report = check_project(&dir).expect("the project loads");
         assert_eq!(report.warnings().len(), 1, "{:?}", report.warnings());
-        let lint = &report.warnings()[0];
-        assert_eq!(lint.file, "main_form.rhai");
-        assert_eq!(lint.line, 2);
-        assert!(lint.message.contains("GREETING"), "{}", lint.message);
-        assert!(lint.message.starts_with("lint:"), "{}", lint.message);
+        assert!(report.warnings()[0].message.contains("GREETING"));
 
         let _ = fs::remove_dir_all(&dir);
     }
