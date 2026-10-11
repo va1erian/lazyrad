@@ -69,7 +69,7 @@ lazyrad/
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
 │  ├─ xui-rhai/               Rhai <-> xui bridge: control wrappers, `on_var`, messages
 │  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (not created yet, M4)
-│  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir, a payload, or --debug
+│  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir or a payload (`--debug` arrives with M4)
 │  ├─ lazyrad-designer/       xui form-designer surface, toolbox, property grid
 │  ├─ lazyrad-packager/       exe export: stub + payload, icon/metadata where possible
 │  └─ lazyrad-ide/     (bin)  the IDE shell: windows, menus, project explorer, wiring
@@ -176,14 +176,16 @@ Form-level state that outlives a single event lives in `form.state`, an object m
 
 ### 4.3 Object orientation
 
-Rhai has no `class` keyword. LazyRAD provides objects through two mechanisms:
+Rhai has no `class` keyword. LazyRAD's planned object model provides objects through
+two mechanisms (the native classes exist; class modules, their template and `__class`
+completion are M6 work, not built yet):
 
 1. **Native classes (the stdlib).** These are Rust types registered with
    `register_type_with_name`, getters, setters and methods. They are true types with
    `type_of()`, `is`-style checks and `to_string`.
-2. **Script classes (class modules).** A `.rhai` class file exports `fn new(...)`, which
+2. **Script classes (class modules, planned).** A `.rhai` class file will export `fn new(...)`, which
    returns an object map. Its methods are `Fn` pointers called with `this` bound, which
-   Rhai supports natively. The IDE's class-module template produces this shape:
+   Rhai supports natively. The IDE's class-module template will produce this shape:
 
    ```rhai
    // stack.rhai
@@ -193,7 +195,7 @@ Rhai has no `class` keyword. LazyRAD provides objects through two mechanisms:
    }
    ```
 
-   The editor's completion recognises `__class` and offers the map's members.
+   The editor's completion will recognise `__class` and offer the map's members.
    Inheritance works by composition: `let o = base::new(); o.extra = …; o`.
 
 ### 4.4 Standard library: small but usable
