@@ -857,6 +857,66 @@ fn a_runtime_without_a_session_never_touches_a_transport() {
 }
 
 #[test]
+fn locals_read_in_declaration_order_and_a_redeclared_name_shows_its_new_value() {
+    run_on_large_stack(|| {
+        let names = |stop: &Stop| -> Vec<(String, String)> {
+            stop.locals
+                .iter()
+                .map(|variable| (variable.name.clone(), variable.value.clone()))
+                .collect()
+        };
+        // Re-declaring a name in the same block replaces its value in place,
+        // so `first` keeps its first position and shows 10.
+        let expected = vec![
+            ("first".to_owned(), "10".to_owned()),
+            ("second".to_owned(), "2".to_owned()),
+            ("third".to_owned(), "3".to_owned()),
+        ];
+
+        // A breakpoint stop reads the live scope.
+        let script = Script::new();
+        script.queue(breakpoints("main_form.rhai", &[6]));
+        script.on_stop(vec![Command::Continue]);
+        debug_run(
+            "fn go_button_click() {
+    let first = 1;
+    let second = 2;
+    let first = 10;
+    let third = 3;
+    third
+}",
+            Vec::new(),
+            &script,
+            |app, _| {
+                app.click("go_button");
+            },
+        );
+        assert_eq!(names(&script.stops()[0]), expected);
+
+        // An error stop reads the remembered locals: same order, same rule.
+        let script = Script::new();
+        script.on_stop(vec![Command::Continue]);
+        debug_run(
+            "fn go_button_click() {
+    let first = 1;
+    let second = 2;
+    let first = 10;
+    let third = 3;
+    third / 0
+}",
+            Vec::new(),
+            &script,
+            |app, _| {
+                app.allow_errors().click("go_button");
+            },
+        );
+        let stop = &script.stops()[0];
+        assert_eq!(stop.reason, StopReason::Exception);
+        assert_eq!(names(stop), expected);
+    });
+}
+
+#[test]
 fn values_are_rendered_for_display() {
     run_on_large_stack(|| {
         let script = Script::new();

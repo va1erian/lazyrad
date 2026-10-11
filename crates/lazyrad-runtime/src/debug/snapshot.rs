@@ -140,15 +140,18 @@ pub(super) fn snapshot(
         }),
     }
 
-    // A later declaration shadows an earlier one of the same name.
+    // Rhai lists a scope newest first. The *newest* declaration of a name is the
+    // visible one (it shadows the older), and the pane reads in declaration
+    // order, so keep the first sighting and reverse at the end.
     let mut order: Vec<&str> = Vec::new();
     let mut by_name: BTreeMap<&str, Shown<'_>> = BTreeMap::new();
     match held {
         Some(held) => {
             for (name, value) in &held.items {
-                if !by_name.contains_key(name.as_str()) {
-                    order.push(name);
+                if by_name.contains_key(name.as_str()) {
+                    continue;
                 }
+                order.push(name);
                 by_name.insert(
                     name,
                     match value {
@@ -161,13 +164,15 @@ pub(super) fn snapshot(
         }
         None => {
             for (name, _constant, value) in context.scope().iter_raw().take(MAX_LOCALS * 8) {
-                if !by_name.contains_key(name) {
-                    order.push(name);
+                if by_name.contains_key(name) {
+                    continue;
                 }
+                order.push(name);
                 by_name.insert(name, Shown::Live(value));
             }
         }
     }
+    order.reverse();
     let mut locals = Vec::new();
     for name in order {
         let Some(shown) = by_name.get(name) else {
