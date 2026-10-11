@@ -1,12 +1,12 @@
 # The LazyRAD workspace. See PLAN.md §2 for the layout and the reasoning behind
-# each crate. `lazyrad-debug-proto` and `lazyrad-packager` join the members list
-# when their milestones (M4 and M5) start.
+# each crate.
 [workspace]
 resolver = "3"
 members = [
     "crates/xui-form",
     "crates/xui-rhai",
     "crates/lazyrad-project",
+    "crates/lazyrad-debug-proto",
     "crates/lazyrad-runtime",
     "crates/lazyrad-packager",
     "crates/lazyrad-player",
@@ -75,6 +75,7 @@ pollster = "0.4"
 xui-form = { path = "crates/xui-form" }
 xui-rhai = { path = "crates/xui-rhai" }
 lazyrad-project = { path = "crates/lazyrad-project" }
+lazyrad-debug-proto = { path = "crates/lazyrad-debug-proto" }
 lazyrad-runtime = { path = "crates/lazyrad-runtime", default-features = false }
 lazyrad-packager = { path = "crates/lazyrad-packager" }
 lazyrad-player = { path = "crates/lazyrad-player", default-features = false }

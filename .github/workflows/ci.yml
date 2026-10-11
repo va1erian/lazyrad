@@ -73,7 +73,7 @@ jobs:
         run: >
           cargo check --target x86_64-unknown-linux-musl --no-default-features
           -p lazyrad-runtime -p lazyrad-player -p lazyrad-ide -p lazyrad-designer
-          -p lazyrad-project -p lazyrad-packager -p xui-form -p xui-rhai
+          -p lazyrad-project -p lazyrad-packager -p lazyrad-debug-proto -p xui-form -p xui-rhai
       - name: No windowing crates in the player graph
         run: |
           tree=$(cargo tree --color never --target x86_64-unknown-linux-musl --no-default-features \
