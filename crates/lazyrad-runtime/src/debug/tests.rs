@@ -886,7 +886,7 @@ fn values_are_rendered_for_display() {
         assert_eq!(local(stop, "nothing"), Some("()"));
         let big = local(stop, "big").expect("big");
         assert!(big.contains("20 items"), "{big}");
-        assert!(big.chars().count() <= super::MAX_VALUE_CHARS);
+        assert!(big.chars().count() <= super::snapshot::MAX_VALUE_CHARS);
         assert!(
             stop.locals
                 .iter()
