@@ -5,9 +5,10 @@
 //! Three mistakes compile cleanly and only surface when a handler runs, which
 //! made building the MOD player sample slow (va1erian/lazyos#526):
 //!
-//! 1. a top-level `const` used inside a `fn` (Rhai functions cannot see the
-//!    enclosing scope, unlike the controls, `form` and `app` the resolver
-//!    supplies); `global::NAME` works;
+//! 1. a top-level `const` used inside a `fn` of a *module* (Rhai functions
+//!    cannot see the enclosing scope; `global::NAME` works). A form's script
+//!    has no such lint: the engine host shares its top-level variables with
+//!    its functions;
 //! 2. a script function whose name matches a method it calls on a value (Rhai
 //!    resolves method calls to script functions too, so it recurses into
 //!    itself);
@@ -40,15 +41,21 @@ const GLOBAL: &str = "global";
 /// (its controls, `form` and `app`). `project_modules` names the project's own
 /// modules; any other `module::fn` root is looked up in `engine` (which has the
 /// host's extensions registered), so a `sys::…` call is accepted when the
-/// player defines `sys`.
+/// player defines `sys`. `module` is whether `ast` is a project module rather
+/// than a form's script, which decides whether a top-level `const` is lintable.
 pub(crate) fn script(
     ast: &AST,
     file: &str,
+    module: bool,
     supplied: &BTreeSet<String>,
     project_modules: &BTreeSet<String>,
     engine: &Engine,
 ) -> Vec<ScriptError> {
-    let consts = top_level_consts(ast);
+    let consts = if module {
+        top_level_consts(ast)
+    } else {
+        BTreeMap::new()
+    };
     let functions = function_infos(ast);
     let locals = local_names(ast, &functions);
     let mut known_modules = BTreeMap::new();
@@ -108,7 +115,7 @@ pub(crate) fn script(
                         file,
                         position,
                         format!(
-                            "`{name}` is a top-level constant, which a function cannot see; \
+                            "`{name}` is a module-level constant, which a function cannot see; \
                              use `global::{name}` or keep the value in form.state"
                         ),
                     ));

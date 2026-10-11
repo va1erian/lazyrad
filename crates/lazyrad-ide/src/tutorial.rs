@@ -28,10 +28,10 @@ pub enum Block {
 
 /// The counter handlers from "Remember values between events". The runtime's
 /// `form_state_keeps_a_counter_between_two_clicks` test runs this exact text.
-pub const COUNTER_SAMPLE: &str = "fn form_load() { form.state.count = 0; }
+pub const COUNTER_SAMPLE: &str = "let count = 0;
 fn button1_click() {
-    form.state.count += 1;
-    edit1.text = `Clicked ${form.state.count} times`;
+    count += 1;
+    edit1.text = `Clicked ${count} times`;
 }";
 
 /// The tutorial, top to bottom.
@@ -88,14 +88,16 @@ fn form_close() {
     ),
     Block::Heading("Remember values between events"),
     Block::Callout(
-        "Functions cannot see variables declared with let at the top of the script, so a \
-         counter kept there does not work. Keep values between events in form.state, an \
-         object map that lives as long as the form.",
+        "A variable declared with let at the top of the script is shared by every \
+         handler, so it can hold a counter or a score between events. It starts \
+         over when the form is rebuilt; form.state is the place for data that \
+         must survive a reload.",
     ),
     Block::Code(COUNTER_SAMPLE),
     Block::Para(
-        "form is the current form. form.state holds your data; form.title is a string \
-         you can read and set.",
+        "form is the current form. form.state is an object map for data that \
+         outlives a rebuild (see Hot reload); form.title is a string you can \
+         read and set.",
     ),
     Block::Heading("Hot reload"),
     Block::Para(

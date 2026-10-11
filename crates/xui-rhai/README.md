@@ -25,7 +25,10 @@ It depends only on `xui-core`, `xui-form` and `rhai`.
 Rhai functions cannot see the enclosing scope, so `name_edit.text` inside
 `fn hello_button_click()` would not resolve by itself. `EngineHost` installs an
 `Engine::on_var` resolver that looks an unknown name up among the active form's
-controls, then `form`, then the registered globals.
+controls, then `form`, then the registered globals. The script's own top-level
+`let`/`const` variables are offered first: they outlive the top-level run as
+shared values, so a handler can read and assign them (`score += 1`) and every
+other handler sees the change.
 
 The resolver **pushes** the value into the scope instead of returning it. Rhai
 marks a value returned from `on_var` read-only, so a setter such as

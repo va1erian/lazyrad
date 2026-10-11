@@ -25,7 +25,9 @@
 //! [`Engine::on_var`](rhai::Engine::on_var) resolver that *pushes* the control
 //! into the scope rather than returning it: a value returned from `on_var` is
 //! read-only, so `name_edit.text = …` would fail, while a pushed variable is a
-//! normal mutable entry.
+//! normal mutable entry. The script's top-level `let`/`const` variables reach
+//! its functions the same way, as shared values, so a handler may read and
+//! assign them (see [`engine`]).
 //!
 //! # Handler naming
 //!

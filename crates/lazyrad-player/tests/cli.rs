@@ -111,7 +111,7 @@ fn check_reports_a_lint_without_failing() {
     let dir = scratch("check-lint");
     write_project(
         &dir,
-        "const GREETING = \"hi\";\nfn hello() { let x = GREETING; }\n",
+        "fn push(item) {\n    let list = [];\n    list.push(item);\n}\n",
     );
 
     let output = player()
@@ -128,7 +128,7 @@ fn check_reports_a_lint_without_failing() {
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert_eq!(reports[0]["kind"], "warning");
     assert_eq!(reports[0]["file"], "main_form.rhai");
-    assert_eq!(reports[0]["line"], 2);
+    assert_eq!(reports[0]["line"], 3);
 
     let _ = fs::remove_dir_all(&dir);
 }
