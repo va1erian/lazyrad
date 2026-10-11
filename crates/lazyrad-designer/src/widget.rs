@@ -1049,9 +1049,7 @@ fn create_bar<M: 'static>(
                         ui.set_capture(id);
                         return None;
                     }
-                    TrackHit::Before => {
-                        scrollbar::paged_offset(scroll, -1, scroll.viewport.max(1))
-                    }
+                    TrackHit::Before => scrollbar::paged_offset(scroll, -1, scroll.viewport.max(1)),
                     TrackHit::After => scrollbar::paged_offset(scroll, 1, scroll.viewport.max(1)),
                 }
             }
