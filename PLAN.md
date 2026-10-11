@@ -24,7 +24,7 @@ export a `.exe` or a LazyOS `.lzp`. The two large pieces still missing are the
 | **M4 Debugger** | **Not started.** `rhai/debugging` is enabled, but there is no protocol crate, no `--debug` mode in the player and no breakpoint, stepping or Locals UI. Run is F5 / Run End only |
 | M5 Export | Done: stub + payload, PE icon/version/subsystem, *Make EXE*, `.lzp` packages and `lazyrad-pack` |
 | M6 Polish | Partial. See §11 for what landed and what is left |
-| M7 LazyOS | Player side prepared (`Platform` trait, `desktop` feature, musl CI job). IDE on LazyOS not started |
+| M7 LazyOS | **Running.** The player and the IDE both run on LazyOS as `xuid` clients (`lazyos/lazyrad-os`, core package `os.lazy.lazyrad`), including *Make LazyOS App*. Rough edges and the missing debugger are listed in §12 |
 
 Beyond the original plan, these landed: hot reload (`--watch`, §4.2), script errors as
 first-class failures with a host test kit and a Rhai lint (`check_project`), a `Canvas`
@@ -515,7 +515,7 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M4 | **Not started** | All of it. The first slice is the `lazyrad-debug-proto` crate (JSON lines) plus `lazyrad-player --debug` with breakpoints and continue |
 | M5 | Done | Stub + payload packer, `editpe` icon and version, subsystem flip, `lazyrad-pack`, `.lzp` packages. Cross-target stub picking in *Make EXE*: unchecked |
 | M6 | Partial | **Done:** themes, samples, standard shortcuts, start page and tutorial, most of IO and App, `Timer`, dialogs for open-file, hot reload, lint. **Not done:** go to definition, signature help, class modules (`__class` completion and template), menu editor, tab-order mode, `input_box`/save/colour dialogs, Time (`DateTime`, `stopwatch`), `clipboard`, `env`, `screen`, docs |
-| M7 | Partial | Player is musl-ready (§12). The IDE on LazyOS needs L4 process spawn or the in-process debug fallback, and the debugger itself (M4) is a prerequisite for either |
+| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). Outstanding: debugger (needs M4), IDE responsiveness, the in-window file dialog panic, Manage Apps |
 
 **v1.0 = M0–M6.** Scope cuts, if needed: folding, watches, control arrays and the menu
 editor move to 1.x. As of October 2026 the realistic v1.0 cut is: M4 (without watches),
@@ -539,9 +539,41 @@ IME (G3); OS file drag-and-drop onto the IDE (G12); a docking manager (G8).
   xui-app does), and for the IDE's run/debug, `fork`/`execve`/pipes (L4).
   - **Fallback when L4 is missing:** run the program in-process on a nested xui window,
     with the debugger callback pumping a mini event loop. This is less robust, but it
-    has no dependency on process spawning.
+    has no dependency on process spawning. **Not needed:** L4 landed, and LazyOS
+    spawns the player with pipes.
 - Platform assumptions live behind one seam module per crate, so the LazyOS port is a
   new implementation of those modules only. See "Porting LazyRAD" below.
+
+### Findings from the LazyOS port (October 2026)
+
+The IDE and player run on LazyOS (`lazyos/lazyrad-os`, packaged as `os.lazy.lazyrad`;
+full notes in `lazyos/docs/lazyrad-plan.md` §8–§9). It lives in the LazyOS repo and
+depends on these crates by git `rev`, with `default-features = false`. What it
+needed from LazyRAD, and what it found:
+
+- **Seams held.** `Platform`, `run_with_backend` and the `desktop` feature were enough;
+  LazyOS supplies its own `Platform` (script sandbox, config dir, player beside the
+  IDE, painted file dialog) with no LazyRAD changes beyond the seam.
+- **Make LazyOS App** goes through the `Installer` seam, using the Installer and
+  `mimed` rather than `pkgd` (labelled callers are refused). The IDE blocks while the
+  user finishes in the Installer.
+- **Debugger is the gap.** LazyOS has no debug session because LazyRAD has no M4.
+  Pipes to a spawned player work (polled non-blocking pipes; threads there do not share
+  a descriptor table, so reader threads lose the pipe), so M4 should read the player's
+  stdout on a timer, not on a thread.
+- **`std::env::current_exe()` is wrong on LazyOS** (it reports `/busybox`). Anything
+  in LazyRAD that locates itself must go through the `Platform`'s player lookup, not
+  `current_exe` (the packager and `player_beside` already do).
+- **Open bugs seen there, not reproduced on the host:** typing a path into the painted
+  `FileDialog` panics (`xui-core` `listview/api.rs`, `RefCell already borrowed`); the
+  property grid did not repaint rows while scrolling in one probe; the IDE is slow on
+  a large window (input reflected after seconds), though typing into a 2000-line module
+  stays at 20–270 ms per key.
+- **Not done there:** *Manage Apps* (list/remove produced apps), the `notify` and PCM
+  `audio.beep` script modules, multi-window forms (G16).
+- **LazyOS-only script modules** (`msg`/`sys::*` Messenger, `modplay`) are registered
+  through `lazyrad_runtime::extensions::add_scoped` and stay in the LazyOS repo, which
+  keeps LazyRAD platform-neutral.
 
 ### Porting LazyRAD
 
@@ -646,7 +678,10 @@ are all done. What comes next, in order:
    both binaries "open an empty xui window", neither of which matches reality, and add
    `xui-form` and `xui-rhai` to its crate table; write a
    language and stdlib reference from the `metadata` doc comments.
-5. **LazyOS (M7):** wire the exported-app path through to a real LazyOS install via
-   `pkgd` when it lands, and keep the xui pin in step with `lazyos/xui-app`. The IDE on
-   LazyOS follows once M4 gives it a debug transport that is not process-spawn-only
-   (the in-process fallback in §12).
+5. **LazyOS (M7), now that the IDE runs there:** keep the xui pin in step with
+   `lazyos/xui-app` (both repos bump together). Triage the findings in §12
+   ("Findings from the LazyOS port"); the file-dialog panic and the IDE's input
+   latency are the ones a LazyOS user hits first. The debugger's transport is
+   already solved: pipes work on LazyOS through its polling launcher, so M4's
+   JSON-lines protocol needs no LazyOS-specific transport, only a non-blocking
+   reader on the IDE side.
