@@ -25,7 +25,7 @@ has the detail):
 | **M4 Debugger** | **Done, minus watches.** `lazyrad-debug-proto`, `lazyrad-player --debug`, F9 breakpoints with a gutter dot and a stop-line tint, Continue / Step Into / Over / Out / Break / End, break on error, and Locals, Call Stack and Immediate tabs (§7). Watches and a Breakpoints list are 1.x |
 | M5 Export | Done: stub + payload, PE icon/version/subsystem, *Make EXE*, `.lzp` packages and `lazyrad-pack` |
 | M6 Polish | Partial. See §11 for what landed and what is left |
-| M7 LazyOS | **Running.** The player and the IDE both run on LazyOS as `xuid` clients (`lazyos/lazyrad-os`, core package `os.lazy.lazyrad`), including *Make LazyOS App*. The debugger needs the LazyOS launcher to feed the player's stdin (§12); rough edges are listed there too |
+| M7 LazyOS | **Running.** The player and the IDE both run on LazyOS as `xuid` clients (`lazyos/lazyrad-os`, core package `os.lazy.lazyrad`), including *Make LazyOS App*. The debugger runs there through the launcher's stdin queue (§12); rough edges are listed there too |
 
 Beyond the original plan, these landed: hot reload (`--watch`, §4.2), script errors as
 first-class failures with a host test kit and a Rhai lint (`check_project`), a `Canvas`
@@ -570,7 +570,7 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M4 | Done (no watches) | `lazyrad-debug-proto`, `lazyrad-player --debug`, breakpoints (F9), Continue, Step Into/Over/Out, Break, End, break on error, Locals, Call Stack and Immediate panes. Not done: watches, a Breakpoints list, an arrow glyph for the stop line (needs an xui editor change), evaluate in outer frames, Return-to-evaluate in the Immediate pane (xui `Edit` has no submit event). The LazyOS launcher side is in the LazyOS repo (`lazyrad-os/src/launcher.rs`) |
 | M5 | Done | Stub + payload packer, `editpe` icon and version, subsystem flip, `lazyrad-pack`, `.lzp` packages. Cross-target stub picking in *Make EXE*: unchecked |
 | M6 | Partial | **Done:** themes, samples, standard shortcuts, start page and tutorial, most of IO and App, `Timer`, dialogs for open-file, hot reload, lint. **Not done:** go to definition, signature help, class modules (`__class` completion and template), menu editor, tab-order mode, `input_box`/save/colour dialogs, Time (`DateTime`, `stopwatch`), `clipboard`, `env`, `screen`, docs |
-| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). Outstanding: the debugger's launcher side is written in the LazyOS repo but needs a run on a booted image (§12), IDE responsiveness, the in-window file dialog panic, Manage Apps |
+| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). The debugger's LazyOS side passed a QEMU session once (§12; Call Stack, Immediate, break on error and the F8 keys are unverified there). Outstanding: IDE responsiveness, the in-window file dialog panic, Manage Apps |
 
 **v1.0 = M0–M6.** Scope cuts, if needed: folding, watches, control arrays and the menu
 editor move to 1.x. As of October 2026 the realistic v1.0 cut is: M4 (without watches),
@@ -616,8 +616,8 @@ needed from LazyRAD, and what it found:
   there do not share a descriptor table, so reader threads lose the pipe), so M4 reads
   the player's stdout on a timer, not on a thread, and the launcher seam
   (`Launcher::launch_with`, `ChildProcess::send_line`) lets a polling launcher write
-  the player's stdin from that same timer. The LazyOS launcher implements both and
-  starts the player with `--debug`; the player side installs a non-blocking stdin
+  the player's stdin from that same timer. The LazyOS launchers implement both and
+  start the player with `--debug`; the player side installs a non-blocking stdin
   transport with `lazyrad_player::debug::install_transport` because a reader thread
   there cannot see the process's stdin. See `lazyos/docs/lazyrad-plan.md` §8.
 - **`std::env::current_exe()` is wrong on LazyOS** (it reports `/busybox`). Anything
@@ -729,8 +729,8 @@ are all done. What comes next, in order:
    changes); locals for outer frames (Rhai keeps no per-frame scope; it would need
    the callback to snapshot at call time); a way to stop a program that is idle
    between events (today Break waits for the next handler); a time budget on the
-   per-node callback if a debug-mode game proves too slow. Verify the LazyOS side on
-   a booted image (§12).
+   per-node callback if a debug-mode game proves too slow. Exercise the rest of the
+   debugger on a booted LazyOS image (§12 lists what its session did not).
 2. **Finish M6 for v1.0:** go to definition and signature help; class modules and their
    template; `input_box` and the save/colour dialogs; Time (`DateTime`, `stopwatch`) and
    `clipboard`; the tab-order mode. Re-check G14 (xui#146) first, since it decides
