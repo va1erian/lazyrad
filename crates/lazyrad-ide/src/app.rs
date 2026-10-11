@@ -415,8 +415,8 @@ enum DocumentView {
         /// The handle the designer was built with, for every follow-up call.
         designer_ui: Ui<Msg>,
         /// The page panel the designer lives in, kept so its node lives as long
-        /// as the document.
-        _page: Rc<Panel<Msg>>,
+        /// as the document and so its descendants can be clipped to it.
+        page: Rc<Panel<Msg>>,
     },
     /// The code editor, with the two procedure combos for a form's code.
     Code(Box<CodeView>),
@@ -795,6 +795,19 @@ impl IdeApp {
             dpi,
         ));
         ui.relayout();
+        self.clip_designer_pages(ui);
+    }
+
+    /// Tells each form designer the size of its document page. A form larger
+    /// than the page is clipped to it and scrolled, rather than painting over
+    /// the status bar and the neighbouring panes.
+    fn clip_designer_pages(&self, ui: &Ui<Msg>) {
+        for document in &self.documents {
+            if let DocumentView::Designer { designer, page, .. } = &document.view {
+                let size = ui.bounds(page.id()).size();
+                designer.borrow().set_viewport(size.width, size.height);
+            }
+        }
     }
 
     /// Pushes `settings.theme` into the window's palette.
@@ -3090,7 +3103,7 @@ impl IdeApp {
                     DocumentView::Designer {
                         designer: Rc::new(RefCell::new(designer)),
                         designer_ui,
-                        _page: page,
+                        page,
                     },
                     title,
                 ))

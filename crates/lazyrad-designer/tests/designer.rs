@@ -943,3 +943,24 @@ fn undoing_and_redoing_a_rename_reports_it_through_the_rename_sink() {
         "the rename, its undo and its redo each reach the host; the move's undo does not"
     );
 }
+
+#[test]
+fn a_form_larger_than_its_viewport_scrolls_and_clamps() {
+    let (scrolled, clamped, fitting) = with_designer(
+        button_doc(),
+        |_, _| {},
+        |designer| {
+            designer.set_viewport(200, 150);
+            designer.scroll_to(30, 40);
+            let scrolled = designer.scroll_offset();
+            designer.scroll_to(100_000, 100_000);
+            let clamped = designer.scroll_offset();
+            designer.set_viewport(100_000, 100_000);
+            (scrolled, clamped, designer.scroll_offset())
+        },
+    );
+    assert_eq!(scrolled, (30, 40));
+    assert!(clamped.0 > 30 && clamped.1 > 40, "the far corner is reachable");
+    assert!(clamped.0 < 100_000 && clamped.1 < 100_000, "clamped to the form");
+    assert_eq!(fitting, (0, 0), "a viewport that fits the form resets the scroll");
+}
