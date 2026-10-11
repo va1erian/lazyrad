@@ -21,6 +21,7 @@
 //! [`xui_rhai`] and are re-exported here so LazyRAD's callers see one crate.
 
 pub mod check;
+pub mod debug;
 pub mod engine;
 mod events;
 pub mod extensions;
@@ -40,6 +41,7 @@ pub mod testing;
 mod timers;
 
 pub use check::{CheckReport, check_project, check_runtime};
+pub use debug::{DebugSession, DebugTransport, Incoming};
 pub use engine::{EngineHost, new_engine};
 pub use files::{DiskProject, NoProjectFiles, ProjectFiles};
 pub use form::{

@@ -60,6 +60,7 @@ use xui_form::{
 
 use lazyrad_project::{Node, Project, lazyrad_catalog, parse_form};
 
+use crate::debug::DebugSession;
 use crate::file_dialogs::FileDialogs;
 use crate::files::{DiskProject, NoProjectFiles, ProjectFiles};
 use crate::fs_policy::{Access, FsPolicy};
@@ -204,6 +205,9 @@ pub struct FormRuntime {
     msg_box_observer: RefCell<Option<MsgBoxObserver>>,
     /// The hot-reload watcher, when the player was started with `--watch`.
     pub(crate) watch: RefCell<Option<crate::reload::Watcher>>,
+    /// The debugger session, when the player was started with `--debug`. Every
+    /// form's engine gets its callback as the form is built.
+    debugger: RefCell<Option<Rc<DebugSession>>>,
 }
 
 /// A callback told `(form, control, event)` after an event handler ran without
@@ -242,6 +246,18 @@ impl FormRuntime {
     /// any earlier one.
     pub fn set_msg_box_observer(&self, observer: MsgBoxObserver) {
         *self.msg_box_observer.borrow_mut() = Some(observer);
+    }
+
+    /// Puts every form of this runtime under `session`'s debugger, including
+    /// the forms a hot reload builds later. Call it before the first form is
+    /// built; an engine that already exists is not retrofitted.
+    pub fn set_debugger(&self, session: Rc<DebugSession>) {
+        *self.debugger.borrow_mut() = Some(session);
+    }
+
+    /// The debugger session, if one is installed.
+    pub fn debugger(&self) -> Option<Rc<DebugSession>> {
+        self.debugger.borrow().clone()
     }
 
     /// Tells the observer, if any, that a handler ran.
@@ -349,6 +365,7 @@ impl FormRuntime {
             error_observer: RefCell::new(None),
             msg_box_observer: RefCell::new(None),
             watch: RefCell::new(None),
+            debugger: RefCell::new(None),
         }))
     }
 
@@ -380,6 +397,7 @@ impl FormRuntime {
             error_observer: RefCell::new(None),
             msg_box_observer: RefCell::new(None),
             watch: RefCell::new(None),
+            debugger: RefCell::new(None),
         })
     }
 
@@ -544,6 +562,7 @@ impl FormInstance {
             files: Rc::clone(&runtime.files),
         };
         let runtime_for_setup = Rc::clone(runtime);
+        let debugger = runtime.debugger();
         let script = ScriptForm::build_deferred(
             ui,
             &source.doc,
@@ -555,6 +574,11 @@ impl FormInstance {
             },
             stdlib,
             move |host| {
+                // The debugger watches the modules' top-level code and the
+                // form's own, so it is attached before either runs.
+                if let Some(session) = &debugger {
+                    session.attach(host);
+                }
                 // Cloned out so a module's top-level code cannot hit a held
                 // borrow of the runtime's sources.
                 let modules = runtime_for_setup.sources.borrow().modules.clone();

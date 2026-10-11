@@ -1235,6 +1235,7 @@ dependencies = [
 name = "lazyrad-runtime"
 version = "0.1.0"
 dependencies = [
+ "lazyrad-debug-proto",
  "lazyrad-project",
  "rhai",
  "thiserror 2.0.21",

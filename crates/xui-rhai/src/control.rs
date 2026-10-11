@@ -410,6 +410,13 @@ pub fn register_control(engine: &mut Engine, catalog: &Catalog) {
     }
 }
 
+/// Whether `value` is a control or the form object the resolver pushes into a
+/// function's scope. A debugger leaves these out of a locals list: they are the
+/// host's handles, not the script's variables.
+pub fn is_host_handle(value: &Dynamic) -> bool {
+    value.is::<Control>() || value.is::<Form>()
+}
+
 /// Registers the [`Form`] (`form`) type.
 pub fn register_form(engine: &mut Engine) {
     engine.register_type_with_name::<Form>("Form");
