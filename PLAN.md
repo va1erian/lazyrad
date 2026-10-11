@@ -162,8 +162,9 @@ Form-level state that outlives a single event lives in `form.state`, an object m
 - The player owns the xui event loop. Each widget event is turned into a
   `Msg::Event { form, control, event, args }`. `App::update` then calls the matching
   Rhai function through `Engine::call_fn` on the form's compiled `AST`.
-- `Engine::on_progress` implements Ctrl+Break, an operation budget per event (to catch
-  runaway loops), and debugger pause checks.
+- `Engine::on_progress` implements Ctrl+Break and an operation budget per event (to
+  catch runaway loops). Under `--debug` the debugger's own callback also reads pause
+  and stop requests (§7).
 - **Hot reload.** The player's `--watch` flag polls the project's `.lrp`, `.lfm` and
   `.rhai` files every 500 ms. On a change it checks and loads a fresh runtime first, and
   on success rebuilds each open form in place (releasing the old form's event sources and
@@ -569,7 +570,7 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M4 | Done (no watches) | `lazyrad-debug-proto`, `lazyrad-player --debug`, breakpoints (F9), Continue, Step Into/Over/Out, Break, End, break on error, Locals, Call Stack and Immediate panes. Not done: watches, a Breakpoints list, an arrow glyph for the stop line (needs an xui editor change), evaluate in outer frames, Return-to-evaluate in the Immediate pane (xui `Edit` has no submit event). The LazyOS launcher side is in the LazyOS repo (`lazyrad-os/src/launcher.rs`) |
 | M5 | Done | Stub + payload packer, `editpe` icon and version, subsystem flip, `lazyrad-pack`, `.lzp` packages. Cross-target stub picking in *Make EXE*: unchecked |
 | M6 | Partial | **Done:** themes, samples, standard shortcuts, start page and tutorial, most of IO and App, `Timer`, dialogs for open-file, hot reload, lint. **Not done:** go to definition, signature help, class modules (`__class` completion and template), menu editor, tab-order mode, `input_box`/save/colour dialogs, Time (`DateTime`, `stopwatch`), `clipboard`, `env`, `screen`, docs |
-| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). Outstanding: debugger (needs M4), IDE responsiveness, the in-window file dialog panic, Manage Apps |
+| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). Outstanding: the debugger's launcher side is written in the LazyOS repo but needs a run on a booted image (§12), IDE responsiveness, the in-window file dialog panic, Manage Apps |
 
 **v1.0 = M0–M6.** Scope cuts, if needed: folding, watches, control arrays and the menu
 editor move to 1.x. As of October 2026 the realistic v1.0 cut is: M4 (without watches),
