@@ -9,6 +9,29 @@ single `.exe`. [LazyOS](https://github.com/va1erian/lazyos) is a later target.
 This document covers the architecture, the key decisions, a milestone plan, and a list
 of the **xui gaps** LazyRAD will run into, along with a proposed fix for each.
 
+## 0. Status (October 2026)
+
+LazyRAD is past its first usable cut: you can draw a form, write handlers, press F5 and
+export a `.exe` or a LazyOS `.lzp`. The two large pieces still missing are the
+**debugger (M4)** and **LazyOS IDE support (M7)**. Per milestone (§11 has the detail):
+
+| M | State |
+|---|---|
+| M0 Skeleton | Done |
+| M1 Runtime | Done: player, forms, event binding, `on_var`, non-blocking `msg_box`, four samples |
+| M2 Editor | Done: a reusable `xui-code-editor`, highlighting, diagnostics, find/replace, go to line, tab stops, completion |
+| M3 Designer | Done: surface, toolbox, property grid, double-click to handler. One PR open (#114: clip forms, scrollbars) |
+| **M4 Debugger** | **Not started.** `rhai/debugging` is enabled, but there is no protocol crate, no `--debug` mode in the player and no breakpoint, stepping or Locals UI. Run is F5 / Run End only |
+| M5 Export | Done: stub + payload, PE icon/version/subsystem, *Make EXE*, `.lzp` packages and `lazyrad-pack` |
+| M6 Polish | Partial. See §11 for what landed and what is left |
+| M7 LazyOS | Player side prepared (`Platform` trait, `desktop` feature, musl CI job). IDE on LazyOS not started |
+
+Beyond the original plan, these landed: hot reload (`--watch`, §4.2), script errors as
+first-class failures with a host test kit and a Rhai lint (`check_project`), a `Canvas`
+control with a frame loop (`examples/brickbreaker`), a `Timer` control, binary file
+access, `open_file_dialog`, project assets, a `PictureBox` and `Value::Bytes`, and a
+Button `icon` property (Lucide outlines).
+
 ---
 
 ## 1. Guiding decisions
@@ -44,7 +67,8 @@ lazyrad/
 │  ├─ xui-form/               declarative forms for xui: schema, document, validation, builder
 │  ├─ lazyrad-project/        .lrp project files + the LazyRAD control catalog
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
-│  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (JSON lines over stdio)
+│  ├─ xui-rhai/               Rhai <-> xui bridge: control wrappers, `on_var`, messages
+│  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (not created yet, M4)
 │  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir, a payload, or --debug
 │  ├─ lazyrad-designer/       xui form-designer surface, toolbox, property grid
 │  ├─ lazyrad-packager/       exe export: stub + payload, icon/metadata where possible
@@ -182,6 +206,16 @@ modules. It relies on Rhai's own built-ins for strings (`len`, `sub_string`,
 they lack. Every item gets doc comments, which the `metadata` feature surfaces in
 completion and tooltips.
 
+**Status.** Built: `msg_box`, `open_file_dialog`, `file_*`/`dir_*` (text and bytes,
+behind the platform's `FsPolicy`), `app` (`title`, `path`, `documents`, `quit()`),
+`now()`/`today()`, `random*`, `array.join`, `rgb`/`clamp`/`rects_overlap`, the controls
+below, `Timer`, `PictureBox` and `Canvas`. **Not built yet** (the table lists them as
+target design): `input_box`, `form.show_modal`, save-file and colour dialogs, the
+`DateTime` type and `stopwatch`, `env`, `clipboard`, `screen`, the
+`set`/`queue`/`stack` helpers and `sort_by`, and the whole *Data* row. The control
+catalog also has no `TreeView`, `Tabs` or `Menu` kinds yet; it has `Hyperlink`,
+`NumberField`, `Panel`, `Separator` and `ToggleButton`.
+
 | Module | Contents |
 |---|---|
 | Core | `debug(value)` to the Output pane, formatting helpers, `random`/`random_range`, conversions Rhai lacks |
@@ -287,6 +321,13 @@ designer uses both. Only the portable versions remain; see the note under §10.
 ---
 
 ## 7. Debugger
+
+> **Status: not started (M4).** Everything below is design. What exists is the Rhai
+> `debugging` feature in the workspace dependency and `Engine::on_progress` use for
+> run limits. The IDE's *Run* menu has only Start and End, and the player has no
+> `--debug` mode, although the README still lists it.
+> This is the largest gap against the "step through it in the debugger" promise and is
+> the top item in §14.
 
 The debugger is built on Rhai's `debugging` feature, running in the player process.
 
@@ -398,6 +439,27 @@ These gaps were found by reading xui at `main` (Sept 2026). "Workaround" means
 LazyRAD can proceed without an xui change. "Upstream" means the change should be
 contributed to xui.
 
+**Re-audit (October 2026, against what LazyRAD's code does today; xui itself was not
+re-read).** The table below keeps the original text; read it with this overlay:
+
+| Gap | Today |
+|---|---|
+| G1 | `ScrollBar` is exported and used. The code editor and scrollbar moved into xui (issue #72). A `Popup` helper: unchecked |
+| G2 | Resolved for the IDE: the clipboard goes through the window backend (`Ui::clipboard_text`), and the editor no longer uses `arboard`. The stdlib `clipboard` is not built |
+| G4 | Worked around with `rfd` (desktop) and in-window dialogs (`Platform` trait). A painted file dialog for LazyOS is LazyOS's to supply |
+| G5 | Built in LazyRAD (`property_grid.rs`, with keyboard navigation and a scrollbar) |
+| G6 | Worked around: `xui-form`'s own typed `Catalog` schema |
+| G7 | Worked around by the monospace grid; the editor is now upstream in xui |
+| G9 | Toolbox built; `Button` gained an `icon` property. Per-item toolbar icons: unchecked |
+| G10 | Worked around: IDE-level shortcut dispatch (#69) |
+| G11 | Open (xui#185). The IDE still has no menu-editor and a user program cannot declare a menu: there is no `Menu` kind in the catalog |
+| G13 | Resolved in LazyRAD: `PictureBox` (PNG/JPEG/BMP/GIF) and `Value::Bytes` |
+| G14 | **Still open.** `msg_box` is non-blocking, there is no `input_box` and no `form.show_modal`. Re-check xui#146 before M6 closes |
+| G15 | Handled by the `desktop` feature split (§12) |
+| G17 | Still open. Colours stay theme-driven |
+| G18 | Resolved upstream (xui#204) |
+| G3, G8, G12, G16 | Unchanged, not blocking |
+
 | # | Gap | Impact on LazyRAD | Proposal |
 |---|---|---|---|
 | G1 | **No first-class custom widget story.** `Control` + `NodeKind::Custom` + `set_painter` + `on_events` are public, but popup and scrollbar painters (`widget::popup`, `widget::scrollbar`) are private | The editor, designer overlay and property grid need scrollbars and popups that match the theme | Upstream: export `ScrollBar` as a widget and a `Popup` helper. `ScrollBar` is now exported from `xui_core::widget::scrollbar` (xui#231); the `Popup` helper is still open |
@@ -442,8 +504,28 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M6 | Completion & polish | Completion and signature help from metadata and AST, go to definition, class modules, menu editor, tab order, remaining stdlib (IO, Time, App, CommonDialog), themes, samples, docs | 3–4 wk |
 | M7 | LazyOS | musl player running exported apps on LazyOS (needs xui-skia and the LazyOS threads and `fs` layers), then the IDE itself (needs process spawn and pipes, i.e. LazyOS L4, or an in-process debug fallback) | later |
 
+**Status per milestone (October 2026)**
+
+| M | State | Evidence and what remains |
+|---|---|---|
+| M0 | Done | Workspace, pinned xui, IDE shell, `.lrp` load/save, explorer, start page, settings, theme |
+| M1 | Done | Samples: hello, calculator, todo, brickbreaker. Core stdlib done; Collections helpers (`set`/`queue`/`stack`, `sort_by`) not |
+| M2 | Done | Find, Find Next, Replace, Go to Line, completion (`completion.rs`), tab stops, diagnostics. Folding was already cut to 1.x |
+| M3 | Done | Open PR #114. The designer's menu editor and tab-order *mode* are M6 items (below) |
+| M4 | **Not started** | All of it. The first slice is the `lazyrad-debug-proto` crate (JSON lines) plus `lazyrad-player --debug` with breakpoints and continue |
+| M5 | Done | Stub + payload packer, `editpe` icon and version, subsystem flip, `lazyrad-pack`, `.lzp` packages. Cross-target stub picking in *Make EXE*: unchecked |
+| M6 | Partial | **Done:** themes, samples, standard shortcuts, start page and tutorial, most of IO and App, `Timer`, dialogs for open-file, hot reload, lint. **Not done:** go to definition, signature help, class modules (`__class` completion and template), menu editor, tab-order mode, `input_box`/save/colour dialogs, Time (`DateTime`, `stopwatch`), `clipboard`, `env`, `screen`, docs |
+| M7 | Partial | Player is musl-ready (§12). The IDE on LazyOS needs L4 process spawn or the in-process debug fallback, and the debugger itself (M4) is a prerequisite for either |
+
 **v1.0 = M0–M6.** Scope cuts, if needed: folding, watches, control arrays and the menu
-editor move to 1.x.
+editor move to 1.x. As of October 2026 the realistic v1.0 cut is: M4 (without watches),
+the M6 items under "Not done" except the menu editor, and the docs. Everything below
+that line is 1.x.
+
+**1.x backlog** (carried here so it is not lost): code folding; debugger watches;
+control arrays; the menu editor and the `Menu`, `TreeView` and `Tabs` control kinds;
+the Data stdlib (`json`, `csv`, `settings`); per-control colours and fonts (G17);
+IME (G3); OS file drag-and-drop onto the IDE (G12); a docking manager (G8).
 
 ---
 
@@ -546,9 +628,25 @@ of this.
 
 ## 14. Immediate next steps
 
-1. Convert the repo into the §2 workspace. Add xui (pinned) and `rhai` with the
-   `debugging`, `metadata` and `internals` features.
-2. Spike G11 (menu shortcuts and rebuilds). Done: both are missing, recorded in §10 and
-   filed upstream as xui#185.
-3. Write `lazyrad-project` (the `.lrp`/`.lfm` serde model) plus the "Hello" sample,
-   then implement M1 so the player runs it.
+The original steps (workspace, G11 spike, `lazyrad-project` and the Hello sample, M1)
+are all done. What comes next, in order:
+
+1. **M4, first slice: the debug protocol and `--debug`.** Add `lazyrad-debug-proto`
+   (JSON lines, §7), a `--debug` mode in `lazyrad-player` that installs Rhai's debugger
+   callback and blocks on stdin when stopped, and an IDE-side client in `run.rs`.
+   Demo: set a breakpoint in a handler, hit F5, stop on the line.
+2. **M4, second slice: the panes.** Step into/over/out, call stack, Locals and the
+   Immediate window; the editor gutter breakpoint dot and current-line arrow; break on
+   error (builds on the script-errors-as-failures work, #107). Watches are 1.x.
+3. **Finish M6 for v1.0:** go to definition and signature help; class modules and their
+   template; `input_box` and the save/colour dialogs; Time (`DateTime`, `stopwatch`) and
+   `clipboard`; the tab-order mode. Re-check G14 (xui#146) first, since it decides
+   whether `msg_box` and `input_box` can block.
+4. **Docs and housekeeping:** fix the README, which lists `--debug` as a player mode and says
+   both binaries "open an empty xui window", neither of which matches reality, and add
+   `xui-form` and `xui-rhai` to its crate table; write a
+   language and stdlib reference from the `metadata` doc comments.
+5. **LazyOS (M7):** wire the exported-app path through to a real LazyOS install via
+   `pkgd` when it lands, and keep the xui pin in step with `lazyos/xui-app`. The IDE on
+   LazyOS follows once M4 gives it a debug transport that is not process-spawn-only
+   (the in-process fallback in §12).
