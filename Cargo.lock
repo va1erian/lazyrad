@@ -1210,6 +1210,7 @@ version = "0.1.0"
 dependencies = [
  "editpe",
  "embed-resource",
+ "lazyrad-debug-proto",
  "lazyrad-packager",
  "lazyrad-project",
  "lazyrad-runtime",

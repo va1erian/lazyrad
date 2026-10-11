@@ -25,6 +25,7 @@ desktop = ["lazyrad-runtime/desktop", "dep:xui-canvas"]
 native-dialogs = ["dep:rfd", "dep:pollster"]
 
 [dependencies]
+lazyrad-debug-proto.workspace = true
 lazyrad-packager.workspace = true
 lazyrad-project.workspace = true
 lazyrad-runtime.workspace = true

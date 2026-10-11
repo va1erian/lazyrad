@@ -33,6 +33,7 @@
 //! `Debug.print` (Rhai's `print`/`debug`) goes to stdout, one flushed line per
 //! call, so an IDE reading the player's stdout sees each line as it happens.
 
+pub mod debug;
 pub mod embedded;
 pub mod platform;
 
@@ -40,9 +41,15 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::rc::Rc;
 
+use lazyrad_debug_proto::Event;
 use lazyrad_project::Diagnostic;
-use lazyrad_runtime::{FormRuntime, RuntimeError, ScriptError, check_project, run_runtime_with};
+use lazyrad_runtime::{
+    DebugSession, FormRuntime, RuntimeError, ScriptError, check_project, run_runtime_with,
+};
 use xui_core::backend::{Backend, BackendError};
+
+/// The command line, as printed for a bad one.
+const USAGE: &str = "usage: lazyrad-player [--watch | --debug | --check] <project dir | .lrp>";
 
 /// The exit code for a normal run.
 pub const EXIT_OK: i32 = 0;
@@ -69,7 +76,9 @@ pub type BackendFactory<'a> =
 /// returning the process exit code.
 ///
 /// `lazyrad-player <project dir | .lrp>` runs a project; `--watch` before the
-/// path polls its files and reloads its forms as they change (issue #91); with
+/// path polls its files and reloads its forms as they change (issue #91);
+/// `--debug` does the same and also speaks the debug protocol on stdin and
+/// stdout (breakpoints, stepping, locals; see [`debug`] and PLAN.md §7); with
 /// no argument the player opens an empty window, which is the shell M0 used to
 /// prove the windowed path works.
 #[cfg(feature = "desktop")]
@@ -105,10 +114,17 @@ pub fn run_with_backend(args: &[String], make_backend: BackendFactory<'_>) -> i3
     match args {
         [] => run_empty_window(make_backend),
         [flag, path] if flag == "--check" => check_only(Path::new(path)),
-        [flag, path] if flag == "--watch" => run_project(Path::new(path), true, make_backend),
-        [path] if !path.starts_with("--") => run_project(Path::new(path), false, make_backend),
+        [flag, path] if flag == "--watch" => {
+            run_project(Path::new(path), Mode::Watch, make_backend)
+        }
+        [flag, path] if flag == "--debug" => {
+            run_project(Path::new(path), Mode::Debug, make_backend)
+        }
+        [path] if !path.starts_with("--") => {
+            run_project(Path::new(path), Mode::Plain, make_backend)
+        }
         _ => {
-            eprintln!("usage: lazyrad-player [--watch | --check] <project dir | .lrp>");
+            eprintln!("{USAGE}");
             EXIT_COMPILE
         }
     }
@@ -184,11 +200,21 @@ fn run_empty_window(make_backend: BackendFactory<'_>) -> i32 {
     }
 }
 
+/// How `run_project` runs the program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// Run it, nothing more.
+    Plain,
+    /// `--watch`: reload the forms as the project's files change (issue #91).
+    Watch,
+    /// `--debug`: run it under the debugger, speaking the debug protocol on
+    /// stdin and stdout ([`debug`]). Hot reload is on too, as under
+    /// `--watch`; breakpoints are kept across a reload.
+    Debug,
+}
+
 /// Checks, loads and runs the project named by `path`.
-///
-/// With `watch` set (the `--watch` flag) the runtime polls the project's files
-/// and reloads its forms as they change (issue #91).
-fn run_project(path: &Path, watch: bool, make_backend: BackendFactory<'_>) -> i32 {
+fn run_project(path: &Path, mode: Mode, make_backend: BackendFactory<'_>) -> i32 {
     let report = match check_project(path) {
         Ok(report) => report,
         Err(error) => {
@@ -218,17 +244,37 @@ fn run_project(path: &Path, watch: bool, make_backend: BackendFactory<'_>) -> i3
         }
     };
 
-    if watch {
+    if mode != Mode::Plain {
         runtime.enable_watch(path);
     }
+    let session = (mode == Mode::Debug).then(|| {
+        let session = DebugSession::new(debug::transport());
+        runtime.set_debugger(Rc::clone(&session));
+        // `stop` from the IDE ends the program: say so, then leave. The
+        // process has nothing to clean up, and the window loop is not
+        // reachable from inside a script callback.
+        let for_hook = Rc::clone(&session);
+        session.set_stop_hook(Rc::new(move || {
+            for_hook.send(&Event::Exited { code: EXIT_OK });
+            std::process::exit(EXIT_OK);
+        }));
+        session.send(&Event::Ready {
+            player: format!("lazyrad-player {}", env!("CARGO_PKG_VERSION")),
+        });
+        session
+    });
 
-    match run_on(runtime, make_backend) {
+    let code = match run_on(runtime, make_backend) {
         Ok(()) => EXIT_OK,
         Err(error) => {
             emit(&[Report::from_runtime_error(&error)]);
             EXIT_RUNTIME
         }
+    };
+    if let Some(session) = session {
+        session.send(&Event::Exited { code });
     }
+    code
 }
 
 /// What kind of problem a [`Report`] describes. These strings are the JSON
@@ -443,6 +489,10 @@ fn emit(reports: &[Report]) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::rc::Rc;
+
+    use lazyrad_runtime::FormRuntime;
+    use xui_core::backend::Backend;
 
     use super::{Kind, Report};
 
@@ -536,6 +586,39 @@ mod tests {
         assert_eq!(report.line, 0);
         assert_eq!(report.col, 0);
         assert_eq!(report.message, "boom");
+    }
+
+    /// A backend factory a test must never reach: nothing here opens a window.
+    fn no_window() -> impl FnMut(Option<&Rc<FormRuntime>>) -> Result<Rc<dyn Backend>, String> {
+        |_| panic!("the command line must fail before a window is created")
+    }
+
+    #[test]
+    fn debug_needs_a_project_and_a_bad_command_line_prints_usage() {
+        use super::{EXIT_COMPILE, run_with_backend};
+        for args in [
+            vec!["--debug".to_owned()],
+            vec!["--debug".to_owned(), "a".to_owned(), "b".to_owned()],
+            vec!["--no-such-flag".to_owned(), "dir".to_owned()],
+        ] {
+            let mut make = no_window();
+            assert_eq!(run_with_backend(&args, &mut make), EXIT_COMPILE, "{args:?}");
+        }
+        assert!(super::USAGE.contains("--debug"));
+    }
+
+    #[test]
+    fn debug_on_a_missing_project_is_a_compile_error_without_a_window() {
+        let dir = std::env::temp_dir().join(format!("lazyrad-player-no-debug-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory is created");
+        let args = vec!["--debug".to_owned(), dir.display().to_string()];
+        let mut make = no_window();
+        assert_eq!(
+            super::run_with_backend(&args, &mut make),
+            super::EXIT_COMPILE
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
