@@ -25,6 +25,7 @@ metadata = ["rhai/metadata"]
 testing = []
 
 [dependencies]
+lazyrad-debug-proto.workspace = true
 lazyrad-project.workspace = true
 # `internals` exposes the compiled AST (`iter_fn_def`, `AST::walk`, the `Stmt`
 # and `Expr` variants) so `check` can lint a script's structure, not just parse

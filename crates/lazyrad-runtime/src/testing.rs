@@ -130,7 +130,15 @@ impl TestApp {
         modules: Vec<ModuleSource>,
         test: impl FnOnce(&mut TestApp) + 'static,
     ) -> Result<(), RuntimeError> {
-        let runtime = FormRuntime::from_sources(forms, modules);
+        TestApp::run_runtime(FormRuntime::from_sources(forms, modules), test)
+    }
+
+    /// Like [`TestApp::run_sources`], for a runtime the test prepared itself
+    /// (a debugger session installed, an observer set).
+    pub fn run_runtime(
+        runtime: Rc<FormRuntime>,
+        test: impl FnOnce(&mut TestApp) + 'static,
+    ) -> Result<(), RuntimeError> {
         let startup = match runtime.startup_name() {
             Ok(name) => name,
             Err(_) => runtime

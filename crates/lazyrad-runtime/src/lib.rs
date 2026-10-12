@@ -21,6 +21,7 @@
 //! [`xui_rhai`] and are re-exported here so LazyRAD's callers see one crate.
 
 pub mod check;
+pub mod debug;
 pub mod engine;
 mod events;
 pub mod extensions;
@@ -40,6 +41,7 @@ pub mod testing;
 mod timers;
 
 pub use check::{CheckReport, check_project, check_runtime};
+pub use debug::{DebugSession, DebugTransport, Incoming};
 pub use engine::{EngineHost, new_engine};
 pub use files::{DiskProject, NoProjectFiles, ProjectFiles};
 pub use form::{
@@ -49,6 +51,9 @@ pub use form::{
 #[cfg(feature = "desktop")]
 pub use form::{run_project, run_runtime};
 pub use fs_policy::{Access, FsError, FsPolicy, Sandbox};
+/// The debug protocol, re-exported so a host that builds a transport (LazyOS)
+/// needs no dependency of its own on the protocol crate.
+pub use lazyrad_debug_proto as proto;
 pub use reload::{ReloadOutcome, WATCH_INTERVAL_MS};
 pub use stdlib::StdlibContext;
 pub use xui_rhai::message::{MsgBoxButtons, Pending};

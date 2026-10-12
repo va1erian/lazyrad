@@ -1,0 +1,17 @@
+[package]
+name = "lazyrad-debug-proto"
+description = "The IDE <-> player debug protocol: serde types and a line codec, one JSON object per line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# No OS dependencies: serde and `serde_json` only, so it builds for the
+# `x86_64-unknown-linux-musl` LazyOS target with no feature switches.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

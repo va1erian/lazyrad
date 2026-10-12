@@ -1148,6 +1148,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
+name = "lazyrad-debug-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazyrad-designer"
 version = "0.1.0"
 dependencies = [
@@ -1166,6 +1174,7 @@ dependencies = [
  "dark-light",
  "directories",
  "embed-resource",
+ "lazyrad-debug-proto",
  "lazyrad-designer",
  "lazyrad-packager",
  "lazyrad-player",
@@ -1202,6 +1211,7 @@ version = "0.1.0"
 dependencies = [
  "editpe",
  "embed-resource",
+ "lazyrad-debug-proto",
  "lazyrad-packager",
  "lazyrad-project",
  "lazyrad-runtime",
@@ -1227,6 +1237,7 @@ dependencies = [
 name = "lazyrad-runtime"
 version = "0.1.0"
 dependencies = [
+ "lazyrad-debug-proto",
  "lazyrad-project",
  "rhai",
  "thiserror 2.0.21",

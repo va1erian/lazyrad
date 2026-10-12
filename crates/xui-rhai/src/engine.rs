@@ -94,6 +94,28 @@ struct Progress {
     budget: Cell<u64>,
 }
 
+/// A handle that asks the engine it came from to stop its running script, as
+/// [`EngineHost::stop`] does, without borrowing the host.
+///
+/// A debugger keeps one per attached engine so a "stop" command can end every
+/// running script (see [`EngineHost::stop_handle`]).
+#[derive(Clone)]
+pub struct StopHandle(Rc<Progress>);
+
+impl StopHandle {
+    /// Requests that a running script stop at the next progress check.
+    pub fn stop(&self) {
+        self.0.stop.set(true);
+    }
+}
+
+/// The source name a compiled script carries: the file name with `/`
+/// separators, so every consumer (a debugger's breakpoint table, an error
+/// message) sees one spelling on every platform.
+pub fn source_name(file: &str) -> String {
+    file.replace('\\', "/")
+}
+
 /// A Rhai engine wired to one form, with the compiled-script helpers around it.
 ///
 /// The host owns the resolver, the form object (`form`) and the globals, so a
@@ -233,6 +255,12 @@ impl EngineHost {
         self.progress.stop.set(true);
     }
 
+    /// A handle that does what [`EngineHost::stop`] does, for a caller that
+    /// cannot hold the host (a debugger session spanning several engines).
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle(Rc::clone(&self.progress))
+    }
+
     /// Clears a previous [`EngineHost::stop`].
     pub fn resume(&self) {
         self.progress.stop.set(false);
@@ -249,10 +277,16 @@ impl EngineHost {
     }
 
     /// Compiles `source`, locating a parse error against [`EngineHost::file`].
+    ///
+    /// The compiled script's *source* is set to the file name, so a debugger
+    /// callback (and Rhai's own diagnostics) can tell which file a node is in.
     pub fn compile(&self, source: &str) -> Result<AST, ScriptError> {
-        self.engine
+        let mut ast = self
+            .engine
             .compile(source)
-            .map_err(|error| ScriptError::from_parse(&self.file, &error))
+            .map_err(|error| ScriptError::from_parse(&self.file, &error))?;
+        ast.set_source(source_name(&self.file));
+        Ok(ast)
     }
 
     /// Runs `ast`'s top-level statements once and returns the AST its handlers
@@ -294,7 +328,10 @@ impl EngineHost {
             .iter()
             .filter(|statement| matches!(statement, rhai::Stmt::Import(..)))
             .cloned();
-        Ok(AST::new(imports, ast.shared_lib().clone()))
+        let mut handlers = AST::new(imports, ast.shared_lib().clone());
+        // The functions run on this AST, so it carries the file name too.
+        handlers.set_source(source_name(&self.file));
+        Ok(handlers)
     }
 
     /// Calls a script function defined in `ast` with no arguments, locating any
@@ -349,10 +386,11 @@ impl EngineHost {
         file: &str,
         source: &str,
     ) -> Result<(), ScriptError> {
-        let ast = self
+        let mut ast = self
             .engine
             .compile(source)
             .map_err(|error| ScriptError::from_parse(file, &error))?;
+        ast.set_source(source_name(file));
         let module = rhai::Module::eval_ast_as_new(Scope::new(), &ast, &self.engine)
             .map_err(|error| ScriptError::from_eval(file, &error))?;
         // A resolver entry backs `import "name" as x`; the global and static

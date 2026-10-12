@@ -11,9 +11,10 @@ of the **xui gaps** LazyRAD will run into, along with a proposed fix for each.
 
 ## 0. Status (October 2026)
 
-LazyRAD is past its first usable cut: you can draw a form, write handlers, press F5 and
-export a `.exe` or a LazyOS `.lzp`. The two large pieces still missing are the
-**debugger (M4)** and **LazyOS IDE support (M7)**. Per milestone (§11 has the detail):
+LazyRAD is past its first usable cut: you can draw a form, write handlers, press F5,
+stop on a breakpoint and export a `.exe` or a LazyOS `.lzp`. The large piece still
+open is polishing **LazyOS** (M7); the debugger (M4) has landed. Per milestone (§11
+has the detail):
 
 | M | State |
 |---|---|
@@ -21,10 +22,10 @@ export a `.exe` or a LazyOS `.lzp`. The two large pieces still missing are the
 | M1 Runtime | Done: player, forms, event binding, `on_var`, non-blocking `msg_box`, four samples |
 | M2 Editor | Done: a reusable `xui-code-editor`, highlighting, diagnostics, find/replace, go to line, tab stops, completion |
 | M3 Designer | Done: surface, toolbox, property grid, double-click to handler. One PR open (#114: clip forms, scrollbars) |
-| **M4 Debugger** | **Not started.** `rhai/debugging` is enabled, but there is no protocol crate, no `--debug` mode in the player and no breakpoint, stepping or Locals UI. Run is F5 / Run End only |
+| **M4 Debugger** | **Done, minus watches.** `lazyrad-debug-proto`, `lazyrad-player --debug`, F9 breakpoints with a gutter dot and a stop-line tint, Continue / Step Into / Over / Out / Break / End, break on error, and Locals, Call Stack and Immediate tabs (§7). Watches and a Breakpoints list are 1.x |
 | M5 Export | Done: stub + payload, PE icon/version/subsystem, *Make EXE*, `.lzp` packages and `lazyrad-pack` |
 | M6 Polish | Partial. See §11 for what landed and what is left |
-| M7 LazyOS | **Running.** The player and the IDE both run on LazyOS as `xuid` clients (`lazyos/lazyrad-os`, core package `os.lazy.lazyrad`), including *Make LazyOS App*. Rough edges and the missing debugger are listed in §12 |
+| M7 LazyOS | **Running.** The player and the IDE both run on LazyOS as `xuid` clients (`lazyos/lazyrad-os`, core package `os.lazy.lazyrad`), including *Make LazyOS App*. The debugger runs there through the launcher's stdin queue (§12); rough edges are listed there too |
 
 Beyond the original plan, these landed: hot reload (`--watch`, §4.2), script errors as
 first-class failures with a host test kit and a Rhai lint (`check_project`), a `Canvas`
@@ -68,8 +69,8 @@ lazyrad/
 │  ├─ lazyrad-project/        .lrp project files + the LazyRAD control catalog
 │  ├─ lazyrad-runtime/        Rhai engine setup, stdlib, form instantiation, event binding
 │  ├─ xui-rhai/               Rhai <-> xui bridge: control wrappers, `on_var`, messages
-│  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol (not created yet, M4)
-│  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir or a payload (`--debug` arrives with M4)
+│  ├─ lazyrad-debug-proto/    IDE <-> player debug protocol: serde types and a line codec (no OS deps)
+│  ├─ lazyrad-player/  (bin)  the runtime host: runs a project dir or a payload; `--watch` reloads, `--debug` debugs
 │  ├─ lazyrad-designer/       xui form-designer surface, toolbox, property grid
 │  ├─ lazyrad-packager/       exe export: stub + payload, icon/metadata where possible
 │  └─ lazyrad-ide/     (bin)  the IDE shell: windows, menus, project explorer, wiring
@@ -161,8 +162,9 @@ Form-level state that outlives a single event lives in `form.state`, an object m
 - The player owns the xui event loop. Each widget event is turned into a
   `Msg::Event { form, control, event, args }`. `App::update` then calls the matching
   Rhai function through `Engine::call_fn` on the form's compiled `AST`.
-- `Engine::on_progress` implements Ctrl+Break, an operation budget per event (to catch
-  runaway loops), and debugger pause checks.
+- `Engine::on_progress` implements Ctrl+Break and an operation budget per event (to
+  catch runaway loops). Under `--debug` the debugger's own callback also reads pause
+  and stop requests (§7).
 - **Hot reload.** The player's `--watch` flag polls the project's `.lrp`, `.lfm` and
   `.rhai` files every 500 ms. On a change it checks and loads a fresh runtime first, and
   on success rebuilds each open form in place (releasing the old form's event sources and
@@ -324,43 +326,94 @@ designer uses both. Only the portable versions remain; see the note under §10.
 
 ## 7. Debugger
 
-> **Status: not started (M4).** Everything below is design. What exists is the Rhai
-> `debugging` feature in the workspace dependency and `Engine::on_progress` use for
-> run limits. The IDE's *Run* menu has only Start and End, and the player has no
-> `--debug` mode, although the README still lists it.
-> This is the largest gap against the "step through it in the debugger" promise and is
-> the top item in §14.
+> **Status: built (M4), minus watches and a Breakpoints list.** The pieces:
+> `crates/lazyrad-debug-proto` (the protocol), `lazyrad_runtime::debug` (the session
+> and Rhai callback), `lazyrad-player --debug` (the stdin/stdout transport), and the
+> IDE's `debugging.rs`, `app/debug.rs` and the launcher seam in `run.rs`.
+> Deviations from the first sketch are marked *(changed)* below.
 
 The debugger is built on Rhai's `debugging` feature, running in the player process.
 
 ```text
-IDE  ──spawn── lazyrad-player --debug <project dir>
- │   stdin : {"cmd":"setBreakpoints","file":"main_form.rhai","lines":[12,30]}
- │           {"cmd":"continue"|"stepInto"|"stepOver"|"stepOut"|"pause"|"stop"}
- │           {"cmd":"evaluate","expr":"name_edit.text","frame":0}
- │   stdout: {"event":"stopped","reason":"breakpoint","file":…,"line":12}
- │           {"event":"output","text":"…"}   {"event":"error", …}  {"event":"exited"}
+IDE  ──spawn── lazyrad-player --debug <project dir>      (also hot-reloads, like --watch)
+ │   stdin : {"v":1,"cmd":"set_breakpoints","file":"main_form.rhai","lines":[12,30]}
+ │           {"v":1,"cmd":"continue"|"step_into"|"step_over"|"step_out"|"pause"|"stop"}
+ │           {"v":1,"cmd":"evaluate","expr":"name_edit.text","frame":0,"id":7}
+ │   stdout: {"v":1,"event":"ready","player":"lazyrad-player 0.1.0"}
+ │           {"v":1,"event":"stopped","reason":"breakpoint","file":…,"line":12,
+ │            "stack":[{"function":…,"file":…,"line":…}],"locals":[{"name":…,"type":…,"value":…}]}
+ │           {"v":1,"event":"resumed"}   {"v":1,"event":"evaluated","id":7,"ok":true,…}
+ │           {"v":1,"event":"output",…}  {"v":1,"event":"error",…}  {"v":1,"event":"exited","code":0}
 ```
 
-- The player registers a debugger callback. When the program stops, it serialises the
-  call stack (`Debugger::call_stack`), the locals of the selected frame (from `Scope`)
-  and the form's controls. It then **blocks, reading stdin**, until it receives a resume
-  command. The paused app freezes, just as it did in VB6. The IDE stays responsive
-  because it is a separate process.
-- IDE panes:
-  - **Immediate window:** runs `evaluate` against the paused frame, or in run mode
-    against the global context. `debug(...)` output lands here.
-  - **Locals**
-  - **Watches**
-  - **Call stack**
-  - **Breakpoints list**
-  - a current-line highlight in the editor
-- **Break on error:** script errors stop the program at the failing position instead
-  of exiting.
-- **Pause and break all:** these work through the `on_progress` flag and the debugger
-  callback.
+- **Protocol.** One JSON object per line, every message carrying `"v"` (a different
+  version is refused and the IDE prints a notice). *(changed)* Command names are
+  snake_case, `evaluate` carries an `id` echoed in `evaluated`, and the call stack
+  and locals ride inside the `stopped` event so a stop is one atomic message. Lines
+  are one-based; files are project-relative with `/` (`normalize_file`). A line that
+  is not a command (bad JSON, unknown name, wrong version, oversized, invalid UTF-8)
+  is answered with an `error` event and ignored; the reader caps a line at 256 KiB
+  and a `stopped` event is trimmed to 40 KiB (`truncated`).
+- **Player.** When the program stops it serialises the call stack and the innermost
+  frame's locals, then **blocks, reading its transport**, until a resume command: the
+  paused window freezes as it did in VB6, and a window manager may call it "not
+  responding" until the IDE resumes it. The IDE stays responsive because it is
+  another process. *(changed)* The callback asks Rhai for every node, which is what
+  makes breakpoints, the three steps, break on error and pause one uniform rule at
+  a small per-node cost; the normal (non-`--debug`) path installs no callback and
+  pays nothing.
+- **Breakpoints** are `(file, line)` pairs held by the session, not by a compiled
+  script, so they survive a hot reload unchanged: the new engines get the callback
+  and the pairs still match by file and line. A line past the end never matches.
+  The IDE re-sends its set on every save, which is when the player's text matches
+  the editor's again. A breakpoint fires once when a line is reached, not once per
+  expression on it (a call level's last line is tracked), so a one-line loop body
+  stops once per entry, not once per iteration.
+- **Stepping.** Over stays at or above the starting call depth, out waits for a
+  lower one. Stepping past the end of a handler, or out of the outermost frame, ends
+  the stop and the program is idle again: there is no "stop in the next handler".
+  Step out lands on the line after the call.
+- **Break on error.** A script error stops at the failing position, in the frame
+  that raised it, with `reason: "exception"`, the message and that frame's locals
+  (Rhai rewinds a function's scope before reporting its exit, so the callback keeps a
+  once-per-line note of the locals for this). Resuming lets the error take its
+  normal route (the player's message box). Errors in a script's top-level code run
+  before any handler and are reported as startup failures instead. A runaway loop
+  ends at the operation budget as such an error.
+- **Pause and Break** are read by the callback every 128 nodes, so a loop that never
+  returns can be interrupted. When no script runs a pause stays armed and stops at the
+  first line of the next handler: the IDE says so, since a program that is idle
+  between events cannot stop earlier. *(changed)* Pause does not use `on_progress`
+  (it cannot enter the debugger); `stop` does use `EngineHost::stop` through a stop
+  handle on every attached engine, then exits the process.
+- **Evaluate** compiles the text against the stopped frame's scope, with the script's
+  functions and the form's controls in reach, and may assign. Only frame `0` has a
+  scope: Rhai keeps none for outer frames, so the Call Stack lists them (activating a
+  row opens its file and line) but their locals are not available.
+- **IDE.** F9 toggles a breakpoint on the caret's line (a gutter dot; the editor has
+  no arrow glyph, so the stop line is a whole-line tint: warning colour for a step or
+  breakpoint, error colour for an error). *Start* (F5) runs under the debugger when
+  breakpoints exist and as a normal run with hot reload when they do not; *Start with
+  Debugging* (Ctrl+F5) always debugs. While stopped F5 continues, F8 / Shift+F8 /
+  Ctrl+Shift+F8 step into / over / out, Ctrl+Shift+F5 breaks, Shift+F5 ends. The bottom
+  area has Output, Locals, Call Stack and Immediate tabs. The Immediate pane has an
+  Evaluate button (xui's `Edit` has no submit event yet); when nothing is stopped it
+  says so instead of evaluating. Breakpoints belong to the IDE session, keyed by
+  project item: they follow renames, go with a removed item, move with edits (a diff
+  of the text before and after, so inserting lines above carries them down and a
+  deleted line takes its breakpoint with it), never dirty a document or touch its
+  undo, and are not written to the project.
+- **Transport.** The IDE sends commands with `ChildProcess::send_line` (non-blocking;
+  the desktop launcher uses a writer thread, a polling launcher queues the bytes) and
+  receives events through the same sink as output (`RunEvent::Debug`), so no IDE-side
+  reader thread is needed. The player reads stdin on a reader thread on the desktop;
+  a host without that (LazyOS) installs its own transport with
+  `lazyrad_player::debug::install_transport`, and a thread that cannot read stdin
+  falls back to blocking reads at each stop. When the pipe closes, a stopped player
+  **detaches**: it resumes and runs on with the debugger off, so it is never left
+  blocked on a dead pipe.
 - **Edit-and-continue:** not planned. Reloading a changed handler function between
-  events is a possible later stretch.
+  events is a possible later stretch. **Watches** and a **Breakpoints list** are 1.x.
 - Since the protocol is plain JSON over stdio, a LazyOS build could replace pipes with
   Messenger later.
 
@@ -514,10 +567,10 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M1 | Done | Samples: hello, calculator, todo, brickbreaker. Core stdlib done; Collections helpers (`set`/`queue`/`stack`, `sort_by`) not |
 | M2 | Done | Find, Find Next, Replace, Go to Line, completion (`completion.rs`), tab stops, diagnostics. Folding was already cut to 1.x |
 | M3 | Done | Open PR #114. The designer's menu editor and tab-order *mode* are M6 items (below) |
-| M4 | **Not started** | All of it. The first slice is the `lazyrad-debug-proto` crate (JSON lines) plus `lazyrad-player --debug` with breakpoints and continue |
+| M4 | Done (no watches) | `lazyrad-debug-proto`, `lazyrad-player --debug`, breakpoints (F9), Continue, Step Into/Over/Out, Break, End, break on error, Locals, Call Stack and Immediate panes. Not done: watches, a Breakpoints list, an arrow glyph for the stop line (needs an xui editor change), evaluate in outer frames, Return-to-evaluate in the Immediate pane (xui `Edit` has no submit event). The LazyOS launcher side is in the LazyOS repo (`lazyrad-os/src/launcher.rs`) |
 | M5 | Done | Stub + payload packer, `editpe` icon and version, subsystem flip, `lazyrad-pack`, `.lzp` packages. Cross-target stub picking in *Make EXE*: unchecked |
 | M6 | Partial | **Done:** themes, samples, standard shortcuts, start page and tutorial, most of IO and App, `Timer`, dialogs for open-file, hot reload, lint. **Not done:** go to definition, signature help, class modules (`__class` completion and template), menu editor, tab-order mode, `input_box`/save/colour dialogs, Time (`DateTime`, `stopwatch`), `clipboard`, `env`, `screen`, docs |
-| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). Outstanding: debugger (needs M4), IDE responsiveness, the in-window file dialog panic, Manage Apps |
+| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). The debugger's LazyOS side passed a QEMU session once (§12; Call Stack, Immediate, break on error, the F8 keys and the unlabelled `PollingLauncher` path are unverified there). Outstanding: IDE responsiveness, the in-window file dialog panic, Manage Apps |
 
 **v1.0 = M0–M6.** Scope cuts, if needed: folding, watches, control arrays and the menu
 editor move to 1.x. As of October 2026 the realistic v1.0 cut is: M4 (without watches),
@@ -559,10 +612,14 @@ needed from LazyRAD, and what it found:
 - **Make LazyOS App** goes through the `Installer` seam, using the Installer and
   `mimed` rather than `pkgd` (labelled callers are refused). The IDE blocks while the
   user finishes in the Installer.
-- **Debugger is the gap.** LazyOS has no debug session because LazyRAD has no M4.
-  Pipes to a spawned player work (polled non-blocking pipes; threads there do not share
-  a descriptor table, so reader threads lose the pipe), so M4 should read the player's
-  stdout on a timer, not on a thread.
+- **Debugger.** Pipes to a spawned player work (polled non-blocking pipes; threads
+  there do not share a descriptor table, so reader threads lose the pipe), so M4 reads
+  the player's stdout on a timer, not on a thread, and the launcher seam
+  (`Launcher::launch_with`, `ChildProcess::send_line`) lets a polling launcher write
+  the player's stdin from that same timer. The LazyOS launchers implement both and
+  start the player with `--debug`; the player side installs a non-blocking stdin
+  transport with `lazyrad_player::debug::install_transport` because a reader thread
+  there cannot see the process's stdin. See `lazyos/docs/lazyrad-plan.md` §8.
 - **`std::env::current_exe()` is wrong on LazyOS** (it reports `/busybox`). Anything
   in LazyRAD that locates itself must go through the `Platform`'s player lookup, not
   `current_exe` (the packager and `player_beside` already do).
@@ -596,6 +653,8 @@ time. CI checks Windows, Linux and macOS (`.github/workflows/ci.yml`).
 | `lazyrad-project/src/fs_safety.rs` | `write_no_follow`, `is_symlink`: saves never follow a link out of the project (`O_NOFOLLOW` on Unix, reparse points on Windows) | check-then-open (slightly racy) |
 | `lazyrad-packager/src/platform.rs` | `make_executable` (mode `0o755` on Unix) | no-op |
 | `lazyrad-player/src/platform.rs` | `show_error`: why an exported GUI app did not start (`rfd`, feature `native-dialogs`) | stderr |
+| `lazyrad-player/src/debug.rs` (`install_transport`) | how a `--debug` player reads commands: a `DebugTransport` over stdin/stdout | a reader thread on `std::io::stdin`, falling back to blocking reads on the calling thread when that thread cannot read (LazyOS installs a non-blocking one) |
+| `lazyrad-ide/src/run.rs` (`Launcher::launch_with`, `ChildProcess::send_line`) | starting the player with `--debug` and writing its stdin without blocking | the default refuses `--debug` and cannot send, so a launcher that predates debugging still compiles and the IDE falls back to a plain run |
 | `xui-code-editor` platform module | system clipboard (`arboard`) | in-process clipboard. Moving to the xui repo in issue #72 |
 
 `--no-default-features` on `lazyrad-ide` and `lazyrad-player` builds without `rfd`, which
@@ -665,25 +724,22 @@ of this.
 The original steps (workspace, G11 spike, `lazyrad-project` and the Hello sample, M1)
 are all done. What comes next, in order:
 
-1. **M4, first slice: the debug protocol and `--debug`.** Add `lazyrad-debug-proto`
-   (JSON lines, §7), a `--debug` mode in `lazyrad-player` that installs Rhai's debugger
-   callback and blocks on stdin when stopped, and an IDE-side client in `run.rs`.
-   Demo: set a breakpoint in a handler, hit F5, stop on the line.
-2. **M4, second slice: the panes.** Step into/over/out, call stack, Locals and the
-   Immediate window; the editor gutter breakpoint dot and current-line arrow; break on
-   error (builds on the script-errors-as-failures work, #107). Watches are 1.x.
-3. **Finish M6 for v1.0:** go to definition and signature help; class modules and their
+1. **M4 follow-ups** (the debugger itself is done, §7): watches and a Breakpoints list
+   (1.x); a stop-line arrow glyph and Return-to-submit in `Edit` (both need xui
+   changes); locals for outer frames (Rhai keeps no per-frame scope; it would need
+   the callback to snapshot at call time); a way to stop a program that is idle
+   between events (today Break waits for the next handler); a time budget on the
+   per-node callback if a debug-mode game proves too slow. Exercise the rest of the
+   debugger on a booted LazyOS image (§12 lists what its session did not).
+2. **Finish M6 for v1.0:** go to definition and signature help; class modules and their
    template; `input_box` and the save/colour dialogs; Time (`DateTime`, `stopwatch`) and
    `clipboard`; the tab-order mode. Re-check G14 (xui#146) first, since it decides
    whether `msg_box` and `input_box` can block.
-4. **Docs and housekeeping:** fix the README, which lists `--debug` as a player mode and says
-   both binaries "open an empty xui window", neither of which matches reality, and add
-   `xui-form` and `xui-rhai` to its crate table; write a
-   language and stdlib reference from the `metadata` doc comments.
-5. **LazyOS (M7), now that the IDE runs there:** keep the xui pin in step with
-   `lazyos/xui-app` (both repos bump together). Triage the findings in §12
-   ("Findings from the LazyOS port"); the file-dialog panic and the IDE's input
-   latency are the ones a LazyOS user hits first. The debugger's transport is
-   already solved: pipes work on LazyOS through its polling launcher, so M4's
-   JSON-lines protocol needs no LazyOS-specific transport, only a non-blocking
-   reader on the IDE side.
+3. **Docs and housekeeping:** add `xui-form` and `xui-rhai` to the README's crate
+   table; write a language and stdlib reference from the `metadata` doc comments.
+4. **LazyOS (M7), now that the IDE runs there:** keep the xui pin in step with
+   `lazyos/xui-app` (both repos bump together), and bump the LazyRAD `rev` in
+   `lazyrad-os/Cargo.toml` to a commit that has the debugger (`python
+   tools/xui/bump_pin.py`). Triage the findings in §12 ("Findings from the LazyOS
+   port"); the file-dialog panic and the IDE's input latency are the ones a LazyOS
+   user hits first. The debugger's transport is the launcher seam (§7, §12).

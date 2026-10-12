@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use xui_core::message::{Key, Modifiers};
 
+use crate::debugging::DebugPhase;
 use crate::edit_state::EditAvailability;
 
 /// One IDE action.
@@ -87,6 +88,22 @@ pub enum Command {
     RunStart,
     /// Run → End.
     RunEnd,
+    /// Run → Start with Debugging: always runs under the debugger, so Break
+    /// and break-on-error work even with no breakpoint set.
+    RunDebug,
+    /// Run → Continue (F5 shows it too, as Start does): resumes a stopped
+    /// program.
+    RunContinue,
+    /// Run → Break: stops a running program at the next line it executes.
+    RunBreak,
+    /// Run → Step Into.
+    StepInto,
+    /// Run → Step Over.
+    StepOver,
+    /// Run → Step Out.
+    StepOut,
+    /// Run → Toggle Breakpoint on the caret's line.
+    ToggleBreakpoint,
     /// View → Theme → Light.
     ThemeLight,
     /// View → Theme → Dark.
@@ -150,6 +167,8 @@ fn key_name(key: Key) -> &'static str {
         Key::F3 => "F3",
         Key::F5 => "F5",
         Key::F7 => "F7",
+        Key::F8 => "F8",
+        Key::F9 => "F9",
         Key::S => "S",
         Key::N => "N",
         Key::O => "O",
@@ -207,6 +226,13 @@ impl Command {
         Command::ProjectProperties,
         Command::RunStart,
         Command::RunEnd,
+        Command::RunDebug,
+        Command::RunContinue,
+        Command::RunBreak,
+        Command::StepInto,
+        Command::StepOver,
+        Command::StepOut,
+        Command::ToggleBreakpoint,
         Command::ThemeLight,
         Command::ThemeDark,
         Command::ThemeSystem,
@@ -248,6 +274,13 @@ impl Command {
             Command::ProjectProperties => "Properties".to_string(),
             Command::RunStart => "Start".to_string(),
             Command::RunEnd => "End".to_string(),
+            Command::RunDebug => "Start with Debugging".to_string(),
+            Command::RunContinue => "Continue".to_string(),
+            Command::RunBreak => "Break".to_string(),
+            Command::StepInto => "Step Into".to_string(),
+            Command::StepOver => "Step Over".to_string(),
+            Command::StepOut => "Step Out".to_string(),
+            Command::ToggleBreakpoint => "Toggle Breakpoint".to_string(),
             Command::ThemeLight => "Light".to_string(),
             Command::ThemeDark => "Dark".to_string(),
             Command::ThemeSystem => "System".to_string(),
@@ -263,6 +296,16 @@ impl Command {
             Command::OpenProject => Some(Shortcut::new(true, false, false, Key::O)),
             Command::RunStart => Some(Shortcut::new(false, false, false, Key::F5)),
             Command::RunEnd => Some(Shortcut::new(false, true, false, Key::F5)),
+            Command::RunDebug => Some(Shortcut::new(true, false, false, Key::F5)),
+            // Continue is what F5 does while stopped, so it shows the same
+            // chord; the window-level lookup resolves F5 to `RunStart`
+            // (see `alias_of`), which continues a stopped program.
+            Command::RunContinue => Some(Shortcut::new(false, false, false, Key::F5)),
+            Command::RunBreak => Some(Shortcut::new(true, true, false, Key::F5)),
+            Command::StepInto => Some(Shortcut::new(false, false, false, Key::F8)),
+            Command::StepOver => Some(Shortcut::new(false, true, false, Key::F8)),
+            Command::StepOut => Some(Shortcut::new(true, true, false, Key::F8)),
+            Command::ToggleBreakpoint => Some(Shortcut::new(false, false, false, Key::F9)),
             Command::Undo => Some(Shortcut::new(true, false, false, Key::Z)),
             Command::Redo => Some(Shortcut::new(true, false, false, Key::Y)),
             Command::Cut => Some(Shortcut::new(true, false, false, Key::X)),
@@ -276,6 +319,17 @@ impl Command {
             Command::FindNext => Some(Shortcut::new(false, false, false, Key::F3)),
             Command::Replace => Some(Shortcut::new(true, false, false, Key::H)),
             Command::GoToLine => Some(Shortcut::new(true, false, false, Key::G)),
+            _ => None,
+        }
+    }
+
+    /// The command whose chord this one only *displays*: Continue shows F5,
+    /// but F5 dispatches Start, which continues a stopped program. Aliases are
+    /// skipped when a key chord is looked up and when chords are checked for
+    /// uniqueness.
+    pub fn alias_of(self) -> Option<Command> {
+        match self {
+            Command::RunContinue => Some(Command::RunStart),
             _ => None,
         }
     }
@@ -362,6 +416,13 @@ impl Command {
                 | Command::ProjectProperties
                 | Command::RunStart
                 | Command::RunEnd
+                | Command::RunDebug
+                | Command::RunContinue
+                | Command::RunBreak
+                | Command::StepInto
+                | Command::StepOver
+                | Command::StepOut
+                | Command::ToggleBreakpoint
         )
     }
 
@@ -392,11 +453,12 @@ impl Command {
             return None;
         }
         Command::ALL.iter().copied().find(|command| {
-            command
-                .shortcut()
-                .into_iter()
-                .chain(command.extra_shortcuts().iter().copied())
-                .any(|shortcut| shortcut.matches(key, modifiers))
+            command.alias_of().is_none()
+                && command
+                    .shortcut()
+                    .into_iter()
+                    .chain(command.extra_shortcuts().iter().copied())
+                    .any(|shortcut| shortcut.matches(key, modifiers))
         })
     }
 
@@ -418,6 +480,9 @@ pub struct Dispatcher {
     enabled: HashMap<Command, bool>,
     project_open: bool,
     running: bool,
+    /// Whether the running program is under the debugger, and whether it is
+    /// stopped. Only meaningful while `running`.
+    debug: DebugPhase,
     /// What the active document can do; gates the Edit group's menu entries.
     edit: EditAvailability,
 }
@@ -429,6 +494,7 @@ impl Dispatcher {
             enabled: HashMap::new(),
             project_open: true,
             running: false,
+            debug: DebugPhase::Off,
             edit: EditAvailability::ALL,
         };
         for &command in Command::ALL {
@@ -483,7 +549,22 @@ impl Dispatcher {
     /// and End only while running (issue #16).
     pub fn set_running(&mut self, running: bool) {
         self.running = running;
+        if !running {
+            self.debug = DebugPhase::Off;
+        }
         self.recompute();
+    }
+
+    /// Records where a debug run is: Continue, the step commands and Break
+    /// follow it. [`DebugPhase::Off`] is a run without the debugger.
+    pub fn set_debug_phase(&mut self, phase: DebugPhase) {
+        self.debug = phase;
+        self.recompute();
+    }
+
+    /// Where the debug run is.
+    pub fn debug_phase(&self) -> DebugPhase {
+        self.debug
     }
 
     /// Re-derives every command's enabled state from the project and run state.
@@ -496,10 +577,25 @@ impl Dispatcher {
                 self.enabled.insert(command, self.project_open);
             }
         }
+        let stopped = self.running && self.debug == DebugPhase::Stopped;
+        // Start also continues a stopped program (F5).
+        self.enabled.insert(
+            Command::RunStart,
+            self.project_open && (!self.running || stopped),
+        );
         self.enabled
-            .insert(Command::RunStart, self.project_open && !self.running);
+            .insert(Command::RunDebug, self.project_open && !self.running);
         self.enabled
             .insert(Command::RunEnd, self.project_open && self.running);
+        self.enabled
+            .insert(Command::RunContinue, self.project_open && stopped);
+        for step in [Command::StepInto, Command::StepOver, Command::StepOut] {
+            self.enabled.insert(step, self.project_open && stopped);
+        }
+        self.enabled.insert(
+            Command::RunBreak,
+            self.project_open && self.running && self.debug == DebugPhase::Running,
+        );
     }
 
     /// Runs `command`'s M0 behaviour: log it. The commands that already have
@@ -600,7 +696,7 @@ mod tests {
     #[test]
     fn an_unbound_chord_maps_to_nothing() {
         assert_eq!(Command::from_keydown(Key::S, Modifiers::NONE), None);
-        assert_eq!(Command::from_keydown(Key::F5, ctrl()), None);
+        assert_eq!(Command::from_keydown(Key::F6, ctrl()), None);
         assert_eq!(
             Command::from_keydown(
                 Key::F5,
@@ -651,6 +747,17 @@ mod tests {
             (Key::S, chord(true, true), Command::SaveAll, true),
             (Key::F5, chord(false, false), Command::RunStart, true),
             (Key::F5, chord(false, true), Command::RunEnd, true),
+            (Key::F5, chord(true, false), Command::RunDebug, true),
+            (Key::F8, chord(false, false), Command::StepInto, true),
+            (Key::F8, chord(false, true), Command::StepOver, true),
+            (Key::F8, chord(true, true), Command::StepOut, true),
+            (
+                Key::F9,
+                chord(false, false),
+                Command::ToggleBreakpoint,
+                true,
+            ),
+            (Key::F5, chord(true, true), Command::RunBreak, true),
             (Key::F7, chord(false, false), Command::ViewCode, true),
             (Key::F7, chord(false, true), Command::ViewObject, true),
             (Key::F, chord(true, false), Command::Find, true),
@@ -772,6 +879,86 @@ mod tests {
     }
 
     #[test]
+    fn the_debug_commands_follow_the_debug_phase() {
+        let mut dispatcher = Dispatcher::new();
+        let stepping = [
+            Command::RunContinue,
+            Command::StepInto,
+            Command::StepOver,
+            Command::StepOut,
+            Command::RunBreak,
+        ];
+        // Idle: Start and Start with Debugging, nothing else.
+        assert!(dispatcher.is_enabled(Command::RunStart));
+        assert!(dispatcher.is_enabled(Command::RunDebug));
+        for command in stepping {
+            assert!(!dispatcher.is_enabled(command), "{command:?} while idle");
+        }
+        assert!(dispatcher.is_enabled(Command::ToggleBreakpoint));
+
+        // Running under the debugger: only Break and End.
+        dispatcher.set_running(true);
+        dispatcher.set_debug_phase(DebugPhase::Running);
+        assert!(!dispatcher.is_enabled(Command::RunStart));
+        assert!(!dispatcher.is_enabled(Command::RunDebug));
+        assert!(dispatcher.is_enabled(Command::RunBreak));
+        assert!(dispatcher.is_enabled(Command::RunEnd));
+        assert!(!dispatcher.is_enabled(Command::StepOver));
+
+        // A plain run has no debugger to break into.
+        dispatcher.set_debug_phase(DebugPhase::Off);
+        assert!(!dispatcher.is_enabled(Command::RunBreak));
+        dispatcher.set_debug_phase(DebugPhase::Running);
+
+        // Stopped: Start continues (F5), the steps are on, Break is off.
+        dispatcher.set_debug_phase(DebugPhase::Stopped);
+        assert!(dispatcher.is_enabled(Command::RunStart), "F5 continues");
+        assert!(dispatcher.is_enabled(Command::RunContinue));
+        assert!(dispatcher.is_enabled(Command::StepInto));
+        assert!(dispatcher.is_enabled(Command::StepOver));
+        assert!(dispatcher.is_enabled(Command::StepOut));
+        assert!(!dispatcher.is_enabled(Command::RunBreak));
+        assert!(!dispatcher.is_enabled(Command::RunDebug));
+
+        // The run ending resets the phase with it.
+        dispatcher.set_running(false);
+        assert_eq!(dispatcher.debug_phase(), DebugPhase::Off);
+        assert!(!dispatcher.is_enabled(Command::StepInto));
+        assert!(dispatcher.is_enabled(Command::RunStart));
+
+        // No project: nothing debug-related, not even toggling.
+        dispatcher.set_project_open(false);
+        assert!(!dispatcher.is_enabled(Command::ToggleBreakpoint));
+        assert!(!dispatcher.is_enabled(Command::RunDebug));
+    }
+
+    #[test]
+    fn continue_shows_f5_but_only_start_answers_the_key() {
+        assert_eq!(Command::RunContinue.shortcut_text().as_deref(), Some("F5"));
+        assert_eq!(Command::RunContinue.alias_of(), Some(Command::RunStart));
+        assert_eq!(
+            Command::from_keydown(Key::F5, Modifiers::NONE),
+            Some(Command::RunStart)
+        );
+        assert_eq!(
+            Command::StepOver.shortcut_text().as_deref(),
+            Some("Shift+F8")
+        );
+        assert_eq!(
+            Command::StepOut.shortcut_text().as_deref(),
+            Some("Ctrl+Shift+F8")
+        );
+        assert_eq!(
+            Command::ToggleBreakpoint.shortcut_text().as_deref(),
+            Some("F9")
+        );
+        assert_eq!(
+            Command::RunBreak.shortcut_text().as_deref(),
+            Some("Ctrl+Shift+F5")
+        );
+    }
+
+    #[test]
     fn mutating_commands_are_refused_while_running() {
         assert!(Command::AddForm.is_editing());
         assert!(Command::Remove.is_editing());
@@ -785,6 +972,10 @@ mod tests {
     fn every_shortcut_is_unique() {
         let mut seen: Vec<(Key, bool, bool, bool)> = Vec::new();
         for &command in Command::ALL {
+            // An alias only displays its original's chord.
+            if command.alias_of().is_some() {
+                continue;
+            }
             for shortcut in command
                 .shortcut()
                 .into_iter()
