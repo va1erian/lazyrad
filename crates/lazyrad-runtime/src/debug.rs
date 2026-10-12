@@ -427,6 +427,9 @@ impl DebugSession {
                     let mut state = self.state.borrow_mut();
                     state.last.clear();
                     state.reported_error = None;
+                    // A step does not carry into the next handler; a pause
+                    // (its own flag) does.
+                    state.resume = Resume::Run;
                 }
                 // Commands that arrived while idle (breakpoints, a pause).
                 self.drain();

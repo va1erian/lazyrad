@@ -161,9 +161,6 @@ impl Shortcut {
     }
 }
 
-/// The Pause/Break key (`VK_PAUSE`), which xui has no named constant for.
-const PAUSE: Key = Key::from_code(0x13);
-
 /// A human-readable name for the keys the IDE binds.
 fn key_name(key: Key) -> &'static str {
     match key {
@@ -172,7 +169,6 @@ fn key_name(key: Key) -> &'static str {
         Key::F7 => "F7",
         Key::F8 => "F8",
         Key::F9 => "F9",
-        PAUSE => "Pause",
         Key::S => "S",
         Key::N => "N",
         Key::O => "O",
@@ -305,7 +301,7 @@ impl Command {
             // chord; the window-level lookup resolves F5 to `RunStart`
             // (see `alias_of`), which continues a stopped program.
             Command::RunContinue => Some(Shortcut::new(false, false, false, Key::F5)),
-            Command::RunBreak => Some(Shortcut::new(true, false, false, PAUSE)),
+            Command::RunBreak => Some(Shortcut::new(true, true, false, Key::F5)),
             Command::StepInto => Some(Shortcut::new(false, false, false, Key::F8)),
             Command::StepOver => Some(Shortcut::new(false, true, false, Key::F8)),
             Command::StepOut => Some(Shortcut::new(true, true, false, Key::F8)),
@@ -761,7 +757,7 @@ mod tests {
                 Command::ToggleBreakpoint,
                 true,
             ),
-            (PAUSE, chord(true, false), Command::RunBreak, true),
+            (Key::F5, chord(true, true), Command::RunBreak, true),
             (Key::F7, chord(false, false), Command::ViewCode, true),
             (Key::F7, chord(false, true), Command::ViewObject, true),
             (Key::F, chord(true, false), Command::Find, true),
@@ -958,7 +954,7 @@ mod tests {
         );
         assert_eq!(
             Command::RunBreak.shortcut_text().as_deref(),
-            Some("Ctrl+Pause")
+            Some("Ctrl+Shift+F5")
         );
     }
 

@@ -289,6 +289,30 @@ fn stepping_past_the_last_line_ends_the_stop() {
 }
 
 #[test]
+fn a_step_past_the_end_of_a_handler_does_not_stop_the_next_one() {
+    run_on_large_stack(|| {
+        let script = Script::new();
+        script.queue(breakpoints("main_form.rhai", &[5]));
+        script.on_stop(vec![Command::StepOver, Command::StepOver]);
+        let _session = debug_run(CALLS, Vec::new(), &script, |app, _| {
+            app.click("go_button");
+            app.click("go_button");
+        });
+        // Each click stops at the breakpoint on `c`; stepping off the end of the
+        // handler must not turn the second click's first line into a `Step` stop.
+        let stops = script.stops();
+        assert_eq!(stops.len(), 2, "{:?}", script.events());
+        assert!(
+            stops
+                .iter()
+                .all(|stop| stop.reason == StopReason::Breakpoint),
+            "{:?}",
+            script.events()
+        );
+    });
+}
+
+#[test]
 fn a_script_error_stops_at_the_failing_position() {
     run_on_large_stack(|| {
         let script = Script::new();

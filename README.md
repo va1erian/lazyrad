@@ -46,7 +46,7 @@ Started with no project, the player opens an empty xui window.
 Click in the code editor and press **F9** to set a breakpoint, then **F5**: with a
 breakpoint set, *Start* runs the program under the debugger (`lazyrad-player --debug`),
 without one it runs normally with hot reload. *Run -> Start with Debugging* (Ctrl+F5)
-always uses the debugger, so *Break* (Ctrl+Pause) and break-on-error work with no
+always uses the debugger, so *Break* (Ctrl+Shift+F5) and break-on-error work with no
 breakpoint. When the program stops, the Locals, Call Stack and Immediate tabs below
 the code fill in; **F5** continues, **F8** steps into, **Shift+F8** over,
 **Ctrl+Shift+F8** out, and **Shift+F5** ends the run. Breakpoints are kept for the

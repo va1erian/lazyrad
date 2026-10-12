@@ -395,7 +395,7 @@ IDE  ──spawn── lazyrad-player --debug <project dir>      (also hot-reloa
   breakpoint, error colour for an error). *Start* (F5) runs under the debugger when
   breakpoints exist and as a normal run with hot reload when they do not; *Start with
   Debugging* (Ctrl+F5) always debugs. While stopped F5 continues, F8 / Shift+F8 /
-  Ctrl+Shift+F8 step into / over / out, Ctrl+Pause breaks, Shift+F5 ends. The bottom
+  Ctrl+Shift+F8 step into / over / out, Ctrl+Shift+F5 breaks, Shift+F5 ends. The bottom
   area has Output, Locals, Call Stack and Immediate tabs. The Immediate pane has an
   Evaluate button (xui's `Edit` has no submit event yet); when nothing is stopped it
   says so instead of evaluating. Breakpoints belong to the IDE session, keyed by
@@ -570,7 +570,7 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M4 | Done (no watches) | `lazyrad-debug-proto`, `lazyrad-player --debug`, breakpoints (F9), Continue, Step Into/Over/Out, Break, End, break on error, Locals, Call Stack and Immediate panes. Not done: watches, a Breakpoints list, an arrow glyph for the stop line (needs an xui editor change), evaluate in outer frames, Return-to-evaluate in the Immediate pane (xui `Edit` has no submit event). The LazyOS launcher side is in the LazyOS repo (`lazyrad-os/src/launcher.rs`) |
 | M5 | Done | Stub + payload packer, `editpe` icon and version, subsystem flip, `lazyrad-pack`, `.lzp` packages. Cross-target stub picking in *Make EXE*: unchecked |
 | M6 | Partial | **Done:** themes, samples, standard shortcuts, start page and tutorial, most of IO and App, `Timer`, dialogs for open-file, hot reload, lint. **Not done:** go to definition, signature help, class modules (`__class` completion and template), menu editor, tab-order mode, `input_box`/save/colour dialogs, Time (`DateTime`, `stopwatch`), `clipboard`, `env`, `screen`, docs |
-| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). The debugger's LazyOS side passed a QEMU session once (§12; Call Stack, Immediate, break on error and the F8 keys are unverified there). Outstanding: IDE responsiveness, the in-window file dialog panic, Manage Apps |
+| M7 | Running, janky | Player and IDE run on LazyOS (`lazyos/lazyrad-os`, plan phases P0–P4 done; the LazyOS-side plan is `lazyos/docs/lazyrad-plan.md`). Spawning the player over pipes works (polled, §12). The debugger's LazyOS side passed a QEMU session once (§12; Call Stack, Immediate, break on error, the F8 keys and the unlabelled `PollingLauncher` path are unverified there). Outstanding: IDE responsiveness, the in-window file dialog panic, Manage Apps |
 
 **v1.0 = M0–M6.** Scope cuts, if needed: folding, watches, control arrays and the menu
 editor move to 1.x. As of October 2026 the realistic v1.0 cut is: M4 (without watches),

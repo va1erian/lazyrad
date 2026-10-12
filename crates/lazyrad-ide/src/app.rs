@@ -2586,6 +2586,7 @@ impl IdeApp {
         if rewritten == source {
             return;
         }
+        self.follow_edit(form, &source, &rewritten);
         if let Some(session) = self.session.as_mut() {
             session.set_code(form, rewritten.clone());
         }
@@ -2641,6 +2642,17 @@ impl IdeApp {
         else {
             return;
         };
+        // Breakpoints and the stop line follow the edit, compared with the
+        // text the session held before it (the editor's own change message
+        // arrives after the session already has the new text).
+        let previous = self
+            .session
+            .as_ref()
+            .and_then(|session| session.code(name))
+            .map(str::to_owned);
+        if let Some(previous) = previous {
+            self.follow_edit(name, &previous, &text);
+        }
         if let Some(session) = self.session.as_mut() {
             session.set_code(name, text.clone());
         }
