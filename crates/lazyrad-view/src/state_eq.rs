@@ -6,8 +6,6 @@
 
 use rhai::{Array, Dynamic, Map};
 
-use crate::visible::Hidden;
-
 /// The deepest nesting of maps and arrays compared. Anything deeper is
 /// treated as changed, so a hostile or accidental 100 000-level state cannot
 /// overflow the stack here. Real form state nests a handful of levels.
@@ -42,10 +40,6 @@ fn same_value(a: &Dynamic, b: &Dynamic, depth: usize) -> bool {
         return false;
     }
     if a.is_unit() && b.is_unit() {
-        return true;
-    }
-    // Two hidden entries are the same to a binding: it cannot see either.
-    if a.is::<Hidden>() && b.is::<Hidden>() {
         return true;
     }
     if let (Ok(x), Ok(y)) = (a.as_bool(), b.as_bool()) {

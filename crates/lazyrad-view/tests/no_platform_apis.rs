@@ -43,6 +43,88 @@ fn violations(source: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Modules of `std` (and `core`) that a wasm-clean view core has no business
+/// in, banned wherever they appear in a path, however the `use` is grouped.
+const BANNED_MODULES: &[&str] = &["fs", "thread", "process", "net", "env", "time", "io", "os"];
+
+/// Splits Rust source into identifiers, `::`, `{`, `}`, `,` and `*`, dropping
+/// everything else and the text of `//` comments.
+fn path_tokens(source: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for line in source.lines() {
+        let code = line.split("//").next().unwrap_or("");
+        let chars: Vec<char> = code.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if is_identifier_char(c) {
+                let start = i;
+                while i < chars.len() && is_identifier_char(chars[i]) {
+                    i += 1;
+                }
+                tokens.push(chars[start..i].iter().collect());
+            } else if c == ':' && chars.get(i + 1) == Some(&':') {
+                tokens.push("::".to_owned());
+                i += 2;
+            } else {
+                if matches!(c, '{' | '}' | ',' | '*') {
+                    tokens.push(c.to_string());
+                }
+                i += 1;
+            }
+        }
+    }
+    tokens
+}
+
+/// Parses the use-tree that follows `std::` at `tokens[i]` and records every
+/// banned module that is a *direct* child of `std`. Returns the index after
+/// the tree.
+fn parse_tree(tokens: &[String], mut i: usize, top: bool, found: &mut Vec<String>) -> usize {
+    match tokens.get(i).map(String::as_str) {
+        Some("{") => {
+            i += 1;
+            loop {
+                i = parse_tree(tokens, i, top, found);
+                match tokens.get(i).map(String::as_str) {
+                    Some(",") => i += 1,
+                    Some("}") => return i + 1,
+                    _ => return i,
+                }
+            }
+        }
+        Some("*") => i + 1,
+        Some(name) if name.chars().all(is_identifier_char) => {
+            if top && BANNED_MODULES.contains(&name) {
+                found.push(format!("std::{name}"));
+            }
+            i += 1;
+            if tokens.get(i).map(String::as_str) == Some("::") {
+                parse_tree(tokens, i + 1, false, found)
+            } else {
+                i
+            }
+        }
+        _ => i,
+    }
+}
+
+/// Every banned `std::<module>` path in `source`: `std::thread::spawn`,
+/// `use std::{fs, io::Read}`, `::std::time::Duration`, `use core::time;`.
+fn std_path_violations(source: &str) -> Vec<String> {
+    let tokens = path_tokens(source);
+    let mut found = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let is_std = token == "std" || token == "core";
+        if is_std && tokens.get(index + 1).map(String::as_str) == Some("::") {
+            parse_tree(&tokens, index + 2, true, &mut found);
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("readable source directory") {
         let path = entry.expect("directory entry").path();
@@ -69,6 +151,9 @@ fn the_sources_use_no_platform_api() {
         let source = fs::read_to_string(file).expect("readable source file");
         for token in violations(&source) {
             offences.push(format!("{}: `{token}`", file.display()));
+        }
+        for path in std_path_violations(&source) {
+            offences.push(format!("{}: `{path}`", file.display()));
         }
     }
     assert!(
@@ -170,4 +255,37 @@ fn the_scanner_catches_each_token_and_not_look_alikes() {
     // `eprintln!` is caught by its own entry (the shorter `println!` is not
     // a whole word inside it).
     assert_eq!(violations("eprintln!(\"x\")"), vec!["eprintln!"]);
+}
+
+/// The path parser: grouped, nested and leading-`::` forms that the
+/// whole-word token scan cannot see.
+#[test]
+fn the_std_path_parser_sees_through_use_groups() {
+    let cases: &[(&str, &[&str])] = &[
+        ("use std::thread;", &["std::thread"]),
+        ("use std::{thread};", &["std::thread"]),
+        (
+            "use std::{collections::HashMap, thread::spawn};",
+            &["std::thread"],
+        ),
+        (
+            "use std::{io::{self, Read}, time::Duration};",
+            &["std::io", "std::time"],
+        ),
+        ("let f = ::std::fs::read(\"x\");", &["std::fs"]),
+        ("use core::time::Duration;", &["std::time"]),
+        ("std::process::exit(1);", &["std::process"]),
+        ("use std::{env, net::*};", &["std::env", "std::net"]),
+        ("use std::{\n    fs,\n    path::Path,\n};", &["std::fs"]),
+        // Not direct children of `std`, or not banned at all.
+        ("use std::collections::{BTreeMap, HashMap};", &[]),
+        ("use std::cell::{Cell, RefCell};", &[]),
+        ("use std::fmt::{self, Write as _};", &[]),
+        ("use std::rc::Rc;", &[]),
+        ("use my::thread::spawn; use other::std_like::time;", &[]),
+        ("// use std::thread; mentioned in a comment", &[]),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(std_path_violations(source), *expected, "{source}");
+    }
 }

@@ -2,20 +2,22 @@
 
 use rhai::{Map, Scope};
 
-use crate::visible::{VISIBLE_BUDGET, View};
+use crate::error::BindError;
+use crate::limits::MAX_STRING_SIZE;
+use crate::visible::{View, long_strings};
 
 /// The variables one evaluation sees: exactly `state`, `props` and `env`, as
 /// constants. Build it once per turn and reuse it for every binding of the
 /// turn, so the maps are copied once.
 ///
-/// Each map is copied as a bounded view: a variable holding more than
-/// [`VISIBLE_BUDGET`] array elements and map entries in total has its largest
-/// entries replaced by a placeholder, so no closure can copy a large list over
-/// and over, and a million-row list is never copied at all. A binding that uses
-/// a hidden entry gets a diagnostic naming it.
+/// Each map is a **deep, bounded copy**: nothing in it is shared with the host
+/// (a binding cannot write through to the host's state, however the host
+/// stores it), and the entries that do not fit the size limits are absent. A
+/// binding that reads one gets a "Property not found" diagnostic that names it
+/// and its size. See the [module docs](crate::bindings) for the rules.
 pub struct BindingScope {
     pub(crate) scope: Scope<'static>,
-    /// The entries that were replaced, as `variable.key (size)`.
+    /// The entries that were removed, as `variable.path (size or reason)`.
     pub(crate) hidden: Vec<String>,
 }
 
@@ -42,19 +44,56 @@ impl BindingScope {
         Self { scope, hidden }
     }
 
-    /// The entries hidden from bindings because they were too large, as
-    /// `variable.key (size)`. Empty for any state that fits.
+    /// The entries removed from what bindings can see because they do not fit
+    /// the size limits, as `variable.path (size or reason)`. Empty for any
+    /// state that fits.
     #[must_use]
     pub fn hidden(&self) -> &[String] {
         &self.hidden
     }
 
-    /// The diagnostic for a binding that used a hidden entry.
-    pub(crate) fn too_large(&self) -> String {
-        format!(
-            "a value in the state is too large for a binding to use \
-             (limit {VISIBLE_BUDGET} elements and entries per variable): {}",
-            self.hidden.join(", ")
-        )
+    /// Adds to `error` what only the scope knows: which removed entry a
+    /// "Property not found" was about, and which strings are over the limit
+    /// when Rhai refused one.
+    pub(crate) fn explain(&self, error: &mut BindError) {
+        match error {
+            BindError::Runtime { message, .. } => {
+                let Some(missing) = message.strip_prefix("Property not found: ") else {
+                    return;
+                };
+                let key = missing.split_whitespace().next().unwrap_or("");
+                let named: Vec<&str> = self
+                    .hidden
+                    .iter()
+                    .filter(|note| {
+                        let path = note.split(" (").next().unwrap_or("");
+                        path.rsplit('.').next() == Some(key)
+                    })
+                    .map(String::as_str)
+                    .collect();
+                if !named.is_empty() {
+                    message.push_str("; hidden from bindings because it is too large: ");
+                    message.push_str(&named.join(", "));
+                }
+            }
+            BindError::Limit { message, .. } if message.contains("string") => {
+                let mut found = Vec::new();
+                for name in ["state", "props", "env"] {
+                    let Some(value) = self.scope.get(name) else {
+                        continue;
+                    };
+                    if let Some(map) = value.read_lock::<Map>() {
+                        found.extend(long_strings(name, &map, 3));
+                    }
+                }
+                if !found.is_empty() {
+                    message.push_str(&format!(
+                        "; strings over the {MAX_STRING_SIZE}-byte limit: {}",
+                        found.join(", ")
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
 }

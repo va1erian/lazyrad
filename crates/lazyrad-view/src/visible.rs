@@ -4,216 +4,373 @@
 //! hands one back to a native such as `array.map(...)`, which keeps every
 //! result until it returns. A closure that returns a 100 000-element list from
 //! `state` therefore copies it once per iteration. The only way to bound that
-//! is to bound what a binding can *see*: every variable is copied into the
-//! evaluation scope with its largest container entries replaced by a
-//! placeholder once the whole variable would exceed [`VISIBLE_BUDGET`]
-//! elements and entries. Scalars and strings are never hidden (strings are
-//! immutable and shared, so copying one is free).
+//! is to bound what a binding can *see*, with the numbers Rhai itself enforces
+//! ([`MAX_ARRAY_SIZE`], [`MAX_MAP_SIZE`], [`MAX_STRING_SIZE`], counted the way
+//! Rhai counts: array elements and map entries summed over everything nested,
+//! so a list of five-field rows costs six per row).
+//!
+//! Every variable is copied into the evaluation scope, deeply (no shared cell
+//! of the host survives, so a binding cannot write through to the host's
+//! state), and the copy is pruned until it fits:
+//!
+//! * a **map entry** that does not fit on its own is *descended into* if it is
+//!   a map, so `cfg.name` survives a 2000-row `cfg.rows`, and removed if it is
+//!   an array;
+//! * if the whole variable still does not fit, the largest container entries
+//!   are removed, largest first;
+//! * a **string** is never removed, and a string that is a map entry does not
+//!   count toward the variable: reading `state.doc` always works, and calling
+//!   a method on one longer than [`MAX_STRING_SIZE`] is a diagnostic that
+//!   names it.
+//!
+//! A removed entry is simply absent, so *any* use of it fails with "Property
+//! not found", which [`View::hidden`] lets the evaluator extend with the reason
+//! and the size.
 
-use rhai::{Array, Dynamic, Map};
+use rhai::{Array, Blob, Dynamic, Map};
 
-/// The most array elements and map entries, summed over a whole variable and
-/// everything nested in it, that a binding can see. A form's `state` is view
-/// state, not a data set: a list longer than this belongs in a control that
-/// owns its rows, with a count or a summary in `state`.
-pub const VISIBLE_BUDGET: usize = 1024;
+use crate::limits::{MAX_ARRAY_SIZE, MAX_MAP_SIZE, MAX_STRING_SIZE};
 
-/// The deepest nesting walked. Anything deeper counts as over budget.
-const MAX_WALK_DEPTH: usize = 64;
+/// The deepest nesting walked. Anything deeper is treated as not fitting.
+const MAX_WALK_DEPTH: usize = 32;
 
-/// The name the placeholder has in Rhai's error messages.
-pub(crate) const HIDDEN_TYPE_NAME: &str = "too-large value";
-
-/// What a hidden entry is replaced with. It has no methods and no properties,
-/// so any use of it is an error that names [`HIDDEN_TYPE_NAME`].
-#[derive(Clone, Debug)]
-pub(crate) struct Hidden;
-
-/// Spends `left` on the elements and entries below `value`; `false` once it
-/// runs out or the nesting is too deep.
-fn within(value: &Dynamic, left: &mut usize, depth: usize) -> bool {
-    if let Some(array) = value.read_lock::<Array>() {
-        return all_within(array.iter(), left, depth);
-    }
-    if let Some(map) = value.read_lock::<Map>() {
-        return all_within(map.values(), left, depth);
-    }
-    true
+/// What Rhai counts in a value: array elements, map entries and string bytes,
+/// each summed over everything nested.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Sizes {
+    arrays: usize,
+    maps: usize,
+    strings: usize,
 }
 
-fn all_within<'a>(
-    items: impl Iterator<Item = &'a Dynamic>,
-    left: &mut usize,
-    depth: usize,
-) -> bool {
-    if depth >= MAX_WALK_DEPTH {
+impl Sizes {
+    fn within(self) -> bool {
+        self.arrays <= MAX_ARRAY_SIZE
+            && self.maps <= MAX_MAP_SIZE
+            && self.strings <= MAX_STRING_SIZE
+    }
+
+    fn plus(self, other: Self) -> Self {
+        Self {
+            arrays: self.arrays.saturating_add(other.arrays),
+            maps: self.maps.saturating_add(other.maps),
+            strings: self.strings.saturating_add(other.strings),
+        }
+    }
+
+    /// How much of the limits this uses, as a number to sort by.
+    fn weight(self) -> u128 {
+        let (a, m, s) = (
+            MAX_ARRAY_SIZE as u128,
+            MAX_MAP_SIZE as u128,
+            MAX_STRING_SIZE as u128,
+        );
+        self.arrays as u128 * m * s + self.maps as u128 * a * s + self.strings as u128 * a * m
+    }
+
+    /// `1024 array elements, 40 map entries`, leaving out what is zero.
+    fn describe(self) -> String {
+        let mut parts = Vec::new();
+        if self.arrays > 0 {
+            parts.push(format!("{} array elements", self.arrays));
+        }
+        if self.maps > 0 {
+            parts.push(format!("{} map entries", self.maps));
+        }
+        if self.strings > 0 {
+            parts.push(format!("{} bytes of text", self.strings));
+        }
+        parts.join(", ")
+    }
+}
+
+/// Why a value does not fit on its own.
+fn reason(sizes: Sizes) -> String {
+    if sizes.arrays > MAX_ARRAY_SIZE {
+        format!("more than {MAX_ARRAY_SIZE} array elements")
+    } else if sizes.maps > MAX_MAP_SIZE {
+        format!("more than {MAX_MAP_SIZE} map entries")
+    } else if sizes.strings > MAX_STRING_SIZE {
+        format!("more than {MAX_STRING_SIZE} bytes of text")
+    } else {
+        "nested too deeply".to_owned()
+    }
+}
+
+/// Adds the sizes of what is inside `value` to `acc`, as Rhai's own accounting
+/// does (`eval/data_check.rs`), and stops as soon as a limit is passed or the
+/// nesting is too deep. `false` means it does not fit.
+///
+/// One deliberate difference: a string that is a direct entry of a map, with no
+/// array above it, is **free**. It is never removed (reading it always works),
+/// and a method call on it names it when Rhai refuses; counting it would only
+/// hide the sibling entries next to a long text. A string that is an array
+/// element, or sits in a map inside an array, counts, because nothing could
+/// name it then.
+fn measure(value: &Dynamic, acc: &mut Sizes, depth: usize, in_array: bool) -> bool {
+    if depth > MAX_WALK_DEPTH {
         return false;
     }
-    for item in items {
-        if *left == 0 {
-            return false;
+    if let Some(array) = value.read_lock::<Array>() {
+        for element in array.iter() {
+            acc.arrays += 1;
+            if !acc.within() || !measure(element, acc, depth + 1, true) {
+                return false;
+            }
         }
-        *left -= 1;
-        if !within(item, left, depth + 1) {
-            return false;
+        return true;
+    }
+    if let Some(map) = value.read_lock::<Map>() {
+        for entry in map.values() {
+            acc.maps += 1;
+            if !acc.within() || !measure(entry, acc, depth + 1, in_array) {
+                return false;
+            }
         }
+        return true;
+    }
+    if let Some(blob) = value.read_lock::<Blob>() {
+        acc.arrays += 1 + blob.len();
+        return acc.within();
+    }
+    if let Ok(text) = value.as_immutable_string_ref() {
+        if in_array {
+            acc.strings += text.len();
+        }
+        return acc.within();
     }
     true
 }
 
-/// What bindings can see of one variable: the bounded copy, and the entries
-/// that were hidden to make it fit.
+/// A deep copy of `value` in which no shared cell survives.
+///
+/// A host may hand over a `Dynamic` that is shared (`into_shared`); cloning it
+/// would clone the *handle*, and a script could then write through it to the
+/// host's own state. Rebuilding every array and map breaks that.
+pub(crate) fn deep_copy(value: &Dynamic, depth: usize) -> Dynamic {
+    if depth <= 2 * MAX_WALK_DEPTH {
+        if let Some(array) = value.read_lock::<Array>() {
+            return Dynamic::from_array(array.iter().map(|v| deep_copy(v, depth + 1)).collect());
+        }
+        if let Some(map) = value.read_lock::<Map>() {
+            return Dynamic::from_map(
+                map.iter()
+                    .map(|(key, v)| (key.clone(), deep_copy(v, depth + 1)))
+                    .collect(),
+            );
+        }
+    }
+    value.flatten_clone()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A number, a bool, a string, `()`: free, never removed.
+    Plain,
+    Array,
+    Map,
+}
+
+fn kind_of(value: &Dynamic) -> Kind {
+    if value.read_lock::<Map>().is_some() {
+        Kind::Map
+    } else if value.read_lock::<Array>().is_some() || value.read_lock::<Blob>().is_some() {
+        Kind::Array
+    } else {
+        Kind::Plain
+    }
+}
+
+enum Fate {
+    Keep,
+    Remove,
+    /// A map that did not fit, replaced by its pruned self.
+    Pruned(Map),
+}
+
+struct Entry<'a> {
+    key: &'a str,
+    value: &'a Dynamic,
+    kind: Kind,
+    /// What it holds; `None` if it does not fit on its own (and why).
+    sizes: Result<Sizes, Sizes>,
+    fate: Fate,
+}
+
+impl Entry<'_> {
+    fn kept(&self) -> bool {
+        !matches!(self.fate, Fate::Remove)
+    }
+}
+
+/// `source`, pruned until it fits, and a note for each entry removed.
+fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> Map {
+    let mut entries: Vec<Entry<'_>> = source
+        .iter()
+        .map(|(key, value)| {
+            let kind = kind_of(value);
+            let mut sizes = Sizes::default();
+            let fits = kind == Kind::Plain || measure(value, &mut sizes, depth + 1, false);
+            Entry {
+                key: key.as_str(),
+                value,
+                kind,
+                sizes: if fits { Ok(sizes) } else { Err(sizes) },
+                fate: Fate::Keep,
+            }
+        })
+        .collect();
+
+    // Pass 1: whatever does not fit alone. A map is descended into; an array
+    // cannot be pruned (its indexes mean something), so it goes.
+    for entry in &mut entries {
+        if entry.sizes.is_ok() {
+            continue;
+        }
+        let entry_path = format!("{path}.{}", entry.key);
+        let pruned = match (entry.kind, entry.value.read_lock::<Map>()) {
+            (Kind::Map, Some(map)) if depth < MAX_WALK_DEPTH => {
+                Some(fit_map(&entry_path, &map, depth + 1, notes))
+            }
+            _ => None,
+        };
+        let Some(pruned) = pruned else {
+            notes.push(format!(
+                "{entry_path} ({})",
+                reason(entry.sizes.unwrap_or_else(|sizes| sizes))
+            ));
+            entry.fate = Fate::Remove;
+            continue;
+        };
+        let mut sizes = Sizes::default();
+        let as_value = Dynamic::from_map(pruned);
+        if measure(&as_value, &mut sizes, depth + 1, false) {
+            let Some(pruned) = as_value.try_cast::<Map>() else {
+                continue;
+            };
+            entry.sizes = Ok(sizes);
+            entry.fate = Fate::Pruned(pruned);
+        } else {
+            notes.push(format!("{entry_path} ({})", reason(sizes)));
+            entry.fate = Fate::Remove;
+        }
+    }
+
+    // Pass 2: the whole map. Largest container entries first.
+    let total = |entries: &[Entry<'_>]| {
+        entries
+            .iter()
+            .filter(|entry| entry.kept())
+            .fold(Sizes::default(), |acc, entry| {
+                let own = Sizes {
+                    maps: 1,
+                    ..Sizes::default()
+                };
+                acc.plus(own).plus(entry.sizes.unwrap_or_else(|s| s))
+            })
+    };
+    // Strings that are direct entries are free; only the containers' text and
+    // the entry and element counts decide. A map that holds more scalar
+    // entries than the limit cannot be fixed by removing containers, so the
+    // entry count is only a reason to remove while removing can help.
+    let mut used = total(&entries);
+    let map_limit = MAX_MAP_SIZE.max(entries.iter().filter(|e| e.kept()).count());
+    let fits = |used: Sizes| {
+        used.arrays <= MAX_ARRAY_SIZE && used.maps <= map_limit && used.strings <= MAX_STRING_SIZE
+    };
+    if !fits(used) {
+        let mut order: Vec<usize> = (0..entries.len())
+            .filter(|&index| entries[index].kept() && entries[index].kind != Kind::Plain)
+            .collect();
+        // Largest first; among equals the later key goes, so the earliest
+        // keys of a long list of entries survive.
+        order.sort_by(|&a, &b| {
+            let weight = |index: usize| entries[index].sizes.unwrap_or_else(|s| s).weight();
+            weight(b)
+                .cmp(&weight(a))
+                .then_with(|| entries[b].key.cmp(entries[a].key))
+        });
+        for index in order {
+            if fits(used) {
+                break;
+            }
+            let sizes = entries[index].sizes.unwrap_or_else(|s| s);
+            used = Sizes {
+                arrays: used.arrays.saturating_sub(sizes.arrays),
+                maps: used.maps.saturating_sub(sizes.maps + 1),
+                strings: used.strings.saturating_sub(sizes.strings),
+            };
+            notes.push(format!(
+                "{path}.{} ({})",
+                entries[index].key,
+                sizes.describe()
+            ));
+            entries[index].fate = Fate::Remove;
+        }
+    }
+
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let key = source.get_key_value(entry.key)?.0.clone();
+            match entry.fate {
+                Fate::Keep => Some((key, deep_copy(entry.value, depth + 1))),
+                Fate::Pruned(map) => Some((key, Dynamic::from_map(map))),
+                Fate::Remove => None,
+            }
+        })
+        .collect()
+}
+
+/// What bindings can see of one variable: the pruned copy, and a note for each
+/// entry that was removed from it, as `variable.key (reason or size)`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct View {
     pub map: Map,
-    /// `label.key (size)` for each hidden entry.
     pub hidden: Vec<String>,
 }
 
 impl View {
-    /// The bounded view of `source`, called `label` in diagnostics.
+    /// The pruned, unshared view of `source`, called `label` in diagnostics.
     pub(crate) fn of(label: &str, source: &Map) -> Self {
-        let (map, hidden) = visible_copy(label, source);
+        let mut hidden = Vec::new();
+        let map = fit_map(label, source, 0, &mut hidden);
         Self { map, hidden }
     }
 }
 
-/// A copy of `source` that fits [`VISIBLE_BUDGET`], and the entries that were
-/// replaced to make it fit, as `label.key` with their size.
-///
-/// The largest entries are hidden first. The count of the walk is capped at
-/// the budget, so a million-row list costs a thousand steps to refuse and is
-/// never copied.
-fn visible_copy(label: &str, source: &Map) -> (Map, Vec<String>) {
-    // `Some(weight)` when an entry fits the budget on its own; `None` when it
-    // is already past it, and is certainly one of the entries to hide.
-    let weights: Vec<(&str, Option<usize>)> = source
-        .iter()
-        .map(|(key, value)| {
-            let mut left = VISIBLE_BUDGET;
-            let fits = within(value, &mut left, 0);
-            (key.as_str(), fits.then_some(VISIBLE_BUDGET - left))
-        })
-        .collect();
-
-    let mut hide: Vec<&str> = Vec::new();
-    let mut notes: Vec<String> = Vec::new();
-
-    // An entry that does not fit on its own is always hidden.
-    let mut total = source.len();
-    let mut known: Vec<(&str, usize)> = Vec::new();
-    for &(key, weight) in &weights {
-        match weight {
-            Some(weight) => {
-                total += weight;
-                known.push((key, weight));
+/// Up to `limit` strings in `map` longer than [`MAX_STRING_SIZE`], as
+/// `path (N bytes)`. Only walked to explain an error.
+pub(crate) fn long_strings(label: &str, map: &Map, limit: usize) -> Vec<String> {
+    fn walk(value: &Dynamic, path: &str, depth: usize, found: &mut Vec<String>, limit: usize) {
+        if found.len() >= limit || depth > MAX_WALK_DEPTH {
+            return;
+        }
+        if let Some(map) = value.read_lock::<Map>() {
+            for (key, entry) in map.iter() {
+                walk(entry, &format!("{path}.{key}"), depth + 1, found, limit);
             }
-            None => {
-                hide.push(key);
-                notes.push(format!("{label}.{key} (over {VISIBLE_BUDGET} elements)"));
+        } else if let Some(array) = value.read_lock::<Array>() {
+            for (index, element) in array.iter().enumerate() {
+                walk(
+                    element,
+                    &format!("{path}[{index}]"),
+                    depth + 1,
+                    found,
+                    limit,
+                );
+            }
+        } else if let Ok(text) = value.as_immutable_string_ref() {
+            if text.len() > MAX_STRING_SIZE {
+                found.push(format!("{path} ({} bytes)", text.len()));
             }
         }
     }
-
-    // Then the largest of the rest, until the variable fits.
-    known.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    for (key, weight) in known {
-        if total <= VISIBLE_BUDGET || weight == 0 {
-            break;
-        }
-        total -= weight;
-        hide.push(key);
-        notes.push(format!("{label}.{key} ({weight} elements)"));
-    }
-
-    let copy = source
-        .iter()
-        .map(|(key, value)| {
-            let hidden = hide.contains(&key.as_str());
-            let value = if hidden {
-                Dynamic::from(Hidden)
-            } else {
-                value.clone()
-            };
-            (key.clone(), value)
-        })
-        .collect();
-    (copy, notes)
+    let mut found = Vec::new();
+    walk(&Dynamic::from_map(map.clone()), label, 0, &mut found, limit);
+    found
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn list(len: usize) -> Dynamic {
-        Dynamic::from_array((0..len as i64).map(Dynamic::from).collect())
-    }
-
-    fn state(entries: &[(&str, Dynamic)]) -> Map {
-        entries
-            .iter()
-            .map(|(key, value)| ((*key).into(), value.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn a_small_state_is_copied_whole() {
-        let source = state(&[("n", Dynamic::from(1_i64)), ("rows", list(100))]);
-        let (copy, hidden) = visible_copy("state", &source);
-        assert!(hidden.is_empty());
-        assert_eq!(copy.len(), 2);
-        assert!(copy["rows"].is::<Array>());
-    }
-
-    #[test]
-    fn the_largest_entries_are_hidden_first_and_scalars_never() {
-        let source = state(&[
-            ("n", Dynamic::from(1_i64)),
-            ("name", Dynamic::from("Ada".to_owned())),
-            ("small", list(10)),
-            ("big", list(800)),
-            ("huge", list(5_000)),
-        ]);
-        let (copy, hidden) = visible_copy("state", &source);
-        assert!(copy["huge"].is::<Hidden>());
-        // 5 entries + 10 + 800 = 815 fits once `huge` is gone.
-        assert!(copy["big"].is::<Array>() && copy["small"].is::<Array>());
-        assert!(copy["n"].is::<i64>() && copy["name"].is_string());
-        assert_eq!(hidden.len(), 1);
-        assert!(hidden[0].starts_with("state.huge"), "{hidden:?}");
-    }
-
-    #[test]
-    fn two_lists_that_fit_alone_but_not_together_hide_the_larger() {
-        let source = state(&[("a", list(600)), ("b", list(700))]);
-        let (copy, hidden) = visible_copy("state", &source);
-        assert!(copy["a"].is::<Array>());
-        assert!(copy["b"].is::<Hidden>());
-        assert_eq!(hidden, ["state.b (700 elements)"]);
-    }
-
-    #[test]
-    fn nesting_counts_and_a_very_deep_value_is_hidden() {
-        // 40 maps of 30 entries each is 1200 entries nested in one value.
-        let rows: Vec<Dynamic> = (0..40)
-            .map(|_| {
-                Dynamic::from_map(
-                    (0..30)
-                        .map(|i| (format!("k{i}").into(), Dynamic::from(i as i64)))
-                        .collect(),
-                )
-            })
-            .collect();
-        let source = state(&[("table", Dynamic::from_array(rows))]);
-        let (copy, hidden) = visible_copy("props", &source);
-        assert!(copy["table"].is::<Hidden>());
-        assert_eq!(hidden.len(), 1);
-
-        let mut deep = Dynamic::from(1_i64);
-        for _ in 0..(MAX_WALK_DEPTH + 10) {
-            deep = Dynamic::from_array(vec![deep]);
-        }
-        let (copy, _) = visible_copy("state", &state(&[("deep", deep)]));
-        assert!(copy["deep"].is::<Hidden>());
-    }
-}
+#[path = "visible_tests.rs"]
+mod tests;

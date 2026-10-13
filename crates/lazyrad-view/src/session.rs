@@ -38,46 +38,21 @@
 //! turn, and produce patches only when the size class changes the cascade.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt;
 use std::rc::Rc;
 
 use rhai::Map;
 
 use crate::bindings::{BindingScope, Bindings, Dependencies};
 use crate::environment::Environment;
+use crate::node::Node;
 use crate::patch::Patch;
 use crate::renderer::Renderer;
 use crate::size_class::{Responsive, SizeClass};
 use crate::state_eq::same_map;
-use crate::tree::{Node, Tree};
+use crate::tree::Tree;
+pub use crate::turn::{BindDiagnostic, TurnResult};
 use crate::value::{Value, ValueKind};
 use crate::visible::View;
-
-/// A binding that failed on a turn.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BindDiagnostic {
-    /// The node the binding belongs to.
-    pub node: String,
-    /// The bound property.
-    pub property: String,
-    /// What went wrong, with the position in the expression when known.
-    pub message: String,
-}
-
-impl fmt::Display for BindDiagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}: {}", self.node, self.property, self.message)
-    }
-}
-
-/// What one turn produced.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TurnResult {
-    /// The changes to apply, in order.
-    pub patches: Vec<Patch>,
-    /// One entry per binding that failed this turn, in tree order.
-    pub diagnostics: Vec<BindDiagnostic>,
-}
 
 /// What the session remembers about one property of one node.
 struct PropState {

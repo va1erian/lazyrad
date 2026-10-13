@@ -10,7 +10,7 @@ use std::mem::size_of;
 use common::{int, map, phone, text};
 use lazyrad_view::bindings::{
     MAX_ARRAY_SIZE, MAX_CALL_LEVELS, MAX_MAP_SIZE, MAX_OPERATIONS, MAX_STRING_SIZE,
-    PEAK_MEMORY_CEILING, VISIBLE_BUDGET,
+    PEAK_MEMORY_CEILING,
 };
 use lazyrad_view::{BindError, BindingScope, Bindings, Value};
 use rhai::{Dynamic, Map};
@@ -19,13 +19,6 @@ fn evaluate(source: &str, state: &Map) -> Result<Value, BindError> {
     let bindings = Bindings::new();
     let mut scope = BindingScope::new(state, &Map::new(), &phone().to_map());
     bindings.evaluate(source, &mut scope, None)
-}
-
-fn limit_message(result: Result<Value, BindError>) -> String {
-    match result {
-        Err(BindError::Limit { message, .. }) => message,
-        other => panic!("expected a limit error, got {other:?}"),
-    }
 }
 
 /// Runs `body` on a thread with the stack of a default Windows main thread,
@@ -162,13 +155,13 @@ fn recursion_within_the_call_limit_still_works() {
 
 #[test]
 fn a_runaway_expression_ends_at_a_limit_without_hanging() {
-    // 1000 items at three closures each is about 15 000 operations, past the
-    // budget, though the list itself is within the size limits.
-    let items: Vec<Dynamic> = (0..1000).map(int).collect();
     let half = "x".repeat(MAX_STRING_SIZE / 2 + 1);
-    let state = map(&[("items", Dynamic::from_array(items)), ("half", text(&half))]);
+    let state = map(&[("half", text(&half))]);
+    // 250 outer iterations over 250 inner ones is about 250 000 operations.
+    let lit = vec!["0"; 250].join(",");
+    let nested = format!("[{lit}].map(|x| [{lit}].map(|y| y).len()).len()");
     let runaways = [
-        "state.items.map(|x| x + 1).map(|x| x + 1).map(|x| x + 1).len()",
+        nested.as_str(),
         "(|f| f.call(f)).call(|f| f.call(f))",
         "state.half + state.half",
     ];
@@ -181,144 +174,98 @@ fn a_runaway_expression_ends_at_a_limit_without_hanging() {
     }
     // And the engine is fine afterwards, with a fresh budget per evaluation.
     assert_eq!(
-        evaluate("[1, 2, 3].map(|x| x + state.items.len()).len()", &state),
+        evaluate("[1, 2, 3].map(|x| x + state.half.len()).len()", &state),
         Ok(Value::Int(3))
     );
 }
 
 #[test]
-fn the_cheapest_closure_call_costs_three_operations() {
-    // The memory bound below divides the budget by this number, so measure it
-    // rather than trust it. A 1000-item literal costs about 1000 operations,
-    // and each `map(|x| 0)` over it three per item: three maps fit the budget
-    // (about 10 000), four do not (about 13 000). Fewer than three operations
-    // per item would let four fit; more would refuse three.
-    const { assert!(MAX_OPERATIONS == 12_000, "re-derive the counts below") };
-    let literal = vec!["0"; 1000].join(",");
-    let chain = |maps: usize| format!("[{literal}]{}.len()", ".map(|x| 0)".repeat(maps));
-    assert_eq!(evaluate(&chain(3), &Map::new()), Ok(Value::Int(1000)));
+fn the_operation_budget_is_what_the_docs_say() {
+    // The docs say: a literal element costs one operation and a `map(|y| 0)`
+    // step three per element. Nested, n outer iterations of an n-element
+    // inner step cost about n + n * (n + 3n) = n + 4n^2.
+    const { assert!(MAX_OPERATIONS == 32_768, "re-derive n below") };
+    let nested = |n: usize| {
+        let lit = vec!["0"; n].join(",");
+        format!("[{lit}].map(|x| [{lit}].map(|y| 0).len()).len()")
+    };
+    // 85 -> about 28 985 operations, 95 -> about 36 195.
+    assert_eq!(evaluate(&nested(85), &Map::new()), Ok(Value::Int(85)));
     assert!(matches!(
-        evaluate(&chain(4), &Map::new()),
+        evaluate(&nested(95), &Map::new()),
         Err(BindError::Limit { .. })
     ));
+    // A pipeline of six five-operation steps over a 1000-element list fits:
+    // 1000 + 6 * 5 * 1000 = 31 000 operations.
+    let lit = vec!["0"; 1000].join(",");
+    let pipeline = format!("[{lit}]{}.len()", ".map(|x| x + 1)".repeat(6));
+    assert_eq!(evaluate(&pipeline, &Map::new()), Ok(Value::Int(1000)));
+}
+
+#[test]
+fn the_documented_nesting_caps_are_the_real_ones() {
+    let bindings = Bindings::new();
+    let check = |source: String| bindings.check_expression(&source).is_ok();
+    let terms = |n: usize| {
+        (0..n)
+            .map(|i| format!("state.a{i}"))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    assert!(
+        check(terms(16)) && !check(terms(17)),
+        "16 terms in a flat chain"
+    );
+    let ands = |n: usize| vec!["true"; n].join(" && ");
+    assert!(check(ands(16)) && !check(ands(17)), "16 terms joined by &&");
+    let else_ifs = |n: usize| {
+        let mut source = String::from("if state.n == 0 { 0 }");
+        for i in 1..n {
+            source.push_str(&format!(" else if state.n == {i} {{ {i} }}"));
+        }
+        source.push_str(" else { 99 }");
+        source
+    };
+    assert!(
+        check(else_ifs(12)) && !check(else_ifs(13)),
+        "12 branches of else if"
+    );
+    let calls = |n: usize| format!("[1, 2, 3]{}", ".map(|x| x)".repeat(n));
+    assert!(
+        check(calls(10)) && !check(calls(11)),
+        "10 chained method calls"
+    );
 }
 
 #[test]
 fn the_limits_bound_the_transient_memory_of_one_native_call() {
-    // One native call iterates an array of at most MAX_ARRAY_SIZE elements
-    // (literal: parser cap; built: size check at return; state: visible
-    // budget), and keeps one result per iteration. A result copies at most
-    // VISIBLE_BUDGET elements or entries, or MAX_STRING_SIZE bytes.
-    let iterations = u64::try_from(MAX_ARRAY_SIZE).unwrap();
-    let visible = u64::try_from(VISIBLE_BUDGET).unwrap();
-    let array_bytes = iterations * visible * u64::try_from(size_of::<Dynamic>()).unwrap();
-    // A map entry: a 24-byte key, a value and the tree's own overhead.
-    let map_bytes = iterations * visible * 64;
-    let string_bytes = iterations * u64::try_from(MAX_STRING_SIZE).unwrap();
-    for (what, bytes) in [
-        ("arrays", array_bytes),
-        ("maps", map_bytes),
-        ("strings", string_bytes),
-    ] {
-        assert!(
-            bytes <= PEAK_MEMORY_CEILING,
-            "{what}: {} MiB exceeds the {} MiB ceiling",
-            bytes >> 20,
-            PEAK_MEMORY_CEILING >> 20
-        );
-    }
-    // The map limit is what a built map may hold; it must not exceed what a
-    // copy of state may.
-    const { assert!(MAX_MAP_SIZE <= VISIBLE_BUDGET) };
-}
-
-#[test]
-fn a_large_state_list_is_hidden_so_a_closure_cannot_copy_it_over_and_over() {
-    // The review's scenario: a literal of 400 items, each iteration returning
-    // a 100 000-element state list. It used to allocate 640 MB before the size
-    // check at the end of `map` refused the result.
-    let items: Vec<Dynamic> = (0..100_000).map(int).collect();
-    let state = map(&[("items", Dynamic::from_array(items)), ("n", int(7))]);
-    let bindings = Bindings::new();
-    let mut scope = BindingScope::new(&state, &Map::new(), &phone().to_map());
-    assert_eq!(
-        scope.hidden(),
-        [format!("state.items (over {VISIBLE_BUDGET} elements)")]
-    );
-
-    // Nothing is copied, so the expression is cheap and completes; the
-    // placeholder is what each iteration returns.
-    let source = format!("[{}].map(|x| state.items).len()", vec!["0"; 400].join(","));
-    assert_eq!(
-        bindings.evaluate(&source, &mut scope, None),
-        Ok(Value::Int(400))
-    );
-
-    // Any use of the hidden list is a diagnostic that names it.
-    for source in [
-        "state.items.len()",
-        "state.items",
-        "state.items[0]",
-        "state.items.map(|x| x).len()",
-    ] {
-        let Err(BindError::Runtime { message, .. }) = bindings.evaluate(source, &mut scope, None)
-        else {
-            panic!("{source} must be refused");
-        };
-        assert!(
-            message.contains("state.items") && message.contains("too large"),
-            "{source}: {message}"
-        );
-    }
-    // The rest of the state is unaffected.
-    assert_eq!(
-        bindings.evaluate("state.n * 2", &mut scope, None),
-        Ok(Value::Int(14))
-    );
-}
-
-#[test]
-fn the_worst_visible_case_is_refused_after_at_most_the_ceiling() {
-    // The worst case the limits permit: every iteration copies a list of
-    // VISIBLE_BUDGET - 1 elements, 1000 times. About 16 MiB are alive when
-    // `map` returns, and the size check on its result then refuses it.
-    let size = VISIBLE_BUDGET - 1;
-    let list: Vec<Dynamic> = (0..size as i64).map(int).collect();
-    let state = map(&[("big", Dynamic::from_array(list))]);
-    let source = format!("[{}].map(|x| state.big).len()", vec!["0"; 1000].join(","));
-    let message = limit_message(evaluate(&source, &state));
-    assert!(message.contains("array"), "{message}");
-    // The same shape with a small list completes.
-    let state = map(&[("small", Dynamic::from_array(vec![int(1), int(2)]))]);
-    let source = format!("[{}].map(|x| state.small).len()", vec!["0"; 300].join(","));
-    assert_eq!(evaluate(&source, &state), Ok(Value::Int(300)));
-}
-
-#[test]
-fn two_lists_that_fit_alone_but_not_together_hide_the_larger_one() {
-    let make = |n: i64| Dynamic::from_array((0..n).map(int).collect());
-    let state = map(&[("a", make(600)), ("b", make(700)), ("n", int(1))]);
-    let bindings = Bindings::new();
-    let mut scope = BindingScope::new(&state, &Map::new(), &phone().to_map());
-    assert_eq!(scope.hidden(), ["state.b (700 elements)"]);
-    assert_eq!(
-        bindings.evaluate("state.a.len()", &mut scope, None),
-        Ok(Value::Int(600))
-    );
+    // One native call iterates an array of at most MAX_ARRAY_SIZE elements and
+    // keeps one result per iteration. The costliest result is many small maps:
+    // a map with one entry allocates a node of about 540 bytes (measured), and
+    // at most this many fit the limits at once: one per array element (a list
+    // of one-field rows) plus one per two entries of the rest (a map of
+    // one-field maps).
+    let nested_maps = u64::try_from(MAX_ARRAY_SIZE + (MAX_MAP_SIZE - MAX_ARRAY_SIZE) / 2).unwrap();
+    let map_bytes = nested_maps * 540;
+    let array_bytes = u64::try_from(MAX_ARRAY_SIZE * size_of::<Dynamic>()).unwrap();
+    let text_bytes = u64::try_from(MAX_STRING_SIZE).unwrap();
+    let one_copy = map_bytes + array_bytes + text_bytes;
+    let call = one_copy * u64::try_from(MAX_ARRAY_SIZE).unwrap();
     assert!(
-        bindings
-            .evaluate("state.b.len()", &mut scope, None)
-            .is_err()
+        call <= PEAK_MEMORY_CEILING,
+        "{} MiB exceeds the {} MiB ceiling",
+        call >> 20,
+        PEAK_MEMORY_CEILING >> 20
     );
-}
-
-#[test]
-fn a_string_over_the_limit_is_readable_but_not_a_method_receiver() {
-    // Strings are immutable and shared, so a long one in state costs nothing
-    // to hand around; Rhai only refuses to call a method on it.
-    let long = "x".repeat(MAX_STRING_SIZE + 1);
-    let state = map(&[("doc", text(&long))]);
-    assert_eq!(evaluate("state.doc", &state), Ok(Value::Text(long.clone())));
-    let message = limit_message(evaluate("state.doc.len()", &state));
-    assert!(message.contains("string"), "{message}");
+    // Measured on the debug build with the worst shape (1020 one-field rows
+    // returned on each of 1020 iterations, plus a 31 KiB text built on each):
+    // 545 MiB peak working set, 538 MiB over an idle process. The estimate
+    // above is the same shape with the budget filled exactly.
+    assert!(
+        call > 480 * 1024 * 1024,
+        "the estimate tracks the measurement ({} MiB)",
+        call >> 20
+    );
+    // The ceiling is a statement of fact, not of comfort: it is large.
+    const { assert!(PEAK_MEMORY_CEILING >= 600 * 1024 * 1024) };
 }

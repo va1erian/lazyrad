@@ -35,11 +35,16 @@ the window's environment into **patches** that any renderer can apply.
 - **Failure is local:** a failing binding keeps its last good value and reports
   one `BindDiagnostic` per turn; nothing panics and no other node is affected.
 - **Only what can have changed is re-evaluated:** bindings that read `env` run
-  when the environment changes, bindings that read `state` run when it changes.
+  when the environment changes, bindings that read `state` run when what they
+  can see of it changes.
 - **No platform:** only `rhai` and `thiserror`, and no file, thread, process,
-  environment, network or clock access (`tests/no_platform_apis.rs` scans the
-  sources and the manifest), so it builds for `wasm32-unknown-unknown` and
-  static musl.
+  environment, network, I/O or clock access (`tests/no_platform_apis.rs` scans
+  the sources, including grouped `use std::{...}` paths, and the manifest).
+  **Compiling for `wasm32-unknown-unknown` is not verified**: no wasm target is
+  installed here or in CI, so that scan and `cargo tree --target
+  wasm32-unknown-unknown` (which shows only Rhai's own `web-time` and
+  `wasm-bindgen` edges) are the only evidence. The static musl build is checked
+  in CI.
 
 ## What a binding can and cannot do
 
@@ -47,15 +52,46 @@ A binding is one Rhai *expression* over `state`, `props` and `env`.
 
 - **Sealed.** The engine registers an explicit package list. `sleep`, `exit`,
   `parse_json`, reflection, clocks and I/O are not there, and `print`, `debug`
-  and `eval` are disabled (`tests/sandbox.rs`).
-- **Bounded.** Operations, call depth, expression depth and the size of any
-  value it builds are limited, and it sees at most `VISIBLE_BUDGET` (1024)
-  array elements and map entries per variable: a longer list is hidden from
-  bindings and a binding that uses it gets a diagnostic naming it. Keep counts
-  and summaries in `state`, and long lists in a control that owns its rows.
-  The numbers, and why they are what they are, are in `src/bindings.rs`; one
-  evaluation allocates at most about 64 MiB and needs about 350 KiB of native
-  stack in a debug build.
+  and `eval` are disabled (`tests/sandbox.rs`). A binding cannot write through
+  to the host's `state`, even if the host keeps it in shared cells: every
+  variable is deep-copied into the evaluation scope (`tests/host_state.rs`).
+- **Bounded.** Every cap ends in a diagnostic, never a panic or an abort. The
+  numbers are in `src/limits.rs`; in practice:
+
+  | What | Cap | Means |
+  |---|---|---|
+  | array elements in a value | **1024** | the longest list, array literal and `map` |
+  | map entries in a value | **1024** | **one per field, nested maps included** |
+  | a list of 5-field rows | 204 rows | `(1024 - 1) / 5`: the entry holding the list costs one |
+  | a list of 4-field rows | 255 rows | likewise; 10-field rows: 102; 20-field rows: 51 |
+  | text in a value | 32 KiB | summed over texts inside arrays; a long text can be read but not used |
+  | operations | 32 768 | a `map`, `filter` or `reduce` step costs 3 to 5 per element: 6 five-operation steps over 1000 elements fit |
+  | nested closure calls | 4 | |
+  | nesting | 16 and 10 | **every operator in a chain is a level**: 16 terms in `a + b + ...` or `a && b && ...`, 12 `else if` branches, 10 chained method calls |
+
+  The 1024 is the same number whether a value is built or read from `state`
+  (the engine enforces it, and the view of `state` is counted the way Rhai
+  counts), and it is the visible budget the project has chosen.
+
+  Native stack: the worst expressions found need about 350 KiB in a debug
+  build (the suite runs them on 1 MiB).
+
+  **Memory is the cost of 1024.** In the worst shape (a list of about a
+  thousand one-field rows returned on each iteration of a `map` over a
+  thousand-element list) one evaluation transiently allocates about **545 MiB**
+  in a debug build; 204 five-field rows returned on 1000 iterations is
+  144 MiB. Lowering the array cap lowers it linearly (512: about 217 MiB; 256:
+  about 98 MiB), at the price of shorter lists; `src/limits.rs` has the table.
+  It is a pathological expression, not a typical binding, and it ends in a
+  diagnostic, but it is a real number.
+- **What it can see is bounded too.** An entry of `state` that does not fit the
+  caps is removed from the copy a binding reads (a map that does not fit is
+  pruned inside, so `state.cfg.name` survives a 2000-row `state.cfg.rows`).
+  *Any* read of a removed entry is a "Property not found" diagnostic that names
+  the entry and its size; `keys()`, `len()` and `contains` on the map around it
+  do not see it. A text over the cap is never removed and can be bound; a
+  method call on it is a diagnostic that names it. Keep counts and summaries in
+  `state`, and long lists in a control that owns its rows.
 - **Closures may read `state`.** `state.items.filter(|x| x > state.n)` works.
   A source that trips Rhai's shared-variable race is retried on private copies;
   `(|n| state.items.filter(|x| x > n)).call(state.n)` keeps the fast path. A
@@ -65,6 +101,13 @@ A binding is one Rhai *expression* over `state`, `props` and `env`.
   session last applied, not with the widget, so a widget the user changed and
   the handler refused stays ahead of the state until the bound value next
   changes or the view is rebuilt.
+
+## API notes
+
+- `Node` implements `Drop` (to drop a deep chain without recursing), so fields
+  cannot be moved out of a `Node` with a destructuring pattern or
+  struct-update syntax. Use `std::mem::take(&mut node.children)` or clone.
+- A `Tree` is at most 128 levels deep (`TreeError::TooDeep`).
 
 ## Not here (yet)
 

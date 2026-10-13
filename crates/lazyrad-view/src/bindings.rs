@@ -32,16 +32,37 @@
 //!
 //! # Limits
 //!
-//! Every limit ends an expression with a [`BindError::Limit`], never a panic or
-//! an abort. They are sized for *view* expressions, not data processing:
+//! Every limit ends an expression with a [`BindError::Limit`] (or, for
+//! nesting, a syntax error), never a panic or an abort. They are sized for
+//! *view* expressions, not data processing, and are documented at their
+//! constants in [`crate::limits`]; in short:
 //!
-//! | Limit | Value | Why |
+//! | What | Limit | In practice |
 //! |---|---|---|
-//! | operations | [`MAX_OPERATIONS`] | a label or a filtered count over a few thousand items |
-//! | call depth | [`MAX_CALL_LEVELS`] | closures in closures; a level costs about 60 KiB of native stack in a debug build |
-//! | expression depth | [`MAX_EXPR_DEPTHS`] | parsing and evaluating cost 7 to 25 KiB of native stack per level in a debug build |
-//! | array / map / string size | [`MAX_ARRAY_SIZE`], [`MAX_MAP_SIZE`], [`MAX_STRING_SIZE`] | a value an expression builds; see below |
-//! | visible state | [`VISIBLE_BUDGET`] | what an expression can read; see below |
+//! | operations in one evaluation | [`MAX_OPERATIONS`] = 32 768 | a `map`/`filter`/`reduce` step costs 3 to 5 per element, so about 6 steps over a full 1024-element array |
+//! | nested closure calls | [`MAX_CALL_LEVELS`] = 4 | |
+//! | nesting depth | [`MAX_EXPR_DEPTHS`] = 16 and 10 | every operator in a flat chain is a level: at most 16 terms in `a + b + ...` or `a && b && ...`, 12 branches in an `else if` chain, 10 chained method calls |
+//! | array elements in one value | [`MAX_ARRAY_SIZE`] = 1024 | also the longest array literal, and the most iterations of one `map` |
+//! | map entries in one value | [`MAX_MAP_SIZE`] = 1024 | one per field, nested maps included: 204 rows of five fields, 102 of ten (the entry that holds the list costs one) |
+//! | bytes of text in one value | [`MAX_STRING_SIZE`] = 32 KiB | texts inside arrays and maps are summed |
+//!
+//! The size limits apply to what a binding can *see* as well as to what it
+//! builds, with Rhai's own counting (see below). Three consequences are worth
+//! stating:
+//!
+//! * **A list of records is limited by its fields.** Rhai counts one map entry
+//!   per field, so a list of five-field rows holds at most 204 rows, and a
+//!   list over the limit is hidden from bindings. Keep counts and summaries in
+//!   `state`, and long lists in a control that owns its rows.
+//! * **A long string can be read but not used.** `bind text: state.doc` works
+//!   at any length; `state.doc.len()` or `.to_upper()` on a string over
+//!   [`MAX_STRING_SIZE`] is a `Limit` diagnostic that names the entry.
+//! * **A hidden entry is absent.** Every variable is copied into the scope with
+//!   the entries that do not fit removed (largest first; a map that does not
+//!   fit is pruned inside instead of removed, so `cfg.name` survives a
+//!   2000-row `cfg.rows`). Any read of a removed entry is a "Property not
+//!   found" diagnostic that names it and its size; `keys()`, `len()` and
+//!   `contains` on the enclosing map do not see it either.
 //!
 //! **Native stack.** Rhai evaluates by recursion, and a debug build's frames
 //! are large. With the limits above the worst expressions found (every
@@ -59,23 +80,21 @@
 //!    (a literal is capped by the parser, a built array by the size check at
 //!    the native's return, and a `state` list by rule 2), so one call makes at
 //!    most that many iterations;
-//! 2. what a binding can read is bounded: [`BindingScope`] copies each of
-//!    `state`, `props` and `env` with its largest entries replaced by a
-//!    placeholder once the variable holds more than [`VISIBLE_BUDGET`] array
-//!    elements and map entries in total (strings are immutable and shared, so
-//!    they are never hidden). A binding that uses a hidden entry gets a
-//!    diagnostic naming it, and the entry is never copied;
+//! 2. what a binding can read fits the same limits, counted the way Rhai
+//!    counts, and is a deep copy that shares nothing with the host (see
+//!    [`BindingScope`]);
 //! 3. a value an expression *builds* is size-checked at its native's return.
 //!
-//! One iteration therefore copies at most [`VISIBLE_BUDGET`] elements or
-//! [`MAX_STRING_SIZE`] bytes, so one native call holds at most
-//! [`MAX_ARRAY_SIZE`] of those: about 16 MiB of array elements, 64 MiB of map
-//! entries, 16 MiB of text, all under [`PEAK_MEMORY_CEILING`].
+//! One iteration therefore copies at most [`MAX_ARRAY_SIZE`] array elements,
+//! [`MAX_MAP_SIZE`] map entries and [`MAX_STRING_SIZE`] bytes of new text, and
+//! one native call keeps at most [`MAX_ARRAY_SIZE`] of those.
 //!
-//! The limits apply to values already in `state` too: a method call on a
-//! string longer than [`MAX_STRING_SIZE`], or on an array of more than
-//! [`MAX_ARRAY_SIZE`] elements, is a `Limit` diagnostic. Keep derived counts
-//! and summaries in `state`, and long lists in a control that owns its rows.
+//! **That product is large, and the budget is deliberately 1024.** In the worst
+//! shape (a list of about a thousand one-field rows, returned once per element
+//! of a thousand-element list) one evaluation transiently allocates about
+//! 545 MiB in a debug build; typical shapes are an order of magnitude less.
+//! The numbers for lower caps, and what would have to change, are on
+//! [`PEAK_MEMORY_CEILING`]; the `limits` tests pin the estimate.
 //!
 //! # Closures that read `state`
 //!
@@ -84,9 +103,8 @@
 //! shared value cannot be read while it is borrowed as a receiver ("Data race
 //! detected"). The evaluator therefore retries such a binding on a second
 //! engine whose resolver hands out **private copies** of `state`, `props` and
-//! `env` (at most [`VISIBLE_BUDGET`] elements each), and remembers that choice
-//! for the source. Hoisting the read keeps the fast path:
-//! `(|n| state.items.filter(|x| x > n)).call(state.n)`.
+//! `env`, and remembers that choice for the source. Hoisting the read keeps
+//! the fast path: `(|n| state.items.filter(|x| x > n)).call(state.n)`.
 //!
 //! A closure created *inside another closure's body* that mentions `state`,
 //! `props` or `env` is not rescued: the outer body's variable is the
@@ -105,32 +123,14 @@ use rhai::{AST, Dynamic, Engine, EvalAltResult, Map, OptimizationLevel, Scope};
 use crate::cache::Cache;
 pub use crate::dependencies::Dependencies;
 use crate::error::BindError;
+pub use crate::limits::{
+    MAX_ARRAY_SIZE, MAX_CALL_LEVELS, MAX_EXPR_DEPTHS, MAX_MAP_SIZE, MAX_OPERATIONS,
+    MAX_STRING_SIZE, PEAK_MEMORY_CEILING,
+};
 pub use crate::scope::BindingScope;
 use crate::value::{Value, ValueKind};
-pub use crate::visible::VISIBLE_BUDGET;
-use crate::visible::{HIDDEN_TYPE_NAME, Hidden};
+use crate::visible::deep_copy;
 
-/// The most operations one evaluation may execute, **including** those run by
-/// closures that array methods such as `map` call back into.
-///
-/// Rhai restarts its own counter inside such a callback, so the engine's
-/// `max_operations` alone does not bound `array.map(...)`; a shared counter in
-/// the progress hook does.
-pub const MAX_OPERATIONS: u64 = 12_000;
-/// The deepest call nesting an expression may reach (closures calling closures).
-pub const MAX_CALL_LEVELS: usize = 4;
-/// The deepest expression nesting the parser accepts in the expression and in a
-/// function body.
-pub const MAX_EXPR_DEPTHS: (usize, usize) = (16, 10);
-/// The most bytes of string a value may hold (summed over a nested value).
-pub const MAX_STRING_SIZE: usize = 16 * 1024;
-/// The most elements an array value may hold (summed over a nested value).
-pub const MAX_ARRAY_SIZE: usize = 1024;
-/// The most entries a map value may hold (summed over a nested value).
-pub const MAX_MAP_SIZE: usize = 256;
-/// What the limits above keep one evaluation's transient allocation under,
-/// in bytes. See the module docs.
-pub const PEAK_MEMORY_CEILING: u64 = 64 * 1024 * 1024;
 /// Compiled expressions kept at least, before the least recently used are
 /// evicted. A session raises it to twice its own number of distinct sources.
 const BASE_CACHE_CAPACITY: usize = 4096;
@@ -223,9 +223,8 @@ fn build_engine(budget: &Rc<Cell<u64>>, private_copies: bool) -> (Engine, usize)
     engine.set_max_string_size(MAX_STRING_SIZE);
     engine.set_max_array_size(MAX_ARRAY_SIZE);
     engine.set_max_map_size(MAX_MAP_SIZE);
-    engine.register_type_with_name::<Hidden>(HIDDEN_TYPE_NAME);
     if private_copies {
-        // At the top level the resolver answers with a plain copy, which also
+        // At the top level the resolver answers with a deep copy, which also
         // makes Rhai skip sharing the variable when a closure captures it.
         // Inside a function the name is the closure's own parameter, so the
         // normal lookup is left alone.
@@ -234,7 +233,7 @@ fn build_engine(budget: &Rc<Cell<u64>>, private_copies: bool) -> (Engine, usize)
             if context.call_level() > 0 || !matches!(name, "state" | "props" | "env") {
                 return Ok(None);
             }
-            Ok(context.scope().get(name).map(Dynamic::flatten_clone))
+            Ok(context.scope().get(name).map(|value| deep_copy(value, 0)))
         });
     }
     (engine, functions)
@@ -323,19 +322,9 @@ impl Bindings {
         }
         let result = outcome.map_err(|error| {
             let mut error = BindError::from_eval(&error);
-            if let BindError::Runtime { message, .. } = &mut error {
-                if message.contains(HIDDEN_TYPE_NAME) && !scope.hidden.is_empty() {
-                    *message = format!("{message}; {}", scope.too_large());
-                }
-            }
+            scope.explain(&mut error);
             error
         })?;
-        if result.is::<Hidden>() {
-            return Err(BindError::Runtime {
-                message: scope.too_large(),
-                position: None,
-            });
-        }
         match kind {
             Some(kind) => Value::from_dynamic_as(&result, kind),
             None => Value::from_dynamic(&result),

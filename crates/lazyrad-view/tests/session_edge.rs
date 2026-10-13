@@ -5,7 +5,7 @@ mod common;
 use std::rc::Rc;
 
 use common::{int, map, phone, text, tree};
-use lazyrad_view::bindings::{MAX_OPERATIONS, VISIBLE_BUDGET};
+use lazyrad_view::bindings::{MAX_ARRAY_SIZE, MAX_OPERATIONS};
 use lazyrad_view::{
     BindDiagnostic, BindingScope, Bindings, Environment, Node, Patch, Session, SizeClass, Value,
 };
@@ -169,14 +169,14 @@ fn failing_bindings_report_these_exact_diagnostics() {
 
 #[test]
 fn the_operation_limit_diagnostic_names_the_limit() {
-    let items: Vec<Dynamic> = (0..1000).map(int).collect();
-    let state = map(&[("items", Dynamic::from_array(items))]);
+    // 250 iterations over 250 inner ones: about 250 000 operations.
+    let lit = vec!["0"; 250].join(",");
     let root = Node::new("hog", "Label").with_bind(
         "text",
-        "state.items.map(|x| x + 1).map(|x| x + 1).map(|x| x + 1).len()",
+        format!("[{lit}].map(|x| [{lit}].map(|y| y).len()).len()"),
     );
     let mut session = Session::new(tree(root), Bindings::new());
-    let result = session.build(&state, &phone());
+    let result = session.build(&Map::new(), &phone());
     assert_eq!(result.diagnostics.len(), 1);
     assert!(
         result.diagnostics[0].message.starts_with(&format!(
@@ -214,7 +214,7 @@ fn a_change_inside_a_hidden_list_is_not_a_change_to_any_binding() {
 
 #[test]
 fn a_hidden_state_entry_is_named_in_the_diagnostic() {
-    let rows: Vec<Dynamic> = (0..(VISIBLE_BUDGET as i64 * 2)).map(int).collect();
+    let rows: Vec<Dynamic> = (0..(MAX_ARRAY_SIZE as i64 * 2)).map(int).collect();
     let state = map(&[("rows", Dynamic::from_array(rows)), ("title", text("Hi"))]);
     let root = Node::new("root", "Column")
         .with_child(Node::new("count", "Label").with_bind("text", "state.rows.len()"))
@@ -225,7 +225,7 @@ fn a_hidden_state_entry_is_named_in_the_diagnostic() {
     let line = result.diagnostics[0].to_string();
     assert!(
         line.starts_with("count.text: ")
-            && line.contains("state.rows (over 1024 elements)")
+            && line.contains("state.rows (more than 1024 array elements)")
             && line.contains("too large"),
         "{line}"
     );
