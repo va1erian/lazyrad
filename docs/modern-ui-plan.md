@@ -128,7 +128,7 @@ Two properties make this cheap:
 
 | Target | Renderer | Layout engine | Scripts | Output |
 |---|---|---|---|---|
-| Windows / Linux / macOS | `XuiRenderer` (xui canvas or D2D) | xui `arrange` | Rhai, native | `.exe` via the existing stub + payload (PLAN.md §8) |
+| Windows / Linux / macOS | `XuiRenderer` (xui canvas, `WinitBackend`) | xui `arrange` | Rhai, native | `.exe` via the existing stub + payload (PLAN.md §8) |
 | LazyOS | `XuiRenderer` | xui `arrange` | Rhai, native | `.lzp` (existing) |
 | **Web** | `DomRenderer` (new) | the browser (flexbox, grid, media queries) | Rhai compiled to wasm | a static folder: `index.html`, `lazyrad-web.wasm`, JS glue, `app.bundle`, assets |
 
@@ -212,7 +212,7 @@ convention (`fn greet_button_click()`). **LazyRAD adopts this as is.** Names fol
 ### 4.2 What this plan adds
 
 All six are additive and keep the one-definition rule (format and schema come from the
-same macros). Syntax below is a **sketch**; spike R1 (§8) confirms how the macros carry it.
+same macros). Syntax below is a **sketch**; spike S5 (§8) confirms how the macros carry it.
 
 ```ron
 Form(name: "profile_form", title: "Profile", size: (720, 560), root: Column(padding: 16, gap: 12, children: [
@@ -251,7 +251,7 @@ fn add_button_click()      { state.count += 1; }
 Not additions, already there: `fill`, `align`, `align_items`, `justify`, `gap`, `padding`,
 `max_*`, `span`, `Panel(card: true)` (my earlier `Card`), control arrays.
 
-**Mechanics R1 must settle** (from the model's source):
+**Mechanics S5 must settle** (from the model's source):
 
 - The canonical writer uses `struct_names(true)`, so a patch prints as
   `FlexPatch(direction: Horizontal)`, not the bare `( … )` of the sketch. The sketch is
@@ -262,13 +262,13 @@ Not additions, already there: `fill`, `align`, `align_items`, `justify`, `gap`, 
   `schema --json` will not list them.
 - **Layout nodes have no `name` today** (`Row`, `Column`, `Wrap`, `Grid`, `Absolute`). A
   `bind` or `responsive` on one needs either an optional `name` or a tree-path address.
-  `Flex` gets a `name`; the rest follow whichever R1 chooses.
+  `Flex` gets a `name`; the rest follow whichever S5 chooses.
 - `Diagnostic.node` carries a widget name only, and a bad `bind` key is a map key, so a
   load error has no line, column or "did you mean". Validation of bind keys therefore
   reports through `Form::validate`, with the key and node.
 - **Node-name uniqueness** (found in lane B) conflicts with unnamed layout nodes and with
   control arrays (`digit[0]` … `digit[9]` share one declared `name`). The view core keys
-  nodes by a unique string name and rejects empty and duplicate names; R1 decides how
+  nodes by a unique string name and rejects empty and duplicate names; S5 decides how
   unnamed layouts and array elements get one (a name, an index or a path).
 
 ### 4.3 Kinds
@@ -277,7 +277,7 @@ Not additions, already there: `fill`, `align`, `align_items`, `justify`, `gap`, 
 |---|---|---|---|---|
 | Flow | `Row`, `Column`, `Wrap`, `Grid` (**exist**) | ✓ | `row()` / `column()` / `wrap()` / `grid()` | `display:flex` / `flex-wrap` / `grid` |
 | Flow | `Flex` (**new**) | ✓ | `row()` or `column()` by `direction` | `display:flex` |
-| Layering | `Overlay` (**new**) | ✓ | `stack()` (children stretch) or `overlay()` (centred at natural size): R1 picks one meaning | stacked grid cell |
+| Layering | `Overlay` (**new**) | ✓ | `stack()` (children stretch) or `overlay()` (centred at natural size): S5 picks one meaning | stacked grid cell |
 | Scroll | `Scroll` (**new**) | ✓ | `scroll()` (vertical only today) | `overflow:auto` |
 | Surface | `Panel(card: true)`, `Group`, `Separator` (**exist**), `Spacer` (**new**) | ✓ | `Panel` + `look::card` | `div`, `div` + title, `hr` |
 | Content | `Label`, `Button`, `Edit`, `CheckBox` (**exist**) | ✓ | existing widgets | `span`/`p`, `button`, `input` |
@@ -358,8 +358,8 @@ Container fields: `gap`, `padding`, `align_items` (default for children, across)
   sentence deprecates.
 - **Two-way input** stays explicit (`fn name_edit_change(text) { state.name = text; }`):
   transparent in the debugger, no magic.
-- `env` = `{ width, height, size_class, dark, text_scale }`, read-only. There is no
-  `env.platform`: it would invite the `if web` branches the M8 gate forbids.
+- `env` = `{ width, height, size_class, dark, text_scale, reduce_motion }`, read-only.
+  There is no `env.platform`: it would invite the `if web` branches the M8 gate forbids.
 
 Size classes follow Material 3 by width, cascading **mobile-first** like CSS `min-width`
 queries. The cascade is **per property**, not whole-patch inheritance: a `Medium` patch
@@ -410,61 +410,83 @@ static "ten buttons" tool.
 Motion is **declarative data in the form**, like layout and bindings, not code you
 remember to call. That is what lets the designer edit it, both renderers honour it, and
 tests assert it. The vocabulary is Windows Phone 7's *Metro* motion, **minus the 3D**.
+The facts about the originals below were checked against the Windows Phone Toolkit
+source (`microsoftarchive/WindowsPhoneToolkit`), not recalled.
 
 **Rules**
 
 1. **Transform and opacity only.** The animatable properties are those that do not
-   change layout: `opacity`, `translate_x`, `translate_y`, `scale` (uniform or per
-   axis), `rotate` (2D, about the node's centre) and paint colours. `width`, `gap`,
-   `fill` and the like are **not** animated: layout is immutable once mounted (F11), and
-   a reflow per frame is what makes UI janky. A reflow itself is animated with FLIP
-   (measure the first and last rectangle, animate the difference as a transform; M9).
-   This is also how WP7 stayed smooth: render transforms and opacity, off the layout
-   path.
-2. **No 3D.** No perspective, no rotation about the X or Y axis, no flips, no tilt. The
-   2D parts of every WP7 effect (slide, fade, scale, stagger) are kept. The DOM
-   renderer must never emit `perspective`, `rotateX/Y`, `translateZ` or `matrix3d`; a
-   conformance lint checks.
+   change layout: `opacity`, `translate_x`, `translate_y`, `scale_x`, `scale_y`,
+   `rotate` (2D, about the node's centre; used by `Roll` and `Rotate`) and paint
+   colours. `width`, `gap`, `fill` and the like are **not** animated: layout is
+   immutable once mounted (F11), and a reflow per frame is what makes UI janky. A
+   reflow itself is animated with FLIP (measure the first and last rectangle, animate
+   the difference as a transform; M9). The Toolkit works the same way: it animates
+   render transforms and opacity, and `Transition.Begin()` switches the element to a
+   bitmap cache so they run on the compositor.
+2. **No 3D.** No perspective, no rotation about the X or Y axis, no Z translation, no
+   `Swivel`, no flips, no tilt depth. Where an effect *is* a 3D rotation with no 2D
+   remainder (`Turnstile`, and `Feather`'s per-item rotation), we offer a **flat
+   reading** and label it as ours (table below). The DOM renderer must never emit
+   `perspective`, `rotateX`, `rotateY`, `rotate3d`, `translateZ`, `translate3d`,
+   `scale3d` or `matrix3d`; a conformance lint checks. (`rotateZ` is 2D and allowed.)
 3. **Reduced motion is part of the contract.** `env.reduce_motion` carries the OS
    setting (`prefers-reduced-motion` on the web). When it is set, presets resolve to a
    plain fade or an instant change and nothing loops.
-4. **Fast in, slow out.** Metro motion starts quickly and decelerates hard (an
-   exponential ease-out), over short durations (about 150–350 ms) with small staggers
-   (about 40–60 ms). These are motion **tokens**, tuned by eye and editable in the theme
-   editor (M9). The numbers are starting points, not WP7's exact values.
+4. **Fast in, slow out.** The Toolkit uses `ExponentialEase` (ease-out, exponent 6) for
+   its transitions: durations of 250 to 350 ms (a turnstile is 350 ms in and 250 ms out;
+   slide left and right 500 ms; roll 600 ms), a 40 ms stagger in and 50 ms out for
+   feather, and a tilt that releases over 100 ms after a 200 ms delay. These become
+   motion **tokens**, tuned by eye and editable in the theme editor (M9). An
+   exponential ease-out is not a cubic-bezier, so the web uses a CSS `linear()`
+   approximation and the fixtures carry a tolerance (R14).
 
-**Presets** (the 2D subset of the WP7 toolkit's transitions and effects):
+**Presets** (the 2D subset, and what is ours):
 
-| Preset | What it does | WP7 origin | 3D part dropped |
+| Preset | What it does | WP7 origin (checked) | What is ours |
 |---|---|---|---|
-| `Fade` | opacity 0 ↔ 1 | the fade in every transition | none |
-| `Slide(from, distance)` | translates in from an edge, with a fade | `SlideTransition` | none |
-| `Turnstile` (flat) | slides in from the side by about a third of the width, fading; mirrored on exit | `TurnstileTransition` | the swing about the edge |
-| `Feather(stagger)` | children enter one after another, each a short `Slide` and `Fade` | the list "feather" entrance | the per-item 3D rotation |
-| `Continuum(key)` | a shared element carries from one place to another while the rest slides and fades | the continuum transition | none |
-| `PressScale` | a pressed item shrinks to about 0.96 and eases back | `TiltEffect` | the 3D tilt |
-| `Pivot` / `Panorama` slide | header and content move at different speeds | `Pivot`, `Panorama` | none (finger tracking needs G19) |
-| `ProgressDots` | indeterminate dots sliding across | the WP7 progress bar | none |
+| `Slide(from, distance)` | translates in from an edge, with an opacity fade | Toolkit `SlideTransition`: translate (about 200) plus opacity, exponent 6 | nothing: this is the original's 2D |
+| `Fade` | opacity 0 ↔ 1 | the opacity half of Slide and Rotate. Turnstile and Swivel do **not** fade: their opacity switches in a step | the preset as a standalone |
+| `Roll` / `Rotate` | rotates about the node's centre while fading in | Toolkit `RollTransition` and `RotateTransition`: `RotationZ` about the centre, which is **2D** | nothing: kept as is |
+| `Turnstile` (flat) | the node squashes in horizontally from its left edge, `scale_x` from about 0.17 to 1 (the orthographic width of the original's 80° turn), mirrored on exit | Toolkit `TurnstileTransition`: `RotationY` of -80° to 0 about the left edge, no slide and no fade | **the flat projection of a 3D rotation.** A plain `Slide` is the alternative (D11) |
+| `Feather(stagger)` | children enter one after another, each a short flat `Turnstile` (or `Slide`), 40 ms apart in and 50 ms out | Toolkit `TurnstileFeatherEffect`: a per-item `RotationY` about `CenterOfRotationX = -0.2`, 350 ms, staggered | the stagger is the original's; the per-item motion is the flat reading |
+| `PressScale` | a pressed item eases down to about 0.96 and back, releasing over 100 ms after a 200 ms delay | Toolkit `TiltEffect`: a tilt of up to 0.3 rad plus a depression of up to 25 px in Z | the scale, and the 0.96; there is no tilt |
+| `ProgressDots` | indeterminate dots sliding across | Toolkit `PerformanceProgressBar` | nothing |
+| `Continuum(key)` | a shared element carries from one place to another while the rest slides and fades | the platform's Continuum pattern. **Not in the Toolkit**; its behaviour was not verified here | ours: the web's View Transitions and xui's FLIP define it |
+| `Pivot` / `Panorama` slide | header and content move at different speeds | the platform controls' look. **Not in the Toolkit** (only `LockablePivot`) | ours (finger tracking needs G19) |
+| *Swivel*, *flip*, tile flip | excluded | Toolkit `SwivelTransition`: `RotationX` (3D) | all of it |
 
 **Document (a sketch, like §4.2).** One common field, `motion`, so no widget field
-changes type:
+changes type. It is accepted on **widget nodes** (`Panel`, `Group`, `Tabs`, `Label`,
+`Button`, …); layouts (`Row`, `Column`, `Flex`, …) are entries in a parent's tree, not
+backend nodes, so to animate one, wrap it in a `Panel`:
 
 ```ron
 Panel(name: "counter_card", card: true, motion: Motion(
-    enter:  Feather(from: Bottom, stagger: 50),
+    enter:  Slide(from: Bottom, distance: 40),
     exit:   Fade,
     change: { "opacity": Ease(ms: 200), "translate_y": Ease(ms: 300) },
     press:  PressScale,
 ), content: Column(padding: 12, children: []))
 ```
 
-- `enter` and `exit` run when the node is created or removed, or when its `visible`
-  changes. An exit holds the node, and the room it takes, until it finishes, then
-  removes it (collapsing the room is M11).
+The six properties of rule 1 are **common runtime properties** of every widget node (like
+`visible` and `enabled`), read and write, so `change`, `bind` and `animate()` have
+something to write. They default to `opacity: 1` and the identity transform and are never
+saved to the file at their defaults.
+
+- `enter` and `exit` run when a node is created or removed, or when its `visible`
+  changes. `enter` is gated on **node identity**, so it does not replay on a hot reload
+  or on a rebuild of a subtree. An exit holds the node, and the room it takes, until it
+  finishes, then removes it (collapsing the room is M11). On xui, an exit through
+  `visible` delays `set_visible(false)`; a *structural* exit (M9) needs a ghost entry
+  carried through the remount of §3.4 (S3 covers it).
 - `change` makes a changed *animatable* property, bound or scripted, animate from the
   last applied value instead of jumping.
 - `press` is feedback for buttons and other activatable nodes.
-- Scripts: `card.animate(#{ opacity: 1.0, translate_y: 0.0 }, 250)`; in M9
+- Scripts: `card.animate(#{ opacity: 1.0, translate_y: 0.0 }, 250)` writes the same
+  `Animate` patch. It bypasses the binding diff, so animating a property that is also
+  bound is a lint warning, like any write to a bound property. In M9
   `card.play("pulse")` runs named keyframes declared on the form. Both honour reduced
   motion.
 
@@ -472,14 +494,33 @@ Panel(name: "counter_card", card: true, motion: Motion(
 easing }` sits beside `Set` (§3.1). The view core decides **what** animates: it already
 knows the last applied value, the new one and the node's `motion`. The renderer decides
 **how**: the DOM renderer uses CSS transitions and the Web Animations API, on the
-compositor; the xui renderer runs a `MotionDriver` on a frame timer and needs per-node
-opacity and transform from the backend (G29). A renderer that cannot animate a property
-applies `to` at once. The core keeps a **virtual clock**, so golden traces assert
-animated values at fixed times (t = 0, 100 ms, 250 ms).
+compositor; the xui renderer runs a `MotionDriver` and needs per-node opacity and
+transform from the backend (G29). Four contract points:
+
+- **`from` may be `Current`.** The core knows only the applied *target*, not the
+  interpolated value, so an interrupted animation starts from where the renderer is.
+- **Completion is reported.** The renderer calls back `finished(node, property)`, so the
+  core can sequence a `Remove` after an exit and an `enter` after a delay.
+- **Skip-if-equal does not apply to `Animate`.** `Session::update_with` keeps only
+  `Set` patches (`session.rs`); an `Animate` towards the live value must be dropped by
+  the core's own check, and an `Unset` of an animatable property applies at once.
+- **Two clocks.** The core has a virtual clock (`advance(dt)`), so golden traces assert
+  values at fixed times (t = 0, 100 ms, 250 ms). A real run is driven by the renderer.
+  `OffscreenBackend::set_timer` returns `TimerId(0)`, so `MotionDriver` takes an
+  injected `tick(now)` rather than owning a timer.
+
+A renderer that cannot animate a property applies `to` at once.
+
+**On the web** (renderer-local; none of it is decided by the core): FLIP needs measured
+rectangles, and a reflow there comes from `@media`, so "first" is cached through a
+`ResizeObserver`. A staggered `animation-delay` needs `animation-fill-mode: backwards`
+so the item does not flash before it starts. The View Transitions API makes the page
+non-interactive while it runs and snapshots in-flight animations; its use for
+`Continuum` is to be verified at M9.
 
 **In the designer** (§6.1): a motion inspector per node, play and scrub of the entrance
 in the preview, a reduced-motion toggle, and lints (animating a layout property, a
-duration over 500 ms, a loop).
+duration over 500 ms, a loop, a 3D name).
 
 ---
 
@@ -492,7 +533,7 @@ duration over 500 ms, a loop).
 | **xui** `xui-form` | The model additions of §4.2; tree ops (§6.2); **a `build` feature gate** (none exists: only `migrate`) so the web crate links the model without widgets. Developed through xui's established process, then pinned by LazyRAD |
 | **xui** `xui-script` | LazyRAD's deltas (P2b: `build_deferred`, `reload`, `state`/`set_state`, `StopHandle`, `is_host_handle`, `control_methods`, `to_arg_value`, `source_name`, top-level-variable semantics); a **renderer-neutral session split** (P2c): engine, AST, function table, run/load/close and callbacks apart from `Ui`/`LiveForm`; Rhai `debugging` behind a feature |
 | **xui** `xui-core` / `xui-canvas` | Per-node opacity and 2D transform in the compositing path (G29); a shared frame clock (G24); a reduced-motion setting (G30). Translate already works through node moves |
-| `lazyrad-view` (new, LazyRAD) | Renderer-neutral and `wasm32`-clean: `Environment`/size classes, responsive cascade, **the single home of the binding pass**, its own small `Tree`/`Node` model, `Patch` (including `Unset`, and `Animate` once the motion planner lands), a virtual clock, `Renderer` trait, golden patch traces. **No `xui-form` dependency** (it depends on `rhai` and `thiserror` only), so a mapper from the RON `Form` to its `Tree` is separate work (B5). Upstream to xui once stable |
+| `lazyrad-view` (new, LazyRAD) | Renderer-neutral and intended to be `wasm32`-clean (not yet compiled for it: no target is installed): `Environment`/size classes, responsive cascade, **the single home of the binding pass**, its own small `Tree`/`Node` model, `Patch` (including `Unset`, and `Animate` once the motion planner lands), a virtual clock, `Renderer` trait, golden patch traces. **No `xui-form` dependency** (it depends on `rhai` and `thiserror` only), so a mapper from the RON `Form` to its `Tree` is separate work (B5). Upstream to xui once stable |
 | `lazyrad-runtime` | Drops its `xui-form`/`xui-rhai` copies for xui's (P4); calls `lazyrad-view`'s binding pass; feeds `Resize` and reduced motion into `env`; hosts the xui renderer's `MotionDriver`. Gains a `wasm32` CI job (it already has the `desktop` split for musl), a `canvas-control` feature so the web build drops `xui-canvas`, and a web-safe `Platform` (today `Send + Sync`) |
 | `lazyrad-web` (new, `cdylib`) | wasm-bindgen entry, bundle loader, `DomRenderer`, `DomHost: FormHost`, the web `Platform`, CSS emitter |
 | `lazyrad-packager` | `web` export: copies the prebuilt stub, writes `index.html`, the bundle and assets. Same model as the `.exe` |
@@ -594,7 +635,7 @@ Make Web App  ─►  dist/
 | **Binding editor** | An expression field with completion for `state.*` and `env.*`; errors inline | Compose previews, Android data binding |
 | **Layout warnings** | `layout_report()` warnings (clipping, zero size, truncated text, overlap) become badges on the node | Flutter's overflow stripes |
 | **Theme and text scale** | Light/dark toggle and 1.0–2.0× text scale in the preview | Android Studio preview toggles |
-| **Motion inspector** | Per node: pick `enter`, `exit`, `change` and `press` presets, set duration, delay, stagger and an easing curve; lints for layout-property animation, over-long durations and loops | Blend and Expression Blend behaviours, Flutter motion tooling |
+| **Motion inspector** | Per node: pick `enter`, `exit`, `change` and `press` presets, set duration, delay, stagger and an easing curve; lints for layout-property animation, over-long durations and loops | Expression Blend behaviours, Flutter motion tooling |
 | **Play and scrub** | A play button and a scrubber over the form's entrance (including staggers) in the preview; a reduced-motion toggle | Android Studio Animation Preview |
 
 ### 6.2 How it is built
@@ -649,7 +690,8 @@ Sizes are rough, for one developer, as in PLAN.md §11. Each milestone ends in a
 
 Mostly xui's own W3/W4, plus the deltas LazyRAD needs. It is worth doing on its own: it
 cuts LazyRAD's calculator form from 159 lines to about 40. **M8's model and view-core
-lanes (A, B) need only P1–P2c; the desktop and designer lanes (C, E) need P4.**
+lanes (A, B) need only P1–P2c; the desktop and designer lanes (C, E) need P4, and the
+desktop motion work (C4) also needs P2d.**
 
 | # | Work | Repo | Size | After |
 |---|---|---|---|---|
@@ -658,7 +700,9 @@ lanes (A, B) need only P1–P2c; the desktop and designer lanes (C, E) need P4.*
 | P2 | **Model the kinds LazyRAD has and the RON model lacks:** `Timer`, `Canvas`, `PictureBox`, `Button.icon`, with their factories. About 3,000 lines move onto xui's factory API. Upstream, because the model is a closed enum (D3) | xui | 2–3 wk | P1 |
 | P2b | **Upstream LazyRAD's `xui-rhai` deltas** into `xui-script` (the nine names in F6) and settle top-level-variable semantics (D8) | xui | ≈ 1 wk | P1 |
 | P2c | **Wasm factoring:** a `build` feature gate in `xui-form`; a renderer-neutral `ScriptForm` session split; Rhai `debugging` behind a feature | xui | 1–2 wk | P1 |
-| P2d | **Per-node opacity and 2D transform in the xui compositing path** (G29), plus a shared frame clock and the reduced-motion setting (G24, G30). Needed for `Fade`, `Scale` and `rotate` on desktop; translate already works through node moves | xui | 1–2 wk (spike S4 sizes it) | P1 |
+| P2d-a | **Clock, easing and reduced motion:** a shared frame clock, the Metro easing set (exponential ease-out and friends) and `Backend::prefers_reduced_motion()` (G24, G30). The Win32 backend already calls `SystemParametersInfoW` (`xui-win32/src/sys/dwm.rs`); macOS and Linux are unverified | xui | days | P1 |
+| P2d-b | **Region repaint and per-node layers** (G29). Today the present path allocates a fresh surface per frame, composites every node, then clones the whole frame (`xui-canvas/src/backend/app/present.rs`); `invalidate_rect` ignores its rectangle and `Surface::paint_region` is used only in tests. Region repaint comes first; layers (paint a subtree, composite with opacity and transform) sit on it | xui | 2–3 wk (spike S4 sizes it) | P1 |
+| P2d-c | **A translate that survives relayout.** The backend moves a node by a parent-relative rectangle, but `arrange/mount.rs` re-places any node whose bounds differ from its layout rectangle, so any relayout (a text change, a resize, `set_visible`) snaps an animated node back. Needs an offset layer in `place()`, or the driver re-asserts offsets after each layout. Transforms are **visual only**: hit-testing stays on the layout rectangle, as the Toolkit does (`IsHitTestVisible = false` during a transition); hit-testing through a transform is M11 | xui | ≈ 1 wk | P2d-b |
 | P3 | **Tree API:** path-addressed `NodePath`; `insert_at`, `move_to`, `remove`, `rename`, `wrap`, `unwrap`, each returning its inverse (§6.2) | xui | 1–2 wk | P1 |
 | P4 | **Adopt.** One xui rev (W5.5); delete LazyRAD's `xui-form`/`xui-rhai` copies; port the `FormDoc` sites (designer onto the P3 tree API, runtime, IDE, project); `xui-form migrate` the samples and templates; keep hot reload, rename-handlers and the debugger working | LazyRAD | 3–4 wk | P2, P2b, P3 |
 | P5 | **Docs:** PLAN.md §1 (TOML), §1.1 (`GroupBox`), §2, README, samples, tutorial | LazyRAD | days | P4 |
@@ -667,7 +711,7 @@ lanes (A, B) need only P1–P2c; the desktop and designer lanes (C, E) need P4.*
 forms (through the kinds P2 added); the designer passes today's designer tests re-based
 on the tree; hot reload and the debugger work on format-2 forms; the musl CI job is green.
 
-### Phase 0 — Spikes (≈ 1–2 weeks; S1 and S2 run beside P1, S3 and R1 need P1)
+### Phase 0 — Spikes (≈ 1–2 weeks; S1, S2 and S4 run beside P1, S3 and S5 need P1)
 
 Cheap experiments that can change the plan. Each has a pass condition.
 
@@ -676,24 +720,26 @@ Cheap experiments that can change the plan. Each has a pass condition.
 | S1 | `cargo check --target wasm32-unknown-unknown` for `xui-core`, `xui-form` (a scratch `cfg` gate of its builder stands in for P2c), `rhai =1.26.1`, plus a "hello wasm" running a Rhai script and measuring size | Compiles; gzipped wasm within the §5.2 budget. Expected runtime panics (they compile, then panic on `wasm32-unknown-unknown`): `SystemTime::now` (`stdlib.rs:384`), `time::OffsetDateTime::now_*` (`stdlib.rs:430-436`), `Instant::now` in the `Canvas` control |
 | S2 | Hand-write the §4.2 form as HTML and CSS; compare to `xui-form render --report` at 360, 700 and 1000 px, with **text-bearing** fixtures (wrapping text in a `Row`, a `fill` card, a `Wrap`) and the Appendix A divergences | The divergences are confirmed or refuted; no semantic that needs a hack; fixed-size rectangles within ±1 px |
 | S3 | **Remount over shared widgets** (§3.4): on a built RON form, change a `Row` to a `Column` and a `gap` through a level re-mount that reuses the widgets, while an `Edit` has focus, caret and text and a scroll view is scrolled | Text, caret, selection, focus and scroll offset survive; no widget is recreated; cost measured on the calculator and a 200-node form. If it fails, G27 (live layout cells) moves into M8 |
-| S4 | **Motion on the xui canvas** (§4.8): in `xui-canvas`, fade and translate a subtree of about 30 widgets (a card with text, an `Edit` and a button) at 60 frames per second, with per-node opacity done by painting the subtree into a layer and compositing it | Dirty-rect painting keeps frame time under 16 ms on a mid laptop at 1080p and the animated region at 400 × 300; the cost on the LazyOS software path is measured; hit-testing follows the transformed rectangle. If it fails, the presets degrade on xui to translate-only or instant, and M8 says so |
-| R1 | Prototype `bind`, `responsive` and `motion` as common fields in the `node!`/`widget!` macros (including the generated all-optional patch type and the mechanics in §4.2) | Round-trips byte-stable; `Form::validate` reports a bad key; the catalog JSON lists all three; a layout node can be addressed |
+| S4 | **Motion on the xui canvas** (§4.8). First, **build region repaint** in `composite`/`redraw` (nothing uses `paint_region` outside tests). Then fade and translate a subtree of about 30 widgets (a card with text, an `Edit` and a button) at 60 frames per second, with per-node opacity done by painting the subtree into a layer and compositing it. Baseline to beat: a replica of today's present path (allocate, fill, clone, convert) cost about 8 ms per 1080p frame **before any widget painted** (an indicative measurement, release build) | Frame time under 16 ms on a mid laptop at 1080p with the animated region at 400 × 300, **region repaint included**; the cost on the LazyOS software path measured. Hit-testing through a transform is *not* a criterion: transforms are visual only (P2d-c). If it fails, the presets degrade on xui to translate-only or instant, and M8 says so |
+| S5 | Prototype `bind`, `responsive` and `motion` as common fields in the `node!`/`widget!` macros (including the generated all-optional patch type and the mechanics in §4.2) | Round-trips byte-stable; `Form::validate` reports a bad key; the catalog JSON lists all three; a layout node can be addressed |
 
 ### M8 — Core: the small proof (≈ 8–10 weeks wall-clock, two agents in tandem)
 
 Scope: tier 0, bindings, responsive overrides, **the motion core (§4.8: `Fade`, `Slide`,
 `PressScale`, `change` transitions, reduced motion)**, the xui and DOM renderers, web
 export, and the flow-designer essentials. **Out of M8:** components, lists,
-conditionals, navigation, the theming editor, `Feather`, `Continuum`, route transitions,
-FLIP and keyframes (all M9 or later), http. Sizes assume at most **two agents at once** (the
+conditionals, navigation, the theming editor, `Turnstile`, `Feather`, `Roll`, `Rotate`,
+`ProgressDots`, `Continuum` and the non-finger `Pivot`/`Panorama` slide (all M9), route
+transitions (M10), FLIP and keyframes (M9), hit-testing through a transform (M11), http.
+Sizes assume at most **two agents at once** (the
 dispatch workflow's cap), so the lanes below are ordered by what blocks what, not run
 all at once: A and B first (they need only P1–P2c), then C, D and E.
 
 | Lane | Work packages (issue-sized) |
 |---|---|
-| **A Model** (xui) | A1 `bind` field, validation and expression compile check. A2 `responsive` patches and size-class cascade in the schema. A3 `Flex`, `Scroll`, `Overlay`, `Spacer` kinds with factories. A4 `margin` (wrapper); `min_*` deferred (G21). A5 CLI: `render --size`, `--report json` (node path, control name, warnings), `label_for` and `accessible_name`. A6 the `motion` field, its presets and validation (animating a layout property, a loop, a 3D name) |
-| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade. B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, its own `Tree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: B1 to B3 are in review as [#119](https://github.com/va1erian/lazyrad/pull/119) (fixes in progress); what it found is in §11.1.* **B5 the mapper** from the RON `Form` (its `bind`, `responsive` and `motion` fields) to `lazyrad-view`'s `Tree`; it needs A1, A2 and A6 and nothing in #119 owns it. **B4 the motion planner:** `Patch::Animate`, presets expanded into animations, `enter`/`exit` lifecycle (an exit holds the node until it ends), the virtual clock, reduced motion |
-| **C Desktop** | C1 builder: new kinds and layout fields → `arrange`, layout patches by re-mount (S3). C2 runtime: calls B2 after each turn, `Resize` → `env`, shared `state` handle. C3 lint: bound-property writes, unknown state keys, binding compile errors (`check_project`). C4 the xui renderer's `MotionDriver` on the frame clock: opacity and transform through G29, translate through node moves, reduced motion from the OS |
+| **A Model** (xui) | A1 `bind` field, validation and expression compile check. A2 `responsive` patches and size-class cascade in the schema. A3 `Flex`, `Scroll`, `Overlay`, `Spacer` kinds with factories. A4 `margin` (wrapper); `min_*` deferred (G21). A5 CLI: `render --size`, `--report json` (node path, control name, warnings), `label_for` and `accessible_name`. A6 the `motion` field, its presets and validation (animating a layout property, a loop, a 3D name), **and the six common runtime properties** `opacity`, `translate_x/y`, `scale_x/y`, `rotate` (they must exist for `change`, `bind` and `animate()` to write; `motion` is accepted on widget nodes only) |
+| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade. B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, its own `Tree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: B1 to B3 are in review as [#119](https://github.com/va1erian/lazyrad/pull/119) (fixes in progress); what it found is in §11.1.* **B5 the mapper** from the RON `Form` (its `bind`, `responsive` and `motion` fields) to `lazyrad-view`'s `Tree`; it needs A1, A2 and A6 and nothing in #119 owns it. **B4 the motion planner:** `Patch::Animate` with `from: Current`, a `finished` callback, presets expanded into animations, the `enter`/`exit` lifecycle (an exit holds the node until it ends; `enter` is gated on node identity so a rebuild does not replay it), the virtual clock, reduced motion |
+| **C Desktop** | C1 builder: new kinds and layout fields → `arrange`, layout patches by re-mount (S3). C2 runtime: calls B2 after each turn, `Resize` → `env`, shared `state` handle. C3 lint: bound-property writes, unknown state keys, binding compile errors (`check_project`). C4 the xui renderer's `MotionDriver`, driven by an injected `tick(now)` (`OffscreenBackend::set_timer` returns `TimerId(0)`): opacity and transform through G29, translate through P2d-c's offset layer, reduced motion from the OS. C5 `animate()` in the Rhai bridge: the same `Animate` patch, with a lint when the property is also bound |
 | **D Web** | D1 `lazyrad-web` skeleton, bundle loader, web `Platform`. D2 `DomRenderer` and `DomHost`, event delegation. D3 CSS emitter with media queries, driven by the catalog. D4 dev server and *Run in browser*. D5 *Make Web App* and the stub CI job. D6 `.lrp` `targets` and `[web]` (`lazyrad-project`). D7 motion in the DOM renderer: `Animate` patches to the Web Animations API, presets to CSS, `prefers-reduced-motion` into `env` (D3's emitter gains the preset keyframes) |
 | **E Designer** | E1 viewport bar and size-class badge. E2 drop indicators and outline drag. E3 property grid: layout fields per parent, sizing control, responsive indicator, binding field. E4 layout-warning badges (from A5's structured report). E5 quick actions (wrap, unwrap, move). E6 motion inspector, play and scrub, reduced-motion toggle and motion lints |
 | **F Quality** | F1 `examples/modern_hello` (the demo below). F2 conformance fixtures (fixed-size and text-bearing) and the Chromium and WebKit job. F3 web smoke test (load the bundle, click, assert) plus an axe-core audit of the demo. F4 motion fixtures: golden values per preset at fixed times on both renderers, every preset under reduced motion, and the no-3D lint |
@@ -702,8 +748,8 @@ all at once: A and B first (they need only P1–P2c), then C, D and E.
 
 1. `lazyrad-player examples/modern_hello` opens a native window at 720 × 560. The cards
    slide up and fade in as it opens. Dragging the window narrower than 600 dp flips the
-   two cards from a row to a column. Pressing *Add one* gives a small press-scale and the
-   count's change eases rather than jumps.
+   two cards from a row to a column. Pressing *Add one* gives a small press-scale on the
+   button. (Text is not animatable, so the count itself changes at once.)
 2. In the IDE: open `profile_form.lfm`, drag a `Button` from the toolbox into the `cards`
    row, set `fill: 1`, switch the viewport to *Phone*, press F5.
 3. *Make Web App*, serve `dist/`, open it in a browser: the same behaviour, the same
@@ -769,13 +815,13 @@ Numbering continues PLAN.md §10. "Workaround" means LazyRAD proceeds without an
 | G21 | **Layout gaps**: no per-item margin; `justify` has no space-between / around / evenly; `Min` shares the entry's single sizing slot with `fill` and applies on the main axis only; a `Wrap` ignores `fill`; a `Row` gives its children no width bound, so wrapped text under-reports its height; no aspect ratio | Faithful `margin`, distribution, `min_*` with `fill`, wrapped text in rows | Workaround: a one-child wrapper for margin, spacer weights for distribution; `min_*` deferred. Upstream later |
 | G22 | **No virtualized item list** for arbitrary row templates | M10–M11 lists | Upstream a lazy-list widget; windowed DOM on web |
 | G23 | **Theme has no Material-like roles or state layers** | M9 tokens | Workaround: LazyRAD-owned painted widgets over an app-level token set; upstream when stable |
-| G24 | **No animation driver**: per-widget timers exist (G18), but there is no shared frame clock, easing set or tween helper | Every preset in §4.8 | Upstream a frame clock and an easing library (exponential, cubic, the ones Metro uses); LazyRAD's `MotionDriver` sits on them. CSS and the Web Animations API on the web |
+| G24 | **No animation driver**: per-widget timers exist (G18), but there is no shared frame clock, easing set or tween helper | Every preset in §4.8 | Upstream a frame clock and an easing library (exponential ease-out with exponent 6, cubic, the ones Metro uses); LazyRAD's `MotionDriver` sits on them and takes an injected `tick(now)`. CSS and the Web Animations API on the web (P2d-a) |
 | G25 | **No accessibility bridge on canvas backends** | Desktop screen readers | The model exists in xui-core; a bridge is a backend job. The web is covered by ARIA from the DOM |
 | G26 | **The format is a closed enum** (F7): no `register` / `alias`, so LazyRAD-only kinds and user components have no registration path | P2, §4.6 | P2 models the three kinds upstream; components use an instance node. A generic extension node is the alternative (D3) |
 | G27 | **No live layout** (F11): the mounted `Group` tree is immutable, layout kinds have no runtime properties | `responsive` patches and any script that wants to change a `gap` or `direction` | Workaround: re-mount the level over shared widgets (S3). Upstream: live layout cells like `layout::Placement`, so a layout field is a runtime property |
 | G28 | **No structured layout report** (F12): `layout_report()` is a `String` naming widgets by type and text; `Diagnostic.node` is a widget name only | Designer badges (E4), conformance (F2), agents | Upstream a typed report (node path, control name, rect, warning kind) and `render --size` / `--report json` (A5) |
-| G29 | **No per-node opacity or 2D transform** in the backends; a node is a device-pixel rectangle painted in creation order. Translate works (node moves); fade, scale and rotate do not | `Fade`, `PressScale`, `rotate`, `enter`/`exit` on desktop | Upstream a node opacity and transform: paint the subtree into a layer and composite it (tiny-skia `draw_pixmap`), with hit-testing on the transformed rectangle. Sized by spike S4 (P2d). Interim: presets degrade to translate-only or instant on xui, declared per preset |
-| G30 | **No reduced-motion setting**: nothing reads the OS animation preference (Windows `SPI_GETCLIENTAREAANIMATION`; `prefers-reduced-motion` on the web) | The reduced-motion rule of §4.8 (accessibility) | Upstream `Backend::prefers_reduced_motion()` with a default of `false`; LazyOS reports its own setting |
+| G29 | **No per-node opacity or 2D transform** in the backends; a node is a device-pixel rectangle painted in creation order, and the present path allocates and clones a whole frame per present with no region path. Translate works on the backend (parent-relative moves), but `arrange` re-places a node on any relayout; fade, scale and rotate do not exist | `Fade`, `PressScale`, `rotate`, `enter`/`exit` on desktop | Upstream region repaint first, then a node opacity and transform: paint the subtree into a layer and composite it (tiny-skia `draw_pixmap`); transforms are visual only, so hit-testing stays on the layout rectangle (hit-testing through a transform is M11). Sized by spike S4 (P2d-b, P2d-c). Interim: presets degrade to translate-only or instant on xui, declared per preset |
+| G30 | **No reduced-motion setting**: nothing reads the OS animation preference (Windows `SPI_GETCLIENTAREAANIMATION`; `prefers-reduced-motion` on the web) | The reduced-motion rule of §4.8 (accessibility) | Upstream `Backend::prefers_reduced_motion()` with a default of `false`. The Win32 backend already calls `SystemParametersInfoW` (`xui-win32/src/sys/dwm.rs`); macOS and Linux are unverified; LazyOS reports its own setting |
 
 ---
 
@@ -789,7 +835,7 @@ Numbering continues PLAN.md §10. "Workaround" means LazyRAD proceeds without an
 | R2 | **Scope creep toward "build Flutter"** | Every milestone ends in a demo with a gate; tiers (§7) are ordered; M8 excludes components, lists and navigation on purpose |
 | R3 | **Web bundle size and startup** | Budgets measured in S1; no widget code or rasteriser in the wasm; prebuilt stub; lazy assets |
 | R4 | **Two binding styles confuse users** (handlers that set properties vs bindings) | One-way only, ownership rule, lint, docs. Imperative code stays legal for anything not bound |
-| R5 | **Rhai is synchronous**; web I/O is async. **The operation budget is leaky**: Rhai restarts its operation counter inside callbacks such as `array.map(closure)` (found in lane B), so a runaway there is not bounded by `max_operations` or by the hook's own argument | Callback-style `http`/`file` (the non-blocking `msg_box` pattern); `lazyrad-view` keeps a shared counter that its `on_progress` hook checks (verified to stop 1M-element `map`, `filter`, `some` and `sort`); `xui-rhai`'s handler budget compares the per-run number the hook is given and has the blind spot the shared counter closes |
+| R5 | **Rhai is synchronous**; web I/O is async. **The operation budget is leaky**: Rhai restarts its operation counter inside callbacks such as `array.map(closure)` (found in lane B), so a runaway there is not bounded by `max_operations` or by the hook's own argument | Callback-style `http`/`file` (the non-blocking `msg_box` pattern); `lazyrad-view` keeps a shared counter that its `on_progress` hook checks (verified, by a probe, to stop a large `map`, `filter` and `some`; `sort` on a constant receiver errors instead, so it is unexercised); `xui-rhai`'s handler budget compares the per-run number the hook is given and has the blind spot the shared counter closes |
 | R6 | **Designer complexity** (tree drag and drop in a custom-painted toolkit) | Outline reorder and click-to-insert first; pure, window-free tree ops; reuse overlay and hit-test patterns |
 | R7 | **Work stranded on stacked branches** (it already happened, F2) | P1 now. Process fix: retarget stacked PRs to `main` before merging the bottom one, or merge the stack top-down; a CI or bot check that a merged PR's base is the default branch |
 | R8 | **Three repos pinned at different xui revs** | xui's W5.5 single pin; adoption (P4) lands against one rev; the musl CI job gates every PR |
@@ -798,7 +844,7 @@ Numbering continues PLAN.md §10. "Workaround" means LazyRAD proceeds without an
 | R11 | **Layout patches lose widget state** (F11) | Remount over shared widgets, proven by spike S3 before M8 relies on it; patches only at size-class changes; G27 as the upstream fix |
 | R12 | **`xui-script` and LazyRAD's runtime diverge again** (F6) | P2b upstreams the deltas before adoption; one Rhai pin; LazyRAD keeps only its stdlib, `FsPolicy` and player |
 | R13 | **Motion drops frames on the software-painted xui canvas**, most on LazyOS and for large animated regions (a full-window fade repaints the window every frame) | Transform and opacity only; animate small subtrees; paint dirty rectangles; measure in spike S4; a frame-budget check that degrades a running animation to its end state under load; reduced motion as the escape hatch |
-| R14 | **Desktop and web motion disagree** (curves, timing, stagger origin) | One easing set and one definition of each preset; golden values at fixed times from the virtual clock against a paused Web Animation; the no-3D lint |
+| R14 | **Desktop and web motion disagree** (curves, timing, stagger origin) | One easing set and one definition of each preset; golden values at fixed times from the virtual clock against a paused Web Animation, with a stated tolerance, because an exponential ease-out is not a cubic-bezier and the web uses a CSS `linear()` approximation; the no-3D lint |
 
 ### Decisions I need from you
 
@@ -807,13 +853,14 @@ Numbering continues PLAN.md §10. "Workaround" means LazyRAD proceeds without an
 | D1 | Web renderer: DOM (B) now, canvas (A) later as a fallback | **Yes**, with the §3.3 revisit trigger |
 | D2 | **Land the stranded RON work now (P1)**, before anything else | **Yes**: it is the first implementation task, run in a scratchpad clone, never in `E:\repos\xui` |
 | D3 | LazyRAD-only kinds (`Timer`, `Canvas`, `PictureBox`): model upstream as enum variants, or add a generic extension node | **Upstream variants** for the three (they are not LazyRAD-specific). Components get an instance node (§4.6) |
-| D4 | Bindings and responsive overrides as **common side-table fields** (§4.2), not field-type wrappers | **Yes**, pending spike R1 |
+| D4 | Bindings and responsive overrides as **common side-table fields** (§4.2), not field-type wrappers | **Yes**, pending spike S5 |
 | D5 | One `.lfm` file type; no `.lvw`. A form with `props` is a component | **Yes** |
 | D6 | Native Android and iOS in scope? | **No**; PWA first, revisit at M11 |
 | D7 | Should existing classic forms be exportable to the web? | **Yes, selectively**: `Absolute` maps to positioned elements, but only forms whose kinds have a DOM mapping export. Of the four samples only `calculator` is tier 0: `hello` needs `ComboBox` (M9), `todo` needs `ListView` (M11), `brickbreaker` needs `Canvas` (M11) |
 | D8 | Top-level `let`s visible in handlers (LazyRAD's `36d2d21`; `xui-script` documents the opposite): upstream LazyRAD's behaviour | **Yes** (P2b). Bindings still see only `state`, `props` and `env` (§4.5) |
-| D9 | Motion vocabulary: the 2D subset of Windows Phone 7's Metro motion (§4.8), with 3D (turnstile rotation, swivel, flip, tilt) excluded and every effect honouring reduced motion | **Yes** (you asked for it). The preset names are my mapping; rename freely |
+| D9 | Motion vocabulary: the 2D subset of Windows Phone 7's Metro motion (§4.8), with the 3D (the turnstile and feather rotation, swivel, flip, tilt depth) excluded, `Roll` and `Rotate` kept because they are 2D, and every effect honouring reduced motion | **Yes** (you asked for it). The preset names are my mapping; rename freely |
 | D10 | Does desktop ship the full presets in M8, or may it degrade to translate-only while G29 lands | **Full presets**: motion is first class, so P2d precedes the desktop motion lane. Spike S4 can still force a written degradation |
+| D11 | What "turnstile minus the 3D" means: (a) a flat squash, `scale_x` from about 0.17 to 1 anchored at the left edge (the orthographic width of the original's 80° turn: a 2D affine transform, but it still reads as a fold), or (b) a plain slide | **(a)**, with (b) one token away. WP7's turnstile has no slide at all, so (b) is a substitute, not a remainder. If a flat fold still feels like 3D to you, take (b) |
 
 ---
 
@@ -833,7 +880,7 @@ by hand before being adopted.
 | No model-only build; `ScriptForm` tied to `Ui`; `time::now_*` panics; `Platform: Send + Sync` | **Adopted** (F8, P2c, §5.2) |
 | Sizing and scope contradictions; D7 "for free" | **Adopted**: two-agent cap, P2 resized, D7 corrected, tiers reconciled |
 | `state` is not an alias; binding scope; `env.platform` | **Adopted** (§4.5) |
-| RON mechanics (`struct_names`, `Some(None)`, `LAYOUT_FIELDS`, unnamed layouts, diagnostics) | **Adopted** as R1 work (§4.2) |
+| RON mechanics (`struct_names`, `Some(None)`, `LAYOUT_FIELDS`, unnamed layouts, diagnostics) | **Adopted** as S5 work (§4.2) |
 | Docs, accessibility acceptance, WebKit, window mapping, `.lrp` work package | **Adopted** (P5, §4.2 row 5, gate, §5.2, work package D6 in lane D) |
 | "No IME" is false on Win32; `now()` does not use `web-time`; `d798cd4` is the CLI commit; F5 counts | **Corrected** (F5, F9, §5.2) |
 | Unverifiable: wasm compile, size and time budgets, third-party framework columns | **Open**: S1 and the budgets in §5.2 |
@@ -852,7 +899,7 @@ sections above:
 | "Typed property" was undefined: the kind must come from the catalog | §4.5 |
 | The cascade is per property, as in CSS | §4.5 |
 | A user edit with no handler sticks until the bound value next changes (the session diffs against the last applied value and skips a `Set` equal to the live one) | §4.5 |
-| Unique node names conflict with unnamed layouts and control arrays | §4.2 (R1) |
+| Unique node names conflict with unnamed layouts and control arrays | §4.2 (S5) |
 | A `(0..N).map(...)` runaway does not exist in Rhai (ranges have no `map`; an expression cannot loop); the real hole is closures | R5 |
 
 **Independent review of #119 (read-only, 13 October).** The session, cascade and diff
@@ -869,7 +916,7 @@ also found one Blocker and three Majors in the evaluator, now being fixed:
 The lesson for the web target: "no I/O" is a property of the *package list*, not of the
 expression syntax, so the allow-list is a tested contract, and the evaluator needs a
 small-stack test because wasm threads and the browser main thread have small stacks too.
-Minors (state cloned twice per turn, an eviction-free cache, unbounded tree depth, NaN
+Minors (state cloned twice per turn, a cache cleared wholesale at 4096 sources, unbounded tree depth, NaN
 widths re-evaluating every turn, a lexical-only platform guard) are on the fix list.
 
 **P1 review (xui [#296](https://github.com/va1erian/xui/pull/296), the landing PR).**
@@ -933,7 +980,7 @@ both renderers must honour, **with the divergences listed after the table**.
 | `fill` in a `Wrap` | Ignored (`wrap.rs`) | `flex: n 1 0` would stop the line ever wrapping | Emit no flex-grow inside a `Wrap` |
 | Row children | No width bound at measure time, so wrapped text under-reports its height (`flow.rs`) | Grows to fit | Text-bearing fixtures; may need an xui change (G21) |
 | `min_*` with `fill` | One sizing slot per entry; `Min` is in the rigid class | `min-width` and `flex` are independent | `min_*` deferred |
-| `Overlay` | `overlay()` centres at natural size; `stack()` stretches | A stacked grid cell stretches | R1 picks one meaning |
+| `Overlay` | `overlay()` centres at natural size; `stack()` stretches | A stacked grid cell stretches | S5 picks one meaning |
 | `Scroll` | Vertical only (`scrollview/content.rs`) | Either axis | Vertical only in M8 |
 | `Grid` | `Auto` ignores spanning items; `Fill` rows are derived from items | `auto` and `fr` size differently | Emit `minmax(0, Nfr)`, `min-width: 0` and explicit rows |
 | `Group` | A frame with content insets | `fieldset` has `min-inline-size: min-content` | Emit a `div` with a title |
@@ -944,21 +991,29 @@ margins, intrinsic-size cycles, `position: sticky`, and anything CSS grid can do
 
 ## Appendix B — Windows Phone 7 motion, 2D subset
 
-Each effect, what is kept, and where it lands. The right-hand columns are the same idea
-in the other stacks, for orientation only.
+Each effect, what is kept and what is ours. The originals were checked against the
+Windows Phone Toolkit source (`microsoftarchive/WindowsPhoneToolkit`); the other-stack
+columns are for orientation only and were not verified.
 
-| WP7 effect | LazyRAD preset | Kept | Dropped | CSS / Web Animations | Compose | Flutter |
+| WP7 effect (Toolkit class) | LazyRAD preset | What the original does | Kept / ours | CSS / Web Animations | Compose | Flutter |
 |---|---|---|---|---|---|---|
-| Slide up / down / left / right | `Slide(from, distance)` | translate + fade | none | `transform: translate()` + `opacity` | `slideInVertically` + `fadeIn` | `SlideTransition` + `FadeTransition` |
-| Turnstile (page) | `Turnstile` (flat) | slide from the side + fade, mirrored on exit | the rotation about the edge | `translateX` + `opacity` | `slideInHorizontally` | `PageRouteBuilder` with a slide |
-| Feather (list entrance) | `Feather(stagger)` | per-item slide and fade, staggered | the per-item 3D rotation | `animation-delay: calc(var(--i) * 50ms)` | `AnimatedVisibility` with a delay per item | staggered `AnimatedList` |
-| Continuum (shared element) | `Continuum(key)` | the element carries over; the rest slides and fades | none | View Transitions API (`view-transition-name`) | `SharedTransitionLayout` | `Hero` |
-| Tilt (press) | `PressScale` | press shrinks, releases with ease | the 3D tilt | `:active { transform: scale(.96) }` | `Modifier.scale` on press | `ScaleTransition` |
-| Pivot / Panorama | `Pivot` / `Panorama` slide | header and content at different speeds | none | scroll-snap + parallax transform | `HorizontalPager` | `PageView` |
-| Progress bar (indeterminate dots) | `ProgressDots` | dots sliding across | none | CSS keyframes | custom | custom |
-| Tile flip | *excluded* | n/a | all of it (a 3D flip) | n/a | n/a | n/a |
-| Swivel, roll, rotate (page) | *excluded* | n/a | all of it (3D) | n/a | n/a | n/a |
+| `SlideTransition` | `Slide(from, distance)` | translate (about 200) plus opacity, ease-out exponent 6 | kept as is | `transform: translate()` + `opacity` | `slideInVertically` + `fadeIn` | `SlideTransition` + `FadeTransition` |
+| (the opacity half of Slide and Rotate) | `Fade` | opacity 0 ↔ 1 | kept | `opacity` | `fadeIn` | `FadeTransition` |
+| `RollTransition`, `RotateTransition` | `Roll`, `Rotate` | `RotationZ` about the centre, with a fade (2D) | kept as is | `rotate` + `opacity` | `Modifier.rotate` | `RotationTransition` |
+| `TurnstileTransition` | `Turnstile` (flat) | `RotationY` -80° to 0 about the left edge, 350 ms in and 250 ms out; **no slide and no fade** | **ours:** `scale_x` from about 0.17 to 1 at the left edge (a 2D squash). `Slide` is the alternative (D11) | `transform: scaleX()` with `transform-origin: left` | `Modifier.graphicsLayer { scaleX }` | `ScaleTransition` with `alignment` |
+| `TurnstileFeatherEffect` | `Feather(stagger)` | per-item `RotationY` about `CenterOfRotationX = -0.2`, 350 ms, staggered 40 ms in and 50 ms out | the **stagger** kept; the per-item motion is the flat reading | `animation-delay: calc(var(--i) * 50ms)` with `fill-mode: backwards` | `AnimatedVisibility` with a delay per item | staggered `AnimatedList` |
+| `TiltEffect` | `PressScale` | tilt of up to 0.3 rad plus up to 25 px of Z depression; release over 100 ms after a 200 ms delay | **ours:** scale to about 0.96; release timing kept | `:active { transform: scale(.96) }` | `Modifier.scale` on press | `ScaleTransition` |
+| `PerformanceProgressBar` | `ProgressDots` | indeterminate dots | kept | CSS keyframes | custom | custom |
+| the platform's Continuum (not in the Toolkit) | `Continuum(key)` | not verified here | **ours** | View Transitions API (`view-transition-name`) | `SharedTransitionLayout` | `Hero` |
+| the platform's Pivot and Panorama (not in the Toolkit; only `LockablePivot`) | `Pivot` / `Panorama` slide | not verified here | **ours** | scroll-snap + parallax transform | `HorizontalPager` | `PageView` |
+| `SwivelTransition`, tile flip | *excluded* | `RotationX` (3D) | all of it | n/a | n/a | n/a |
 
-Easing in Metro motion is mostly an exponential ease-out (a fast start, a long soft
-landing). The tokens `motion.decelerate`, `motion.accelerate` and `motion.standard` carry
-the curves; the durations are `motion.fast`, `motion.normal` and `motion.slow`.
+**Timing.** The Toolkit uses `ExponentialEase` (ease-out, exponent 6) throughout, with
+durations of 250 to 350 ms for turnstile, 500 ms for slide left and right and 600 ms for
+roll. The tokens `motion.decelerate`, `motion.accelerate` and `motion.standard` carry the
+curves; `motion.fast`, `motion.normal` and `motion.slow` carry the durations and
+`motion.stagger` the 40 to 50 ms step. An exponential ease-out is not a cubic-bezier, so
+the web uses a CSS `linear()` approximation and the fixtures carry a tolerance.
+
+**Unverified.** The Continuum and Pivot behaviours, and the 0.96 scale (a LazyRAD token,
+not a WP7 value).
