@@ -225,7 +225,7 @@ fn a_hidden_state_entry_is_named_in_the_diagnostic() {
     let line = result.diagnostics[0].to_string();
     assert!(
         line.starts_with("count.text: ")
-            && line.contains("state.rows (more than 1024 array elements)")
+            && line.contains("state.rows (more than 512 array elements)")
             && line.contains("too large"),
         "{line}"
     );

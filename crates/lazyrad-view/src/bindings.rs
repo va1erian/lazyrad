@@ -39,11 +39,11 @@
 //!
 //! | What | Limit | In practice |
 //! |---|---|---|
-//! | operations in one evaluation | [`MAX_OPERATIONS`] = 32 768 | a `map`/`filter`/`reduce` step costs 3 to 5 per element, so about 6 steps over a full 1024-element array |
+//! | operations in one evaluation | [`MAX_OPERATIONS`] = 32 768 | a `map`/`filter`/`reduce` step costs 3 to 5 per element, so about 12 steps over a full 512-element array (the 10-call chain cap comes first) |
 //! | nested closure calls | [`MAX_CALL_LEVELS`] = 4 | |
 //! | nesting depth | [`MAX_EXPR_DEPTHS`] = 16 and 10 | every operator in a flat chain is a level: at most 16 terms in `a + b + ...` or `a && b && ...`, 12 branches in an `else if` chain, 10 chained method calls |
-//! | array elements in one value | [`MAX_ARRAY_SIZE`] = 1024 | also the longest array literal, and the most iterations of one `map` |
-//! | map entries in one value | [`MAX_MAP_SIZE`] = 1024 | one per field, nested maps included: 204 rows of five fields, 102 of ten (the entry that holds the list costs one) |
+//! | array elements in one value | [`MAX_ARRAY_SIZE`] = 512 | also the longest array literal, and the most iterations of one `map` |
+//! | map entries in one value | [`MAX_MAP_SIZE`] = 512 | one per field, nested maps included: 102 rows of five fields, 51 of ten (the entry that holds the list costs one) |
 //! | bytes of text in one value | [`MAX_STRING_SIZE`] = 32 KiB | texts inside arrays and maps are summed |
 //!
 //! The size limits apply to what a binding can *see* as well as to what it
@@ -51,7 +51,7 @@
 //! stating:
 //!
 //! * **A list of records is limited by its fields.** Rhai counts one map entry
-//!   per field, so a list of five-field rows holds at most 204 rows, and a
+//!   per field, so a list of five-field rows holds at most 102 rows, and a
 //!   list over the limit is hidden from bindings. Keep counts and summaries in
 //!   `state`, and long lists in a control that owns its rows.
 //! * **A long string can be read but not used.** `bind text: state.doc` works
@@ -89,12 +89,11 @@
 //! [`MAX_MAP_SIZE`] map entries and [`MAX_STRING_SIZE`] bytes of new text, and
 //! one native call keeps at most [`MAX_ARRAY_SIZE`] of those.
 //!
-//! **That product is large, and the budget is deliberately 1024.** In the worst
-//! shape (a list of about a thousand one-field rows, returned once per element
-//! of a thousand-element list) one evaluation transiently allocates about
-//! 545 MiB in a debug build; typical shapes are an order of magnitude less.
-//! The numbers for lower caps, and what would have to change, are on
-//! [`PEAK_MEMORY_CEILING`]; the `limits` tests pin the estimate.
+//! **The visible budget is 512.** In the worst shape (a list of about five
+//! hundred one-field rows, returned once per element of a 511-element list) one
+//! evaluation transiently allocates about 154 MiB in a debug build; typical
+//! shapes are a third of that or less. The table, and what lowers it further,
+//! are on [`PEAK_MEMORY_CEILING`]; the `limits` tests pin the estimate.
 //!
 //! # Closures that read `state`
 //!

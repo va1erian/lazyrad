@@ -195,11 +195,11 @@ fn the_operation_budget_is_what_the_docs_say() {
         evaluate(&nested(95), &Map::new()),
         Err(BindError::Limit { .. })
     ));
-    // A pipeline of six five-operation steps over a 1000-element list fits:
-    // 1000 + 6 * 5 * 1000 = 31 000 operations.
-    let lit = vec!["0"; 1000].join(",");
-    let pipeline = format!("[{lit}]{}.len()", ".map(|x| x + 1)".repeat(6));
-    assert_eq!(evaluate(&pipeline, &Map::new()), Ok(Value::Int(1000)));
+    // A pipeline of eight five-operation steps over a 500-element list fits:
+    // 500 + 8 * 5 * 500 = 20 500 operations.
+    let lit = vec!["0"; 500].join(",");
+    let pipeline = format!("[{lit}]{}.len()", ".map(|x| x + 1)".repeat(8));
+    assert_eq!(evaluate(&pipeline, &Map::new()), Ok(Value::Int(500)));
 }
 
 #[test]
@@ -257,15 +257,16 @@ fn the_limits_bound_the_transient_memory_of_one_native_call() {
         call >> 20,
         PEAK_MEMORY_CEILING >> 20
     );
-    // Measured on the debug build with the worst shape (1020 one-field rows
-    // returned on each of 1020 iterations, plus a 31 KiB text built on each):
-    // 545 MiB peak working set, 538 MiB over an idle process. The estimate
-    // above is the same shape with the budget filled exactly.
+    // Measured on the debug build with the worst shape (510 one-field rows
+    // returned on each of 511 iterations, plus a 31 KiB text built on each):
+    // 154 MiB peak working set, 146 MiB over an idle process. The estimate
+    // above is the same shape with the budget filled exactly, so it sits just
+    // above the measurement.
+    const MEASURED_PEAK: u64 = 154 * 1024 * 1024;
     assert!(
-        call > 480 * 1024 * 1024,
+        (MEASURED_PEAK - 8 * 1024 * 1024..=MEASURED_PEAK + 16 * 1024 * 1024).contains(&call),
         "the estimate tracks the measurement ({} MiB)",
         call >> 20
     );
-    // The ceiling is a statement of fact, not of comfort: it is large.
-    const { assert!(PEAK_MEMORY_CEILING >= 600 * 1024 * 1024) };
+    const { assert!(MEASURED_PEAK <= PEAK_MEMORY_CEILING) };
 }

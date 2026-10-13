@@ -6,29 +6,28 @@
 //! expression with a [`BindError::Limit`](crate::BindError::Limit) or, for
 //! nesting, a syntax error; none of them panics or aborts.
 //!
-//! # The number: 1024
+//! # The number: 512
 //!
-//! A binding can see, and can build, at most **1024 array elements** and
-//! **1024 map entries** in one value, and 32 KiB of text. These are Rhai's own
+//! A binding can see, and can build, at most **512 array elements** and
+//! **512 map entries** in one value, and 32 KiB of text. These are Rhai's own
 //! counts (one per element or entry, summed over everything nested), so the
 //! advertised number is the number that is enforced, for a value an expression
 //! builds and for one it reads from `state` alike:
 //!
 //! | You have | It holds | Because |
 //! |---|---|---|
-//! | a list of numbers or names | at most 1024 | the array limit |
-//! | a list of 5-field rows | at most 204 rows | 1024 entries, 5 per row |
-//! | a list of 4-field rows | at most 255 rows | likewise; the entry that holds the list costs one |
-//! | a list of 10-field rows | at most 102 rows | |
-//! | a list of 300 titles of 100 bytes | refused | 30 000 bytes of text are counted in the list; 32 KiB is the limit |
+//! | a list of numbers or names | at most 512 | the array limit |
+//! | a list of 5-field rows | at most 102 rows | 512 entries, 5 per row, and the entry that holds the list costs one |
+//! | a list of 4-field rows | at most 127 rows | likewise |
+//! | a list of 10-field rows | at most 51 rows | |
+//! | a list of 400 titles of 100 bytes | refused | 40 000 bytes of text are counted in the list; 32 KiB is the limit |
 //!
 //! A value that does not fit is hidden from bindings (see
 //! [`crate::bindings`]), and the diagnostic names it.
 //!
-//! # What 1024 costs in memory
+//! # What 512 costs in memory
 //!
-//! Read [`PEAK_MEMORY_CEILING`] before raising anything: with these numbers a
-//! pathological expression can transiently allocate hundreds of MiB.
+//! See [`PEAK_MEMORY_CEILING`]: in the worst shape, 154 MiB.
 
 /// The most operations one evaluation may execute, **including** those run by
 /// closures that array methods such as `map` call back into.
@@ -39,8 +38,9 @@
 ///
 /// A `map`, `filter` or `reduce` step costs three to five operations per
 /// element, so a pipeline of `k` such steps over `n` elements needs about
-/// `4 * k * n` of them: six five-operation steps over a full-size array
-/// ([`MAX_ARRAY_SIZE`] elements) fit.
+/// `4 * k * n` of them: the budget covers twelve five-operation steps over a
+/// full-size array ([`MAX_ARRAY_SIZE`] elements); the 10-call chain cap is
+/// reached first.
 pub const MAX_OPERATIONS: u64 = 32_768;
 
 /// The deepest call nesting an expression may reach (closures calling closures).
@@ -67,43 +67,42 @@ pub const MAX_STRING_SIZE: usize = 32 * 1024;
 /// The most array elements a value may hold, summed over a nested value.
 ///
 /// Rhai counts one per element and adds the elements of nested arrays. It is
-/// also the longest array literal and, because every array a native can
-/// iterate is at most this long, the most iterations of one `map`: the memory
-/// figure in [`PEAK_MEMORY_CEILING`] is proportional to it.
-pub const MAX_ARRAY_SIZE: usize = 1024;
+/// also the longest array literal (one fewer, in practice) and, because every
+/// array a native can iterate is at most this long, the most iterations of one
+/// `map`: the memory figure in [`PEAK_MEMORY_CEILING`] is proportional to it.
+pub const MAX_ARRAY_SIZE: usize = 512;
 
 /// The most map entries a value may hold, summed over a nested value.
 ///
 /// Rhai counts one per entry and adds the entries of nested maps, including
 /// the maps inside an array: a list of rows with five fields each has five
 /// entries per row. It equals [`MAX_ARRAY_SIZE`] so one number describes both.
-pub const MAX_MAP_SIZE: usize = 1024;
+pub const MAX_MAP_SIZE: usize = 512;
 
 /// The most memory, in bytes, that one evaluation can transiently allocate in
-/// the worst shape these limits permit. **Measured, and large.**
+/// the worst shape these limits permit. **Measured.**
 ///
 /// One native call keeps at most [`MAX_ARRAY_SIZE`] results, each a copy of a
 /// value that fits the limits. The expensive shape is many small maps: a map
-/// with one entry still allocates a node of about 540 bytes, so a list of 1020
-/// one-field rows is about 550 KiB, and a `map` over a 1020-element list whose
-/// closure returns that list keeps 1020 copies of it.
+/// with one entry still allocates a node of about 540 bytes, so a list of 510
+/// one-field rows is about 280 KiB, and a `map` over a 511-element list whose
+/// closure returns that list keeps 511 copies of it.
 ///
-/// Measured on a debug build (peak working set, an idle process is 7 MiB), for
-/// that shape with a 31 KiB text built on each iteration as well:
+/// Measured on a debug build (peak working set; an idle process is 8 MiB):
 ///
-/// | `MAX_ARRAY_SIZE` | iterations x rows | peak |
-/// |---|---|---|
-/// | **1024 (current)** | 1020 x 1020 | **545 MiB** |
-/// | 512 | 500 x 500 | 217 MiB |
-/// | 256 | 250 x 250 | 98 MiB |
+/// | Shape | Peak |
+/// |---|---|
+/// | **510 one-field rows returned on each of 511 iterations**, plus a 31 KiB text built on each (the worst) | **154 MiB** |
+/// | 102 five-field rows, 511 iterations | 52 MiB |
+/// | 510 numbers, 500 iterations | 29 MiB |
+/// | 400 iterations returning a 100 000-element list from `state` (hidden from bindings) | 5 MiB |
 ///
-/// Typical shapes are far smaller: 204 five-field rows returned on each of
-/// 1000 iterations peak at 144 MiB, and 1000 numbers cost 16 KiB a copy.
+/// For comparison, the same worst shape under the earlier settings: 545 MiB at
+/// 1024 elements and 1024 entries; 217 MiB at 512 elements and 1024 entries;
+/// 98 MiB at 256 and 1024.
 ///
-/// What would lower it, in order of effect: [`MAX_ARRAY_SIZE`] (the number of
-/// iterations, linearly: the table), then [`MAX_MAP_SIZE`] (the size of each
-/// copy). Neither is changed here because the visible budget is deliberately
-/// 1024; the figures are given so the trade-off can be made knowingly. An
+/// What lowers it further, in order of effect: [`MAX_ARRAY_SIZE`] (the number
+/// of iterations, linearly), then [`MAX_MAP_SIZE`] (the size of each copy). An
 /// exact cure needs Rhai to size-check a closure's result before `map` keeps
 /// it, which it does not do.
-pub const PEAK_MEMORY_CEILING: u64 = 640 * 1024 * 1024;
+pub const PEAK_MEMORY_CEILING: u64 = 192 * 1024 * 1024;

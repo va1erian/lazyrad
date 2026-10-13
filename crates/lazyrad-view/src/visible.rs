@@ -68,7 +68,7 @@ impl Sizes {
         self.arrays as u128 * m * s + self.maps as u128 * a * s + self.strings as u128 * a * m
     }
 
-    /// `1024 array elements, 40 map entries`, leaving out what is zero.
+    /// `512 array elements, 40 map entries`, leaving out what is zero.
     fn describe(self) -> String {
         let mut parts = Vec::new();
         if self.arrays > 0 {

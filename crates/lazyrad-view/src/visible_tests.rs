@@ -37,21 +37,21 @@ fn the_largest_entries_go_first_and_scalars_never() {
         ("n", Dynamic::from(1_i64)),
         ("name", Dynamic::from("Ada".to_owned())),
         ("small", int_list(10)),
-        ("big", int_list(900)),
+        ("big", int_list(400)),
         ("huge", int_list(5_000)),
     ]);
     assert!(!view.map.contains_key("huge"));
     assert!(view.map.contains_key("big") && view.map.contains_key("small"));
     assert!(view.map.contains_key("n") && view.map.contains_key("name"));
-    assert_eq!(view.hidden, ["state.huge (more than 1024 array elements)"]);
+    assert_eq!(view.hidden, ["state.huge (more than 512 array elements)"]);
 }
 
 #[test]
 fn two_lists_that_fit_alone_but_not_together_remove_the_larger() {
-    let view = visible(&[("a", int_list(600)), ("b", int_list(700))]);
+    let view = visible(&[("a", int_list(200)), ("b", int_list(400))]);
     assert!(view.map.contains_key("a"));
     assert!(!view.map.contains_key("b"));
-    assert_eq!(view.hidden, ["state.b (700 array elements)"]);
+    assert_eq!(view.hidden, ["state.b (400 array elements)"]);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn a_big_nested_entry_is_removed_and_its_siblings_stay() {
     assert!(view.map.contains_key("n"));
     assert_eq!(
         view.hidden,
-        ["state.cfg.rows (more than 1024 array elements)"]
+        ["state.cfg.rows (more than 512 array elements)"]
     );
 }
 

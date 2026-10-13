@@ -45,7 +45,7 @@ fn a_list_of_records_is_limited_by_its_fields_and_the_boundary_is_exact() {
     // field, and the entry that holds the list costs one more, so the cap is
     // (MAX_MAP_SIZE - 1) / fields rows, and never more than
     // MAX_ARRAY_SIZE rows.
-    for (fields, fits) in [(1, 1023), (4, 255), (5, 204), (10, 102), (20, 51)] {
+    for (fields, fits) in [(1, 511), (4, 127), (5, 102), (10, 51), (20, 25)] {
         assert_eq!(
             fits,
             ((MAX_MAP_SIZE - 1) / fields).min(MAX_ARRAY_SIZE),
@@ -166,7 +166,7 @@ fn a_big_nested_entry_is_removed_and_its_siblings_stay_usable() {
     let (result, hidden) = run("state.cfg.rows.len()", &state);
     let shown = message(result);
     assert!(
-        shown.contains("state.cfg.rows (more than 1024 array elements)"),
+        shown.contains("state.cfg.rows (more than 512 array elements)"),
         "{shown}"
     );
     assert_eq!(hidden.len(), 1);
@@ -200,7 +200,7 @@ fn every_use_of_a_hidden_entry_fails_and_names_it() {
         };
         assert!(
             shown.contains("Property not found")
-                && shown.contains("state.items (more than 1024 array elements)"),
+                && shown.contains("state.items (more than 512 array elements)"),
             "{source}: {shown}"
         );
     }
@@ -237,33 +237,33 @@ fn many_plain_entries_over_the_map_limit_are_left_alone() {
 
 #[test]
 fn two_lists_that_fit_alone_but_not_together_hide_the_larger_one() {
-    let state = map(&[("a", list(600)), ("b", list(700)), ("n", int(1))]);
+    let state = map(&[("a", list(200)), ("b", list(400)), ("n", int(1))]);
     let (result, hidden) = run("state.a.len()", &state);
-    assert_eq!(result, Ok(Value::Int(600)));
-    assert_eq!(hidden, ["state.b (700 array elements)"]);
+    assert_eq!(result, Ok(Value::Int(200)));
+    assert_eq!(hidden, ["state.b (400 array elements)"]);
     let (result, _) = run("state.b.len()", &state);
-    assert!(message(result).contains("state.b (700 array elements)"));
+    assert!(message(result).contains("state.b (400 array elements)"));
 }
 
-/// The advertised number is the enforced one: 1024 elements are visible and
-/// usable, 1025 are not.
+/// The advertised number is the enforced one: 512 elements are visible and
+/// usable, 513 are not.
 #[test]
-fn the_advertised_1024_elements_are_all_usable() {
-    assert_eq!(MAX_ARRAY_SIZE, 1024);
-    assert_eq!(MAX_MAP_SIZE, 1024);
-    let at = map(&[("items", list(1024))]);
+fn the_advertised_512_elements_are_all_usable() {
+    assert_eq!(MAX_ARRAY_SIZE, 512);
+    assert_eq!(MAX_MAP_SIZE, 512);
+    let at = map(&[("items", list(512))]);
     let (result, hidden) = run("state.items.len()", &at);
-    assert_eq!(result, Ok(Value::Int(1024)));
+    assert_eq!(result, Ok(Value::Int(512)));
     assert!(hidden.is_empty(), "{hidden:?}");
     // Every method works on a full list, not just `len`.
     let (result, _) = run("state.items.map(|x| x + 1).len()", &at);
-    assert_eq!(result, Ok(Value::Int(1024)));
-    let (result, _) = run("state.items.filter(|x| x >= 1000).len()", &at);
-    assert_eq!(result, Ok(Value::Int(24)));
+    assert_eq!(result, Ok(Value::Int(512)));
+    let (result, _) = run("state.items.filter(|x| x >= 500).len()", &at);
+    assert_eq!(result, Ok(Value::Int(12)));
 
-    let over = map(&[("items", list(1025))]);
+    let over = map(&[("items", list(513))]);
     let (result, hidden) = run("state.items.len()", &over);
-    assert!(message(result).contains("state.items (more than 1024 array elements)"));
+    assert!(message(result).contains("state.items (more than 512 array elements)"));
     assert_eq!(hidden.len(), 1);
 }
 
@@ -276,15 +276,38 @@ fn a_nested_map_at_the_entry_limit_is_usable_and_one_more_is_not() {
                 .collect::<Map>(),
         )
     };
-    // 1023 entries plus the key that holds them is 1024 map entries.
-    let at = map(&[("cfg", entries(1023))]);
+    // 511 entries plus the key that holds them is 512 map entries.
+    let at = map(&[("cfg", entries(511))]);
     let (result, hidden) = run("state.cfg.len()", &at);
-    assert_eq!(result, Ok(Value::Int(1023)));
+    assert_eq!(result, Ok(Value::Int(511)));
     assert!(hidden.is_empty(), "{hidden:?}");
-    assert_eq!(run("state.cfg.c1022", &at).0, Ok(Value::Int(1022)));
+    assert_eq!(run("state.cfg.c0510", &at).0, Ok(Value::Int(510)));
 
-    let over = map(&[("cfg", entries(1024))]);
+    let over = map(&[("cfg", entries(512))]);
     let (result, hidden) = run("state.cfg.len()", &over);
-    assert!(message(result).contains("state.cfg (1024 map entries)"));
-    assert_eq!(hidden, ["state.cfg (1024 map entries)"]);
+    assert!(message(result).contains("state.cfg (512 map entries)"));
+    assert_eq!(hidden, ["state.cfg (512 map entries)"]);
+}
+
+/// Every key of `state` costs one map entry, so a sibling can push a full list
+/// over the limit: the boundary moves by one for each other key.
+#[test]
+fn a_sibling_key_moves_the_boundary_of_a_full_list_by_one() {
+    let one_field = |n: usize| Dynamic::from_array((0..n).map(|_| record(1)).collect());
+    // 511 one-field rows are 511 entries, and the key holding them is the
+    // 512th: it fits alone.
+    let alone = map(&[("rows", one_field(511))]);
+    let (result, hidden) = run("state.rows.len()", &alone);
+    assert_eq!(result, Ok(Value::Int(511)));
+    assert!(hidden.is_empty(), "{hidden:?}");
+    // With one sibling key it is 513: the list is removed, and says why.
+    let crowded = map(&[("rows", one_field(511)), ("n", int(1))]);
+    let (result, hidden) = run("state.rows.len()", &crowded);
+    assert!(message(result).contains("state.rows (511 array elements, 511 map entries)"));
+    assert_eq!(hidden, ["state.rows (511 array elements, 511 map entries)"]);
+    // One row fewer and the sibling fits beside it.
+    let fits = map(&[("rows", one_field(510)), ("n", int(1))]);
+    let (result, hidden) = run("state.rows.len() + state.n", &fits);
+    assert_eq!(result, Ok(Value::Int(511)));
+    assert!(hidden.is_empty(), "{hidden:?}");
 }

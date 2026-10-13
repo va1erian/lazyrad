@@ -60,30 +60,29 @@ A binding is one Rhai *expression* over `state`, `props` and `env`.
 
   | What | Cap | Means |
   |---|---|---|
-  | array elements in a value | **1024** | the longest list, array literal and `map` |
-  | map entries in a value | **1024** | **one per field, nested maps included** |
-  | a list of 5-field rows | 204 rows | `(1024 - 1) / 5`: the entry holding the list costs one |
-  | a list of 4-field rows | 255 rows | likewise; 10-field rows: 102; 20-field rows: 51 |
+  | array elements in a value | **512** | the longest list, array literal and `map` |
+  | map entries in a value | **512** | **one per field, nested maps included** |
+  | a list of 5-field rows | 102 rows | `(512 - 1) / 5`: the entry holding the list costs one |
+  | a list of 4-field rows | 127 rows | likewise; 10-field rows: 51; 20-field rows: 25 |
   | text in a value | 32 KiB | summed over texts inside arrays; a long text can be read but not used |
-  | operations | 32 768 | a `map`, `filter` or `reduce` step costs 3 to 5 per element: 6 five-operation steps over 1000 elements fit |
+  | operations | 32 768 | a `map`, `filter` or `reduce` step costs 3 to 5 per element: 8 five-operation steps over 500 elements fit |
   | nested closure calls | 4 | |
   | nesting | 16 and 10 | **every operator in a chain is a level**: 16 terms in `a + b + ...` or `a && b && ...`, 12 `else if` branches, 10 chained method calls |
 
-  The 1024 is the same number whether a value is built or read from `state`
+  The 512 is the same number whether a value is built or read from `state`
   (the engine enforces it, and the view of `state` is counted the way Rhai
   counts), and it is the visible budget the project has chosen.
 
   Native stack: the worst expressions found need about 350 KiB in a debug
   build (the suite runs them on 1 MiB).
 
-  **Memory is the cost of 1024.** In the worst shape (a list of about a
-  thousand one-field rows returned on each iteration of a `map` over a
-  thousand-element list) one evaluation transiently allocates about **545 MiB**
-  in a debug build; 204 five-field rows returned on 1000 iterations is
-  144 MiB. Lowering the array cap lowers it linearly (512: about 217 MiB; 256:
-  about 98 MiB), at the price of shorter lists; `src/limits.rs` has the table.
-  It is a pathological expression, not a typical binding, and it ends in a
-  diagnostic, but it is a real number.
+  **Memory.** In the worst shape (a list of about five hundred one-field rows
+  returned on each iteration of a `map` over a 511-element list) one
+  evaluation transiently allocates about **154 MiB** in a debug build; 102
+  five-field rows on 511 iterations is 52 MiB. For comparison the same shape
+  was 545 MiB at 1024 and 217 MiB at 512 elements with 1024 entries;
+  `src/limits.rs` has the table. It is a pathological expression, not a
+  typical binding, and it ends in a diagnostic, but it is a real number.
 - **What it can see is bounded too.** An entry of `state` that does not fit the
   caps is removed from the copy a binding reads (a map that does not fit is
   pruned inside, so `state.cfg.name` survives a 2000-row `state.cfg.rows`).
