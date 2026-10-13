@@ -260,42 +260,6 @@ fn a_binding_reads_props_and_env() {
 }
 
 #[test]
-fn a_runaway_expression_ends_at_a_limit_without_hanging() {
-    use lazyrad_view::bindings::MAX_STRING_SIZE;
-
-    let items: Vec<Dynamic> = (0..50_000).map(int).collect();
-    let half = "x".repeat(MAX_STRING_SIZE / 2 + 1);
-    let state = map(&[("items", Dynamic::from_array(items)), ("half", text(&half))]);
-    let bindings = Bindings::new();
-    let mut scope = BindingScope::new(&state, &Map::new(), &phone().to_map());
-    let runaways = [
-        // 150 thousand closure calls: past the operation budget, which has to
-        // count the operations the closures run inside `map`.
-        "state.items.map(|x| x + 1).map(|x| x + 1).map(|x| x + 1).len()",
-        // Unbounded recursion: stopped by the call depth limit.
-        "(|f| f.call(f)).call(|f| f.call(f))",
-        // A string past the size limit.
-        "state.half + state.half",
-    ];
-    for source in runaways {
-        let result = bindings.evaluate(source, &mut scope, None);
-        assert!(
-            matches!(result, Err(BindError::Limit { .. })),
-            "{source}: expected a limit error, got {result:?}"
-        );
-    }
-    // The engine is still usable afterwards, with a fresh budget.
-    assert_eq!(
-        bindings.evaluate(
-            "[1, 2, 3].map(|x| x + state.items.len()).len()",
-            &mut scope,
-            None
-        ),
-        Ok(Value::Int(3))
-    );
-}
-
-#[test]
 fn a_source_is_compiled_once_and_a_compile_error_is_cached_too() {
     let bindings = Bindings::new();
     let state = map(&[("n", int(1))]);

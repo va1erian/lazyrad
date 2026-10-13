@@ -33,6 +33,27 @@ pub struct Node {
     pub children: Vec<Node>,
 }
 
+/// The deepest tree [`Tree::new`] accepts, counting the root as depth 1.
+///
+/// Layouts nest a few dozen levels at most (a browser stops caring long before
+/// this). The cap exists because `Node`'s derived `Clone`, `PartialEq` and
+/// `Debug` recurse once per level; at this depth they use well under 100 KiB
+/// of stack in a debug build, so a validated tree is always safe to copy and
+/// compare on a 1 MiB thread.
+pub const MAX_TREE_DEPTH: usize = 128;
+
+impl Drop for Node {
+    /// Drops the subtree without recursing, so a very deep chain (which
+    /// [`Tree::new`] rejects, and which is dropped on that error path) cannot
+    /// overflow the stack.
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.children);
+        while let Some(mut node) = pending.pop() {
+            pending.append(&mut node.children);
+        }
+    }
+}
+
 impl Node {
     /// A node with no properties and no children.
     #[must_use]
@@ -40,7 +61,10 @@ impl Node {
         Self {
             name: name.into(),
             kind: kind.into(),
-            ..Self::default()
+            props: BTreeMap::new(),
+            bind: BTreeMap::new(),
+            responsive: BTreeMap::new(),
+            children: Vec::new(),
         }
     }
 
@@ -133,6 +157,16 @@ pub enum TreeError {
         /// The kind that disagrees.
         second: ValueKind,
     },
+    /// The tree nests deeper than [`MAX_TREE_DEPTH`].
+    #[error("node `{name}` is nested {depth} levels deep; the limit is {max}")]
+    TooDeep {
+        /// The first node found beyond the limit.
+        name: String,
+        /// Its depth (the root is 1).
+        depth: usize,
+        /// The limit, [`MAX_TREE_DEPTH`].
+        max: usize,
+    },
 }
 
 /// A node with its position, as [`Tree::placements`] lists them.
@@ -158,12 +192,20 @@ impl Tree {
     ///
     /// # Errors
     ///
-    /// [`TreeError::EmptyName`], [`TreeError::DuplicateName`] or
-    /// [`TreeError::MixedKinds`], for the first offending node in pre-order.
+    /// [`TreeError::EmptyName`], [`TreeError::DuplicateName`],
+    /// [`TreeError::MixedKinds`] or [`TreeError::TooDeep`], for the first
+    /// offending node in pre-order.
     pub fn new(root: Node) -> Result<Self, TreeError> {
         let mut names = HashSet::new();
-        let mut stack = vec![&root];
-        while let Some(node) = stack.pop() {
+        let mut stack = vec![(&root, 1_usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if depth > MAX_TREE_DEPTH {
+                return Err(TreeError::TooDeep {
+                    name: node.name.clone(),
+                    depth,
+                    max: MAX_TREE_DEPTH,
+                });
+            }
             if node.name.is_empty() {
                 return Err(TreeError::EmptyName {
                     kind: node.kind.clone(),
@@ -175,7 +217,7 @@ impl Tree {
                 });
             }
             check_kinds(node)?;
-            stack.extend(node.children.iter().rev());
+            stack.extend(node.children.iter().rev().map(|child| (child, depth + 1)));
         }
         Ok(Self { root, names })
     }
@@ -241,10 +283,14 @@ impl Tree {
 
 /// The node called `name` at or below `node`.
 fn find<'a>(node: &'a Node, name: &str) -> Option<&'a Node> {
-    if node.name == name {
-        return Some(node);
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if node.name == name {
+            return Some(node);
+        }
+        stack.extend(node.children.iter());
     }
-    node.children.iter().find_map(|child| find(child, name))
+    None
 }
 
 /// Every literal and patch value of a property must have the same kind.

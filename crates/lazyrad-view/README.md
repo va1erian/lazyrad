@@ -38,7 +38,33 @@ the window's environment into **patches** that any renderer can apply.
   when the environment changes, bindings that read `state` run when it changes.
 - **No platform:** only `rhai` and `thiserror`, and no file, thread, process,
   environment, network or clock access (`tests/no_platform_apis.rs` scans the
-  sources), so it builds for `wasm32-unknown-unknown` and static musl.
+  sources and the manifest), so it builds for `wasm32-unknown-unknown` and
+  static musl.
+
+## What a binding can and cannot do
+
+A binding is one Rhai *expression* over `state`, `props` and `env`.
+
+- **Sealed.** The engine registers an explicit package list. `sleep`, `exit`,
+  `parse_json`, reflection, clocks and I/O are not there, and `print`, `debug`
+  and `eval` are disabled (`tests/sandbox.rs`).
+- **Bounded.** Operations, call depth, expression depth and the size of any
+  value it builds are limited, and it sees at most `VISIBLE_BUDGET` (1024)
+  array elements and map entries per variable: a longer list is hidden from
+  bindings and a binding that uses it gets a diagnostic naming it. Keep counts
+  and summaries in `state`, and long lists in a control that owns its rows.
+  The numbers, and why they are what they are, are in `src/bindings.rs`; one
+  evaluation allocates at most about 64 MiB and needs about 350 KiB of native
+  stack in a debug build.
+- **Closures may read `state`.** `state.items.filter(|x| x > state.n)` works.
+  A source that trips Rhai's shared-variable race is retried on private copies;
+  `(|n| state.items.filter(|x| x > n)).call(state.n)` keeps the fast path. A
+  closure created *inside another closure* that mentions `state`, `props` or
+  `env` reports "Data race detected" and has no workaround but restructuring.
+- **A rejected edit is not pulled back.** The diff compares with what the
+  session last applied, not with the widget, so a widget the user changed and
+  the handler refused stays ahead of the state until the bound value next
+  changes or the view is rebuilt.
 
 ## Not here (yet)
 

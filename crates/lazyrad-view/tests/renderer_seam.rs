@@ -86,6 +86,41 @@ fn update_with_skips_a_set_the_widget_already_shows() {
     assert_eq!(renderer.take_trace(), "set name_edit.text = \"Ada\"\n");
 }
 
+/// Pins a deliberate limit of the diff: it compares against what the session
+/// last *applied*, not against the widget. A rejected edit therefore leaves the
+/// widget ahead of the state until the bound value next changes.
+#[test]
+fn a_rejected_edit_is_not_pulled_back_by_the_session() {
+    let root = Node::new("name_edit", "Edit").with_bind("text", "state.name");
+    let mut session = Session::new(tree(root), Bindings::new());
+    let mut renderer = RecordingRenderer::new();
+    let state = map(&[("name", text("Ada"))]);
+    renderer.apply(&session.build(&state, &phone()).patches);
+    renderer.take_trace();
+
+    // The user types an "x"; the change handler refuses it, so `state.name`
+    // stays "Ada" and the widget shows "Adax".
+    renderer.set_live("name_edit", "text", Value::Text("Adax".into()));
+    let turn = session.update_with(&state, &phone(), &mut renderer);
+    assert!(turn.patches.is_empty(), "{:?}", turn.patches);
+    assert_eq!(renderer.take_trace(), "");
+    assert_eq!(
+        renderer.live_value("name_edit", "text"),
+        Some(Value::Text("Adax".into()))
+    );
+    assert_eq!(
+        session.value("name_edit", "text"),
+        Some(&Value::Text("Ada".into()))
+    );
+
+    // A rebuild is the way to make the view agree again.
+    renderer.apply(&session.build(&state, &phone()).patches);
+    assert_eq!(
+        renderer.live_value("name_edit", "text"),
+        Some(Value::Text("Ada".into()))
+    );
+}
+
 #[test]
 fn a_renderer_that_cannot_tell_gets_every_set() {
     /// The default `live_value`: unknown.

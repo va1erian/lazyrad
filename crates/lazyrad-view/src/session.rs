@@ -31,12 +31,13 @@
 //! # What is re-evaluated
 //!
 //! A binding that reads `env` runs again when the environment changed (any
-//! field); one that reads `state` or `props` runs again when `state` changed;
-//! one that reads none of them runs only at build. Responsive patches are
-//! re-resolved on every turn, and produce patches only when the size class
-//! changes the cascade.
+//! field); one that reads `state` or `props` runs again when `state` changed,
+//! as far as bindings can see it (a change inside an entry that is hidden from
+//! them, see [`bindings`](crate::bindings), is not a change); one that reads
+//! none of them runs only at build. Responsive patches are re-resolved on every
+//! turn, and produce patches only when the size class changes the cascade.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -50,6 +51,7 @@ use crate::size_class::{Responsive, SizeClass};
 use crate::state_eq::same_map;
 use crate::tree::{Node, Tree};
 use crate::value::{Value, ValueKind};
+use crate::visible::View;
 
 /// A binding that failed on a turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,6 +201,11 @@ impl Session {
     /// returned [`TurnResult`] holds the patches that were handed over, and
     /// `apply` is not called when none are left.
     ///
+    /// The diff is against the last *applied* value, never against the widget:
+    /// if the user changed a bound widget and the handler refused the change,
+    /// no patch is produced and the widget stays ahead of the session until the
+    /// bound value next changes (or the view is rebuilt).
+    ///
     /// The session finishes its own bookkeeping before the renderer is called,
     /// and holds no borrow of its own across the call.
     pub fn update_with(
@@ -225,6 +232,13 @@ impl Session {
     /// Forgets everything applied and re-derives the per-node tables.
     fn reset(&mut self) {
         let placements = self.tree.placements();
+        // Room for every distinct source of this tree, so the compile cache
+        // never thrashes on a form with many bindings.
+        let sources: HashSet<&str> = placements
+            .iter()
+            .flat_map(|placement| placement.node.bind.values().map(String::as_str))
+            .collect();
+        self.bindings.reserve(sources.len());
         self.index = placements
             .iter()
             .enumerate()
@@ -252,10 +266,16 @@ impl Session {
     fn turn(&mut self, state: &Map, env: &Environment) -> TurnResult {
         let full = self.last.is_none();
         let env_changed = self.last.as_ref().is_none_or(|last| last.env != *env);
+        // What bindings can see of the state, which is also what decides
+        // whether a binding has anything new to read: a change inside an
+        // entry that is hidden from them is not a change to them. Building it
+        // costs at most `VISIBLE_BUDGET` steps per entry, however big the
+        // state is.
+        let state_view = View::of("state", state);
         let state_changed = self
             .last
             .as_ref()
-            .is_none_or(|last| !same_map(&last.state, state));
+            .is_none_or(|last| !same_map(&last.state, &state_view.map));
         let class = env.size_class();
         let placements = self.tree.placements();
 
@@ -275,8 +295,13 @@ impl Session {
                 if !due {
                     continue;
                 }
-                let scope = scope
-                    .get_or_insert_with(|| BindingScope::new(state, &Map::new(), &env.to_map()));
+                let scope = scope.get_or_insert_with(|| {
+                    BindingScope::from_views(
+                        &state_view,
+                        &View::default(),
+                        &View::of("env", &env.to_map()),
+                    )
+                });
                 let result = self.bindings.evaluate(source, scope, prop.kind);
                 outcomes.push((slot, property, result));
             }
@@ -346,10 +371,16 @@ impl Session {
             }
         }
 
-        self.last = Some(Last {
-            env: *env,
-            state: state.clone(),
-        });
+        // The snapshot is only replaced when the visible state changed, so a
+        // resize or a no-op turn costs a comparison, not a copy.
+        if state_changed || self.last.is_none() {
+            self.last = Some(Last {
+                env: *env,
+                state: state_view.map,
+            });
+        } else if let Some(last) = self.last.as_mut() {
+            last.env = *env;
+        }
         TurnResult {
             patches,
             diagnostics,

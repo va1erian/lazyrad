@@ -26,8 +26,10 @@
 //!   toolkit, no form model, no file, thread, clock or network access (a test
 //!   scans the sources for them). It builds for `wasm32-unknown-unknown`, and
 //!   for the static musl target LazyOS uses.
-//! * **Pure expressions.** A binding sees `state`, `props` and `env` and
-//!   nothing else, and cannot assign, loop, print or evaluate text
+//! * **Pure, sealed, bounded expressions.** A binding sees `state`, `props`
+//!   and `env` and nothing else; it cannot assign, loop, sleep, exit, print or
+//!   evaluate text; and its operations, nesting, memory and the amount of state
+//!   it can see are limited, each ending in a diagnostic and never an abort
 //!   (see [`bindings`]).
 //! * **Failure is local.** A bad binding keeps its last good value and reports
 //!   a [`BindDiagnostic`]; nothing panics and the rest of the tree is updated.
@@ -71,15 +73,19 @@
 //! ```
 
 pub mod bindings;
+mod cache;
+mod dependencies;
 mod environment;
 mod error;
 mod patch;
 mod renderer;
+mod scope;
 mod session;
 mod size_class;
 mod state_eq;
 mod tree;
 mod value;
+mod visible;
 
 pub use bindings::{BindingScope, BindingStats, Bindings, Dependencies, check_expression};
 pub use environment::Environment;
@@ -88,5 +94,5 @@ pub use patch::{Patch, trace};
 pub use renderer::{RecordingRenderer, Renderer};
 pub use session::{BindDiagnostic, Session, TurnResult};
 pub use size_class::{Responsive, SizeClass};
-pub use tree::{Node, Tree, TreeError};
+pub use tree::{MAX_TREE_DEPTH, Node, Tree, TreeError};
 pub use value::{Value, ValueError, ValueKind};

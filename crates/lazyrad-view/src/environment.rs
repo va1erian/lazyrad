@@ -9,7 +9,10 @@ use crate::size_class::SizeClass;
 /// There is deliberately **no platform field**: a binding that could ask
 /// "am I on the web?" would invite the per-target branches the design forbids.
 /// Everything a layout may depend on is a measurement or a preference.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// Equality is exact, except that a NaN field equals a NaN field, so an
+/// environment with a NaN measurement is not "changed" on every turn.
+#[derive(Clone, Copy, Debug)]
 pub struct Environment {
     /// Viewport width in dp (device-independent pixels).
     pub width: f32,
@@ -20,6 +23,22 @@ pub struct Environment {
     /// The user's text scale, `1.0` for the default size.
     pub text_scale: f32,
 }
+
+/// `a == b`, with NaN equal to NaN.
+fn same_float(a: f32, b: f32) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
+}
+
+impl PartialEq for Environment {
+    fn eq(&self, other: &Self) -> bool {
+        same_float(self.width, other.width)
+            && same_float(self.height, other.height)
+            && self.dark == other.dark
+            && same_float(self.text_scale, other.text_scale)
+    }
+}
+
+impl Eq for Environment {}
 
 impl Environment {
     /// A light environment at the default text scale, `width` by `height` dp.
@@ -92,6 +111,20 @@ mod tests {
         assert!(map["dark"].as_bool().unwrap());
         assert_eq!(map["width"].as_float().unwrap(), 700.0);
         assert_eq!(map["text_scale"].as_float().unwrap(), 1.5);
+    }
+
+    #[test]
+    fn a_nan_measurement_equals_itself_and_nothing_else() {
+        let nan = Environment::new(f32::NAN, 100.0);
+        assert_eq!(nan, Environment::new(f32::NAN, 100.0));
+        assert_ne!(nan, Environment::new(0.0, 100.0));
+        assert_ne!(nan, Environment::new(f32::NAN, 101.0));
+        let mut scaled = Environment::new(1.0, 1.0);
+        scaled.text_scale = f32::NAN;
+        let mut same = Environment::new(1.0, 1.0);
+        same.text_scale = f32::NAN;
+        assert_eq!(scaled, same);
+        assert_eq!(Environment::new(0.0, 0.0), Environment::new(-0.0, 0.0));
     }
 
     #[test]
