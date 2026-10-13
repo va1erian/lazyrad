@@ -1,33 +1,56 @@
 //! The resource limits a binding is evaluated under.
 //!
-//! They are sized for *view* expressions, not data processing, and the rest of
-//! the crate (the visible view of `state`, the tests that pin the memory and
-//! stack claims) is written against these numbers. Every limit ends an
-//! expression with a [`BindError::Limit`](crate::BindError::Limit) or, for
-//! nesting, a syntax error; none of them panics or aborts.
+//! **This is the one place the numbers are stated.** The README and the other
+//! module docs refer here instead of repeating them, and
+//! `tests/limits_docs.rs` fails if a table below disagrees with a constant, or
+//! if prose elsewhere states one of these numbers.
 //!
-//! # The number: 512
+//! The limits are sized for *view* expressions, not data processing. Every one
+//! ends an expression with a [`BindError::Limit`](crate::BindError::Limit) or,
+//! for nesting, a syntax error; none of them panics or aborts.
 //!
-//! A binding can see, and can build, at most **512 array elements** and
-//! **512 map entries** in one value, and 32 KiB of text. These are Rhai's own
-//! counts (one per element or entry, summed over everything nested), so the
-//! advertised number is the number that is enforced, for a value an expression
-//! builds and for one it reads from `state` alike:
+//! # The limits
+//!
+//! | Constant | Value | What it bounds |
+//! |---|---|---|
+//! | [`MAX_ARRAY_SIZE`] | 512 | array elements in one value, nested ones summed; also the longest array literal and the most iterations of a `map` |
+//! | [`MAX_MAP_SIZE`] | 512 | map entries in one value, nested ones summed: one per field, in a list of rows too |
+//! | [`MAX_STRING_SIZE`] | 32768 | bytes of text in one value, nested ones summed |
+//! | [`MAX_OPERATIONS`] | 32768 | operations in one evaluation, closures included |
+//! | [`MAX_CALL_LEVELS`] | 4 | closures calling closures |
+//! | [`MAX_EXPR_DEPTHS`] | 16, 10 | expression nesting, then function-body nesting |
+//! | [`PEAK_MEMORY_CEILING`] | 192 MiB | transient memory of the worst shape |
+//!
+//! Rhai counts one per element or entry, so the numbers above are enforced as
+//! stated, for a value an expression builds and for one it reads from `state`
+//! alike. What follows from them:
 //!
 //! | You have | It holds | Because |
 //! |---|---|---|
-//! | a list of numbers or names | at most 512 | the array limit |
-//! | a list of 5-field rows | at most 102 rows | 512 entries, 5 per row, and the entry that holds the list costs one |
-//! | a list of 4-field rows | at most 127 rows | likewise |
-//! | a list of 10-field rows | at most 51 rows | |
-//! | a list of 400 titles of 100 bytes | refused | 40 000 bytes of text are counted in the list; 32 KiB is the limit |
+//! | a list of numbers or names | 512 | the array limit |
+//! | a list of 4-field rows | 127 rows | the map limit, less the entry that holds the list, divided by 4 |
+//! | a list of 5-field rows | 102 rows | likewise, divided by 5 |
+//! | a list of 10-field rows | 51 rows | likewise, divided by 10 |
+//! | a list of 20-field rows | 25 rows | likewise, divided by 20 |
+//! | five-operation steps over a full array | 12 | the operation limit over five per element |
+//!
+//! Text counts only inside an array or a map that is inside one (a list of 400
+//! titles of 100 bytes is 40000 bytes, over the text limit). A long text that
+//! is only *read* (`bind text: state.doc`) is fine at any length; a method call
+//! on one longer than the limit is a diagnostic that names it.
 //!
 //! A value that does not fit is hidden from bindings (see
 //! [`crate::bindings`]), and the diagnostic names it.
 //!
-//! # What 512 costs in memory
+//! # Native stack
 //!
-//! See [`PEAK_MEMORY_CEILING`]: in the worst shape, 154 MiB.
+//! The worst expressions the nesting limits allow need about 350 KiB of native
+//! stack in a debug build, and the suite runs them on a 1 MiB thread. A call
+//! level costs about 60 KiB, and a level of expression nesting 7 to 25 KiB.
+//!
+//! # Memory
+//!
+//! See [`PEAK_MEMORY_CEILING`] for what the limits cost.
 
 /// The most operations one evaluation may execute, **including** those run by
 /// closures that array methods such as `map` call back into.
@@ -38,18 +61,15 @@
 ///
 /// A `map`, `filter` or `reduce` step costs three to five operations per
 /// element, so a pipeline of `k` such steps over `n` elements needs about
-/// `4 * k * n` of them: the budget covers twelve five-operation steps over a
-/// full-size array ([`MAX_ARRAY_SIZE`] elements); the 10-call chain cap is
-/// reached first.
+/// `4 * k * n` of them. The nesting limit of ten chained calls is reached long
+/// before a chain of full-size steps could exhaust the budget.
 pub const MAX_OPERATIONS: u64 = 32_768;
 
 /// The deepest call nesting an expression may reach (closures calling closures).
-/// A level costs about 60 KiB of native stack in a debug build.
 pub const MAX_CALL_LEVELS: usize = 4;
 
 /// The deepest expression nesting the parser accepts, in the expression and in
-/// a function body. Parsing and evaluating cost 7 to 25 KiB of native stack per
-/// level in a debug build.
+/// a function body.
 ///
 /// Every binary operator in a flat chain counts as a level, so `a + b + ...`
 /// and `a && b && ...` take at most 16 terms, an `else if` chain at most 12
@@ -61,7 +81,7 @@ pub const MAX_EXPR_DEPTHS: (usize, usize) = (16, 10);
 ///
 /// Rhai refuses to call a method on a longer string (even `.len()`), and
 /// counts the strings inside an array or map toward it. A long string that is
-/// only *read* (`bind text: state.doc`) is fine.
+/// only *read* is fine.
 pub const MAX_STRING_SIZE: usize = 32 * 1024;
 
 /// The most array elements a value may hold, summed over a nested value.
@@ -105,4 +125,10 @@ pub const MAX_MAP_SIZE: usize = 512;
 /// of iterations, linearly), then [`MAX_MAP_SIZE`] (the size of each copy). An
 /// exact cure needs Rhai to size-check a closure's result before `map` keeps
 /// it, which it does not do.
+///
+/// This is a known, accepted cost and not a bound the evaluator enforces: no
+/// guard stops an expression from allocating up to it. The cure would shadow
+/// the array methods that keep closure results (`map`, `zip`) with versions
+/// that size-check each result as it is produced; it is deferred (see the
+/// README).
 pub const PEAK_MEMORY_CEILING: u64 = 192 * 1024 * 1024;

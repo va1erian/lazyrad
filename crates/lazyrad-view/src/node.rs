@@ -13,9 +13,9 @@ use crate::value::{Value, ValueKind};
 ///
 /// Layouts nest a few dozen levels at most (a browser stops caring long before
 /// this). The cap exists because `Node`'s derived `Clone`, `PartialEq` and
-/// `Debug` recurse once per level; at this depth they use well under 100 KiB
-/// of stack in a debug build, so a validated tree is always safe to copy and
-/// compare on a 1 MiB thread.
+/// `Debug` recurse once per level; at this depth they stay a small fraction of
+/// even the smallest main-thread stack in a debug build, so a validated tree is
+/// always safe to copy and compare.
 pub const MAX_TREE_DEPTH: usize = 128;
 
 /// One node of a view tree.

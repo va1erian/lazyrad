@@ -22,7 +22,8 @@ fn evaluate(source: &str, state: &Map) -> Result<Value, BindError> {
 }
 
 /// Runs `body` on a thread with the stack of a default Windows main thread,
-/// 1 MiB, in whatever profile the tests were built with (debug: the worst).
+/// one mebibyte, in whatever profile the tests were built with (debug: the
+/// worst).
 fn on_one_mebibyte_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(1 << 20)
