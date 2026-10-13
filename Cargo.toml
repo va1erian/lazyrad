@@ -12,6 +12,7 @@ members = [
     "crates/lazyrad-player",
     "crates/lazyrad-designer",
     "crates/lazyrad-ide",
+    "crates/lazyrad-view",
 ]
 
 [workspace.package]
@@ -80,6 +81,7 @@ lazyrad-runtime = { path = "crates/lazyrad-runtime", default-features = false }
 lazyrad-packager = { path = "crates/lazyrad-packager" }
 lazyrad-player = { path = "crates/lazyrad-player", default-features = false }
 lazyrad-designer = { path = "crates/lazyrad-designer" }
+lazyrad-view = { path = "crates/lazyrad-view" }
 
 # `#![forbid(unsafe_code)]` is also written at the top of every crate, so a
 # module cannot opt out by dropping the workspace opt-in.

@@ -1,0 +1,19 @@
+[package]
+name = "lazyrad-view"
+description = "Renderer-neutral view core: size classes, responsive cascade, Rhai bindings and a patch diff any renderer can apply"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Self-contained on purpose: `rhai` (the workspace pin, with no feature of its
+# own) and `thiserror`, nothing else. No `xui-*` or `lazyrad-*` crate and no
+# platform API, so the crate stays buildable for `wasm32-unknown-unknown` and for
+# the static musl LazyOS target (`tests/no_platform_apis.rs` guards the source).
+[dependencies]
+rhai.workspace = true
+thiserror.workspace = true
