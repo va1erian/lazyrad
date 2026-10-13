@@ -4,7 +4,25 @@ use rhai::{Map, Scope};
 
 use crate::error::BindError;
 use crate::limits::MAX_STRING_SIZE;
+use crate::poison::{mentions_poison, rename_poison};
 use crate::visible::{View, long_strings};
+
+/// How many hidden entries a diagnostic lists before saying how many more.
+const LISTED: usize = 5;
+
+/// The first few of `hidden`, comma separated, and how many were left out.
+fn summary(hidden: &[String]) -> String {
+    let mut text = hidden
+        .iter()
+        .take(LISTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if hidden.len() > LISTED {
+        text.push_str(&format!(", and {} more", hidden.len() - LISTED));
+    }
+    text
+}
 
 /// The variables one evaluation sees: exactly `state`, `props` and `env`, as
 /// constants. Build it once per turn and reuse it for every binding of the
@@ -12,9 +30,10 @@ use crate::visible::{View, long_strings};
 ///
 /// Each map is a **deep, bounded copy**: nothing in it is shared with the host
 /// (a binding cannot write through to the host's state, however the host
-/// stores it), and the entries that do not fit the size limits are absent. A
-/// binding that reads one gets a "Property not found" diagnostic that names it
-/// and its size. See the [module docs](crate::bindings) for the rules.
+/// stores it), and the entries that do not fit the size limits keep their key
+/// but hold an opaque value. A binding that uses one gets a diagnostic that
+/// names it and its size. See the [module docs](crate::bindings) for the
+/// rules.
 pub struct BindingScope {
     pub(crate) scope: Scope<'static>,
     /// The entries that were removed, as `variable.path (size or reason)`.
@@ -52,28 +71,16 @@ impl BindingScope {
         &self.hidden
     }
 
-    /// Adds to `error` what only the scope knows: which removed entry a
-    /// "Property not found" was about, and which strings are over the limit
-    /// when Rhai refused one.
+    /// Adds to `error` what only the scope knows: which entries are hidden
+    /// when Rhai's own message is about the type that stands in for one, and
+    /// which strings are over the limit when Rhai refused one.
     pub(crate) fn explain(&self, error: &mut BindError) {
         match error {
             BindError::Runtime { message, .. } => {
-                let Some(missing) = message.strip_prefix("Property not found: ") else {
-                    return;
-                };
-                let key = missing.split_whitespace().next().unwrap_or("");
-                let named: Vec<&str> = self
-                    .hidden
-                    .iter()
-                    .filter(|note| {
-                        let path = note.split(" (").next().unwrap_or("");
-                        path.rsplit('.').next() == Some(key)
-                    })
-                    .map(String::as_str)
-                    .collect();
-                if !named.is_empty() {
+                if mentions_poison(message) && !self.hidden.is_empty() {
+                    *message = rename_poison(message);
                     message.push_str("; hidden from bindings because it is too large: ");
-                    message.push_str(&named.join(", "));
+                    message.push_str(&summary(&self.hidden));
                 }
             }
             BindError::Limit { message, .. } if message.contains("string") => {

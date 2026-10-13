@@ -225,12 +225,41 @@ fn a_hidden_state_entry_is_named_in_the_diagnostic() {
     let line = result.diagnostics[0].to_string();
     assert!(
         line.starts_with("count.text: ")
-            && line.contains("state.rows (more than 512 array elements)")
+            && line.contains(&format!(
+                "state.rows (more than {MAX_ARRAY_SIZE} array elements)"
+            ))
             && line.contains("too large"),
         "{line}"
     );
     assert_eq!(
         session.value("title", "text"),
         Some(&Value::Text("Hi".into()))
+    );
+}
+
+/// A binding that branches on a hidden entry's presence sees the real shape,
+/// and one that uses its value fails with a diagnostic naming it, instead of
+/// showing a silent wrong branch.
+#[test]
+fn a_binding_that_asks_whether_a_hidden_entry_exists_gets_the_true_answer() {
+    let rows: Vec<Dynamic> = (0..(MAX_ARRAY_SIZE as i64 * 2)).map(int).collect();
+    let state = map(&[("rows", Dynamic::from_array(rows))]);
+    let root = Node::new("root", "Column")
+        .with_child(Node::new("has", "Label").with_bind(
+            "text",
+            "if state.contains(\"rows\") { \"present\" } else { \"none\" }",
+        ))
+        .with_child(Node::new("count", "Label").with_bind("text", "`${state.rows}`"));
+    let mut session = Session::new(tree(root), Bindings::new());
+    let result = session.build(&state, &phone());
+    assert_eq!(
+        session.value("has", "text"),
+        Some(&Value::Text("present".into()))
+    );
+    assert_eq!(result.diagnostics.len(), 1);
+    let line = result.diagnostics[0].to_string();
+    assert!(
+        line.starts_with("count.text: ") && line.contains("`state.rows` is hidden"),
+        "{line}"
     );
 }

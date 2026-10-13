@@ -14,22 +14,27 @@
 //! state), and the copy is pruned until it fits:
 //!
 //! * a **map entry** that does not fit on its own is *descended into* if it is
-//!   a map, so `cfg.name` survives a 2000-row `cfg.rows`, and removed if it is
-//!   an array;
+//!   a map, so `cfg.name` survives a 2000-row `cfg.rows`, and *poisoned* if it
+//!   is an array;
 //! * if the whole variable still does not fit, the largest container entries
-//!   are removed, largest first;
-//! * a **string** is never removed, and a string that is a map entry does not
+//!   are poisoned, largest first;
+//! * a **string** is never poisoned, and a string that is a map entry does not
 //!   count toward the variable: reading `state.doc` always works, and calling
 //!   a method on one longer than [`MAX_STRING_SIZE`] is a diagnostic that
 //!   names it.
 //!
-//! A removed entry is simply absent, so *any* use of it fails with "Property
-//! not found", which [`View::hidden`] lets the evaluator extend with the reason
-//! and the size.
+//! A removed entry is **not** deleted: its key stays, so `contains`, `in`,
+//! `keys`, `len` and a comparison of two maps behave as they do on the real
+//! state. Its *value* is replaced by a [`Poison`], an opaque value that costs
+//! one entry and fails on use: the evaluator turns a comparison, a method
+//! call, a property read, a truthiness test or a text conversion of it into a
+//! diagnostic that names the entry and why it is hidden (`type_of` is
+//! disabled for this reason).
 
 use rhai::{Array, Blob, Dynamic, Map};
 
 use crate::limits::{MAX_ARRAY_SIZE, MAX_MAP_SIZE, MAX_STRING_SIZE};
+use crate::poison::Poison;
 
 /// The deepest nesting walked. Anything deeper is treated as not fitting.
 const MAX_WALK_DEPTH: usize = 32;
@@ -68,7 +73,7 @@ impl Sizes {
         self.arrays as u128 * m * s + self.maps as u128 * a * s + self.strings as u128 * a * m
     }
 
-    /// `512 array elements, 40 map entries`, leaving out what is zero.
+    /// `N array elements, M map entries`, leaving out what is zero.
     fn describe(self) -> String {
         let mut parts = Vec::new();
         if self.arrays > 0 {
@@ -183,7 +188,8 @@ fn kind_of(value: &Dynamic) -> Kind {
 
 enum Fate {
     Keep,
-    Remove,
+    /// Replaced by a [`Poison`]; the string is why.
+    Poison(String),
     /// A map that did not fit, replaced by its pruned self.
     Pruned(Map),
 }
@@ -192,18 +198,20 @@ struct Entry<'a> {
     key: &'a str,
     value: &'a Dynamic,
     kind: Kind,
-    /// What it holds; `None` if it does not fit on its own (and why).
+    /// What it holds; `Err` if it does not fit on its own (the partial count).
     sizes: Result<Sizes, Sizes>,
     fate: Fate,
 }
 
 impl Entry<'_> {
-    fn kept(&self) -> bool {
-        !matches!(self.fate, Fate::Remove)
+    /// Poison it: it keeps its key and costs nothing but that entry.
+    fn poison(&mut self, why: String) {
+        self.sizes = Ok(Sizes::default());
+        self.fate = Fate::Poison(why);
     }
 }
 
-/// `source`, pruned until it fits, and a note for each entry removed.
+/// `source`, pruned until it fits, and a note for each entry poisoned.
 fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> Map {
     let mut entries: Vec<Entry<'_>> = source
         .iter()
@@ -222,12 +230,13 @@ fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> M
         .collect();
 
     // Pass 1: whatever does not fit alone. A map is descended into; an array
-    // cannot be pruned (its indexes mean something), so it goes.
+    // cannot be pruned (its indexes mean something), so it is poisoned.
     for entry in &mut entries {
         if entry.sizes.is_ok() {
             continue;
         }
         let entry_path = format!("{path}.{}", entry.key);
+        let partial = entry.sizes.unwrap_or_else(|sizes| sizes);
         let pruned = match (entry.kind, entry.value.read_lock::<Map>()) {
             (Kind::Map, Some(map)) if depth < MAX_WALK_DEPTH => {
                 Some(fit_map(&entry_path, &map, depth + 1, notes))
@@ -235,11 +244,9 @@ fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> M
             _ => None,
         };
         let Some(pruned) = pruned else {
-            notes.push(format!(
-                "{entry_path} ({})",
-                reason(entry.sizes.unwrap_or_else(|sizes| sizes))
-            ));
-            entry.fate = Fate::Remove;
+            let why = reason(partial);
+            notes.push(format!("{entry_path} ({why})"));
+            entry.poison(why);
             continue;
         };
         let mut sizes = Sizes::default();
@@ -251,36 +258,35 @@ fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> M
             entry.sizes = Ok(sizes);
             entry.fate = Fate::Pruned(pruned);
         } else {
-            notes.push(format!("{entry_path} ({})", reason(sizes)));
-            entry.fate = Fate::Remove;
+            let why = reason(sizes);
+            notes.push(format!("{entry_path} ({why})"));
+            entry.poison(why);
         }
     }
 
-    // Pass 2: the whole map. Largest container entries first.
-    let total = |entries: &[Entry<'_>]| {
-        entries
-            .iter()
-            .filter(|entry| entry.kept())
-            .fold(Sizes::default(), |acc, entry| {
-                let own = Sizes {
-                    maps: 1,
-                    ..Sizes::default()
-                };
-                acc.plus(own).plus(entry.sizes.unwrap_or_else(|s| s))
-            })
-    };
+    // Pass 2: the whole map. Largest container entries first. Every entry
+    // keeps its key, so each costs one map entry whatever happens to its value.
+    let mut used = entries.iter().fold(Sizes::default(), |acc, entry| {
+        let own = Sizes {
+            maps: 1,
+            ..Sizes::default()
+        };
+        acc.plus(own).plus(entry.sizes.unwrap_or_else(|s| s))
+    });
     // Strings that are direct entries are free; only the containers' text and
     // the entry and element counts decide. A map that holds more scalar
-    // entries than the limit cannot be fixed by removing containers, so the
-    // entry count is only a reason to remove while removing can help.
-    let mut used = total(&entries);
-    let map_limit = MAX_MAP_SIZE.max(entries.iter().filter(|e| e.kept()).count());
+    // entries than the limit cannot be fixed by poisoning containers, so the
+    // entry count is only a reason to poison while poisoning can help.
+    let map_limit = MAX_MAP_SIZE.max(entries.len());
     let fits = |used: Sizes| {
         used.arrays <= MAX_ARRAY_SIZE && used.maps <= map_limit && used.strings <= MAX_STRING_SIZE
     };
     if !fits(used) {
         let mut order: Vec<usize> = (0..entries.len())
-            .filter(|&index| entries[index].kept() && entries[index].kind != Kind::Plain)
+            .filter(|&index| {
+                entries[index].kind != Kind::Plain
+                    && !matches!(entries[index].fate, Fate::Poison(_))
+            })
             .collect();
         // Largest first; among equals the later key goes, so the earliest
         // keys of a long list of entries survive.
@@ -297,15 +303,12 @@ fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> M
             let sizes = entries[index].sizes.unwrap_or_else(|s| s);
             used = Sizes {
                 arrays: used.arrays.saturating_sub(sizes.arrays),
-                maps: used.maps.saturating_sub(sizes.maps + 1),
+                maps: used.maps.saturating_sub(sizes.maps),
                 strings: used.strings.saturating_sub(sizes.strings),
             };
-            notes.push(format!(
-                "{path}.{} ({})",
-                entries[index].key,
-                sizes.describe()
-            ));
-            entries[index].fate = Fate::Remove;
+            let why = sizes.describe();
+            notes.push(format!("{path}.{} ({why})", entries[index].key));
+            entries[index].poison(why);
         }
     }
 
@@ -313,11 +316,14 @@ fn fit_map(path: &str, source: &Map, depth: usize, notes: &mut Vec<String>) -> M
         .into_iter()
         .filter_map(|entry| {
             let key = source.get_key_value(entry.key)?.0.clone();
-            match entry.fate {
-                Fate::Keep => Some((key, deep_copy(entry.value, depth + 1))),
-                Fate::Pruned(map) => Some((key, Dynamic::from_map(map))),
-                Fate::Remove => None,
-            }
+            Some(match entry.fate {
+                Fate::Keep => (key, deep_copy(entry.value, depth + 1)),
+                Fate::Pruned(map) => (key, Dynamic::from_map(map)),
+                Fate::Poison(why) => {
+                    let path = format!("{path}.{}", entry.key);
+                    (key, Dynamic::from(Poison { path, why }))
+                }
+            })
         })
         .collect()
 }

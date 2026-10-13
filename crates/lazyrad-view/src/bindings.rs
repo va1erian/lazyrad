@@ -20,8 +20,8 @@
 //! maps. **`CorePackage` is deliberately not used**: it contains
 //! `LanguageCorePackage` (`sleep`, `exit`, `parse_json`, `take`, `tag`,
 //! reflection), which a binding must not reach. There is no time package, no
-//! I/O, no module resolver, and `print`, `debug` and `eval` are disabled
-//! symbols. [`Bindings::registered_functions`] exposes the size of the
+//! I/O, no module resolver, and `print`, `debug`, `eval` and `type_of` are
+//! disabled symbols. [`Bindings::registered_functions`] exposes the size of the
 //! function set so a test can pin it.
 //!
 //! The source is compiled with [`Engine::compile_expression_with_scope`], so
@@ -32,68 +32,27 @@
 //!
 //! # Limits
 //!
-//! Every limit ends an expression with a [`BindError::Limit`] (or, for
-//! nesting, a syntax error), never a panic or an abort. They are sized for
-//! *view* expressions, not data processing, and are documented at their
-//! constants in [`crate::limits`]; in short:
-//!
-//! | What | Limit | In practice |
-//! |---|---|---|
-//! | operations in one evaluation | [`MAX_OPERATIONS`] = 32 768 | a `map`/`filter`/`reduce` step costs 3 to 5 per element, so about 12 steps over a full 512-element array (the 10-call chain cap comes first) |
-//! | nested closure calls | [`MAX_CALL_LEVELS`] = 4 | |
-//! | nesting depth | [`MAX_EXPR_DEPTHS`] = 16 and 10 | every operator in a flat chain is a level: at most 16 terms in `a + b + ...` or `a && b && ...`, 12 branches in an `else if` chain, 10 chained method calls |
-//! | array elements in one value | [`MAX_ARRAY_SIZE`] = 512 | also the longest array literal, and the most iterations of one `map` |
-//! | map entries in one value | [`MAX_MAP_SIZE`] = 512 | one per field, nested maps included: 102 rows of five fields, 51 of ten (the entry that holds the list costs one) |
-//! | bytes of text in one value | [`MAX_STRING_SIZE`] = 32 KiB | texts inside arrays and maps are summed |
-//!
-//! The size limits apply to what a binding can *see* as well as to what it
-//! builds, with Rhai's own counting (see below). Three consequences are worth
-//! stating:
+//! Every limit is a constant in [`crate::limits`], which is the one place that
+//! states the numbers and says why; this page and the README refer there, and
+//! a test fails if either repeats one. Every limit ends an expression with a
+//! [`BindError::Limit`] (or, for nesting, a syntax error), never a panic or an
+//! abort. Three consequences are worth knowing:
 //!
 //! * **A list of records is limited by its fields.** Rhai counts one map entry
-//!   per field, so a list of five-field rows holds at most 102 rows, and a
-//!   list over the limit is hidden from bindings. Keep counts and summaries in
-//!   `state`, and long lists in a control that owns its rows.
+//!   per field, so the rows a list can hold are the map limit divided by the
+//!   fields in a row. A list over a limit is hidden from bindings.
 //! * **A long string can be read but not used.** `bind text: state.doc` works
-//!   at any length; `state.doc.len()` or `.to_upper()` on a string over
-//!   [`MAX_STRING_SIZE`] is a `Limit` diagnostic that names the entry.
-//! * **A hidden entry is absent.** Every variable is copied into the scope with
-//!   the entries that do not fit removed (largest first; a map that does not
-//!   fit is pruned inside instead of removed, so `cfg.name` survives a
-//!   2000-row `cfg.rows`). Any read of a removed entry is a "Property not
-//!   found" diagnostic that names it and its size; `keys()`, `len()` and
-//!   `contains` on the enclosing map do not see it either.
-//!
-//! **Native stack.** Rhai evaluates by recursion, and a debug build's frames
-//! are large. With the limits above the worst expressions found (every
-//! construct nested to the cap, as a recursion bomb at the call limit) need
-//! about 350 KiB (measured as the smallest thread that survives them); the
-//! test suite runs them on a 1 MiB thread. A host that evaluates on a much
-//! smaller stack must lower the constants.
-//!
-//! **Peak memory.** Rhai checks a value's size when a call *returns*, but a
-//! native such as `array.map(...)` keeps every closure result until it does,
-//! and a closure that returns a list from `state` copies it each time. Three
-//! rules bound that:
-//!
-//! 1. every array a native can iterate has at most [`MAX_ARRAY_SIZE`] elements
-//!    (a literal is capped by the parser, a built array by the size check at
-//!    the native's return, and a `state` list by rule 2), so one call makes at
-//!    most that many iterations;
-//! 2. what a binding can read fits the same limits, counted the way Rhai
-//!    counts, and is a deep copy that shares nothing with the host (see
-//!    [`BindingScope`]);
-//! 3. a value an expression *builds* is size-checked at its native's return.
-//!
-//! One iteration therefore copies at most [`MAX_ARRAY_SIZE`] array elements,
-//! [`MAX_MAP_SIZE`] map entries and [`MAX_STRING_SIZE`] bytes of new text, and
-//! one native call keeps at most [`MAX_ARRAY_SIZE`] of those.
-//!
-//! **The visible budget is 512.** In the worst shape (a list of about five
-//! hundred one-field rows, returned once per element of a 511-element list) one
-//! evaluation transiently allocates about 154 MiB in a debug build; typical
-//! shapes are a third of that or less. The table, and what lowers it further,
-//! are on [`PEAK_MEMORY_CEILING`]; the `limits` tests pin the estimate.
+//!   at any length; a method call on a string over the string limit is a
+//!   `Limit` diagnostic that names the entry.
+//! * **A hidden entry keeps its key and loses its value.** Every variable is
+//!   copied into the scope with the entries that do not fit replaced by an
+//!   opaque value (largest first; a map that does not fit is pruned inside, so
+//!   `cfg.name` survives a very long `cfg.rows`). `contains`, `keys`, `len`
+//!   and a comparison of two maps see the real shape; *using* the value (a
+//!   read, a comparison, a method call, a truthiness test, a text conversion
+//!   including `to_json`) is a diagnostic that names the entry and why it is
+//!   hidden, however the result is used afterwards. See [`crate::limits`] for
+//!   the memory this buys.
 //!
 //! # Closures that read `state`
 //!
@@ -101,9 +60,12 @@
 //! and a captured variable. Rhai makes a captured variable shared, and a
 //! shared value cannot be read while it is borrowed as a receiver ("Data race
 //! detected"). The evaluator therefore retries such a binding on a second
-//! engine whose resolver hands out **private copies** of `state`, `props` and
-//! `env`, and remembers that choice for the source. Hoisting the read keeps
-//! the fast path: `(|n| state.items.filter(|x| x > n)).call(state.n)`.
+//! engine whose resolver hands out **private, read-only, shared copies** of
+//! `state`, `props` and `env`: a closure curries a handle to one copy, so it
+//! costs a handle clone per call, not a copy of the state. The choice is
+//! remembered for the source, and [`BindingStats::state_copies`] counts the
+//! copies. Hoisting the read keeps the fast path:
+//! `(|n| state.items.filter(|x| x > n)).call(state.n)`.
 //!
 //! A closure created *inside another closure's body* that mentions `state`,
 //! `props` or `env` is not rescued: the outer body's variable is the
@@ -113,22 +75,19 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
-use rhai::packages::{
-    ArithmeticPackage, BasicArrayPackage, BasicFnPackage, BasicIteratorPackage, BasicMapPackage,
-    BasicMathPackage, BasicStringPackage, LogicPackage, MoreStringPackage, Package,
-};
-use rhai::{AST, Dynamic, Engine, EvalAltResult, Map, OptimizationLevel, Scope};
+use rhai::{AST, Dynamic, Engine, EvalAltResult, Map, Scope};
 
 use crate::cache::Cache;
 pub use crate::dependencies::Dependencies;
+use crate::engine::{Counters, build_engine};
 use crate::error::BindError;
 pub use crate::limits::{
     MAX_ARRAY_SIZE, MAX_CALL_LEVELS, MAX_EXPR_DEPTHS, MAX_MAP_SIZE, MAX_OPERATIONS,
     MAX_STRING_SIZE, PEAK_MEMORY_CEILING,
 };
+use crate::poison::Poison;
 pub use crate::scope::BindingScope;
 use crate::value::{Value, ValueKind};
-use crate::visible::deep_copy;
 
 /// Compiled expressions kept at least, before the least recently used are
 /// evicted. A session raises it to twice its own number of distinct sources.
@@ -142,6 +101,10 @@ pub struct BindingStats {
     pub compilations: u64,
     /// Expressions evaluated.
     pub evaluations: u64,
+    /// Private copies of `state`, `props` or `env` made for closures. A source
+    /// that never needs the retry makes none; one that does makes a few per
+    /// evaluation, however long the lists it iterates.
+    pub state_copies: u64,
 }
 
 /// A compiled expression and what evaluating it has taught us.
@@ -158,15 +121,13 @@ type Cached = Result<Rc<Compiled>, BindError>;
 ///
 /// Share one between sessions with an [`Rc`]: sources are compiled once, by
 /// text, however many nodes or forms use them. It has no setting; the limits
-/// are the constants of this module.
+/// are the constants of [`crate::limits`].
 pub struct Bindings {
     /// The fast engine: `state`, `props` and `env` are scope constants.
     engine: Engine,
     /// The engine for sources that hit a data race, built on first need.
     copying: OnceCell<Engine>,
-    /// Operations spent by the evaluation in progress; the progress hooks of
-    /// both engines count into it and `evaluate` resets it.
-    budget: Rc<Cell<u64>>,
+    counters: Counters,
     functions: usize,
     cache: RefCell<Cache<Cached>>,
     compilations: Cell<u64>,
@@ -179,75 +140,16 @@ impl Default for Bindings {
     }
 }
 
-/// Builds the restricted engine. `private_copies` adds the resolver that hands
-/// closures their own copies of the three variables.
-fn build_engine(budget: &Rc<Cell<u64>>, private_copies: bool) -> (Engine, usize) {
-    let mut engine = Engine::new_raw();
-    let mut functions = 0_usize;
-    // The whole sandbox surface, package by package. Adding a name here is a
-    // security decision; `registered_functions` pins the result in a test.
-    macro_rules! install {
-        ($($package:ty),+ $(,)?) => {$(
-            let module = <$package>::new().as_shared_module();
-            functions += module.count().1;
-            engine.register_global_module(module);
-        )+};
-    }
-    install!(
-        ArithmeticPackage,
-        BasicStringPackage,
-        BasicIteratorPackage,
-        BasicFnPackage,
-        LogicPackage,
-        BasicMathPackage,
-        MoreStringPackage,
-        BasicArrayPackage,
-        BasicMapPackage,
-    );
-    engine.disable_symbol("eval");
-    engine.disable_symbol("print");
-    engine.disable_symbol("debug");
-    engine.set_optimization_level(OptimizationLevel::None);
-    engine.set_strict_variables(true);
-    engine.set_fail_on_invalid_map_property(true);
-    engine.set_max_operations(MAX_OPERATIONS);
-    let spent = Rc::clone(budget);
-    engine.on_progress(move |_| {
-        let used = spent.get().saturating_add(1);
-        spent.set(used);
-        (used > MAX_OPERATIONS).then(|| Dynamic::from("operation limit"))
-    });
-    engine.set_max_call_levels(MAX_CALL_LEVELS);
-    engine.set_max_expr_depths(MAX_EXPR_DEPTHS.0, MAX_EXPR_DEPTHS.1);
-    engine.set_max_string_size(MAX_STRING_SIZE);
-    engine.set_max_array_size(MAX_ARRAY_SIZE);
-    engine.set_max_map_size(MAX_MAP_SIZE);
-    if private_copies {
-        // At the top level the resolver answers with a deep copy, which also
-        // makes Rhai skip sharing the variable when a closure captures it.
-        // Inside a function the name is the closure's own parameter, so the
-        // normal lookup is left alone.
-        #[allow(deprecated)] // `on_var` is flagged volatile, not deprecated.
-        engine.on_var(|name, _index, context| {
-            if context.call_level() > 0 || !matches!(name, "state" | "props" | "env") {
-                return Ok(None);
-            }
-            Ok(context.scope().get(name).map(|value| deep_copy(value, 0)))
-        });
-    }
-    (engine, functions)
-}
-
 impl Bindings {
     /// Builds the restricted engine (see the [module docs](self)).
     #[must_use]
     pub fn new() -> Self {
-        let budget = Rc::new(Cell::new(0_u64));
-        let (engine, functions) = build_engine(&budget, false);
+        let counters = Counters::default();
+        let (engine, functions) = build_engine(&counters, false);
         Self {
             engine,
             copying: OnceCell::new(),
-            budget,
+            counters,
             functions,
             cache: RefCell::new(Cache::new(BASE_CACHE_CAPACITY)),
             compilations: Cell::new(0),
@@ -298,7 +200,8 @@ impl Bindings {
     /// # Errors
     ///
     /// A [`BindError`]. Nothing panics, and no expression can change the maps
-    /// `scope` was built from.
+    /// `scope` was built from. A result that is, or contains in a text, an
+    /// entry hidden from the binding is an error naming it.
     pub fn evaluate(
         &self,
         source: &str,
@@ -319,11 +222,25 @@ impl Bindings {
                 outcome = self.run(self.copying_engine(), &compiled.ast, scope);
             }
         }
+        // A hidden entry that was turned into text fails the evaluation, even
+        // when Rhai went on with its fallback text and the result looks fine.
+        if let Some(message) = self.counters.refused.borrow_mut().take() {
+            return Err(BindError::Runtime {
+                message,
+                position: None,
+            });
+        }
         let result = outcome.map_err(|error| {
             let mut error = BindError::from_eval(&error);
             scope.explain(&mut error);
             error
         })?;
+        if let Some(poison) = result.read_lock::<Poison>() {
+            return Err(BindError::Runtime {
+                message: poison.refusal("the result of a binding"),
+                position: None,
+            });
+        }
         match kind {
             Some(kind) => Value::from_dynamic_as(&result, kind),
             None => Value::from_dynamic(&result),
@@ -337,6 +254,7 @@ impl Bindings {
         BindingStats {
             compilations: self.compilations.get(),
             evaluations: self.evaluations.get(),
+            state_copies: self.counters.copies.get(),
         }
     }
 
@@ -346,13 +264,14 @@ impl Bindings {
         ast: &AST,
         scope: &mut BindingScope,
     ) -> Result<Dynamic, Box<EvalAltResult>> {
-        self.budget.set(0);
+        self.counters.budget.set(0);
+        self.counters.refused.borrow_mut().take();
         engine.eval_ast_with_scope::<Dynamic>(&mut scope.scope, ast)
     }
 
     fn copying_engine(&self) -> &Engine {
         self.copying
-            .get_or_init(|| build_engine(&self.budget, true).0)
+            .get_or_init(|| build_engine(&self.counters, true).0)
     }
 
     /// The compiled expression for `source`, from the cache or freshly

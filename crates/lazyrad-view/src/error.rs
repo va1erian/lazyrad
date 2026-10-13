@@ -106,6 +106,12 @@ impl BindError {
                 message: format!("{what} exceeds the size limit"),
                 position,
             },
+            // A message the crate itself raised (a refusal): Rhai would
+            // prefix it with "Runtime error:".
+            EvalAltResult::ErrorRuntime(value, _) => Self::Runtime {
+                message: value.to_string(),
+                position,
+            },
             other => {
                 // Rhai appends its own position; ours is structured.
                 let mut message = other.to_string();

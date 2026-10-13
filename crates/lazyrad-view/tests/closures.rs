@@ -95,6 +95,78 @@ fn the_retry_is_remembered_per_source() {
     assert_eq!((stats.compilations, stats.evaluations), (1, 4));
 }
 
+/// The number of private copies of `state` one evaluation of `source` makes,
+/// over a list of `len` integers. Counting copies is timing-insensitive: a
+/// retry that cloned the state for every closure call would make this grow
+/// with `len`.
+fn copies_per_evaluation(source: &str, len: usize) -> u64 {
+    let items = Dynamic::from_array((0..len as i64).map(int).collect());
+    let state = map(&[("n", int(2)), ("items", items)]);
+    let bindings = Bindings::new();
+    let mut scope = BindingScope::new(&state, &Map::new(), &phone().to_map());
+    // The first evaluation finds the race and retries; later ones go straight
+    // to the copying engine. Count the second and third.
+    assert!(evaluate(&bindings, &mut scope, source).is_ok());
+    let before = bindings.stats().state_copies;
+    for _ in 0..2 {
+        assert!(evaluate(&bindings, &mut scope, source).is_ok());
+    }
+    let spent = bindings.stats().state_copies - before;
+    assert_eq!(
+        spent % 2,
+        0,
+        "each evaluation copies the same number of times"
+    );
+    spent / 2
+}
+
+#[test]
+fn the_retry_copies_the_state_a_fixed_number_of_times_not_once_per_call() {
+    for source in [
+        "state.items.map(|x| x * state.n).len()",
+        "state.items.filter(|x| x > state.n).len()",
+        "state.items.some(|x| x == state.n)",
+    ] {
+        let few = copies_per_evaluation(source, 4);
+        let many = copies_per_evaluation(source, 500);
+        assert!(few > 0, "{source}: the retry path must be the one measured");
+        assert_eq!(few, many, "{source}: copies must not grow with the list");
+        assert!(many <= 4, "{source}: {many} copies");
+    }
+    // A source that does not need the retry makes none.
+    assert_eq!(
+        copies_per_evaluation("state.items.map(|x| x + 1).len()", 500),
+        0
+    );
+}
+
+/// Rhai's size accounting cannot look inside a shared value that is nested in
+/// data (it would panic), so the copies the retry hands to closures must be
+/// unshared wherever a closure puts them.
+#[test]
+fn closures_that_return_or_embed_the_state_work_on_the_retry_path() {
+    let bindings = Bindings::new();
+    let mut scope = BindingScope::new(&state(), &Map::new(), &phone().to_map());
+    let cases: &[(&str, i64)] = &[
+        ("state.items.map(|x| state).len()", 5),
+        ("state.items.map(|x| [state]).len()", 5),
+        ("state.items.map(|x| #{a: state}).len()", 5),
+        ("state.items.map(|x| state.items).len()", 5),
+        ("state.items.map(|x| [state, state.n * x]).len()", 5),
+        ("[state, state.items.map(|x| x * state.n)].len()", 2),
+        ("state.items.map(|x| #{s: state, n: state.n})[0].n", 3),
+        ("state.items.map(|x| state)[0].items.len()", 5),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(
+            evaluate(&bindings, &mut scope, source),
+            Ok(Value::Int(*expected)),
+            "{source}"
+        );
+    }
+    assert!(bindings.stats().state_copies > 0, "the retry path ran");
+}
+
 #[test]
 fn private_copies_cannot_leak_a_change_back_into_the_state() {
     let bindings = Bindings::new();

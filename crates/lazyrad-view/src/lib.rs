@@ -75,11 +75,13 @@
 pub mod bindings;
 mod cache;
 mod dependencies;
+mod engine;
 mod environment;
 mod error;
 pub mod limits;
 mod node;
 mod patch;
+mod poison;
 mod renderer;
 mod scope;
 mod session;

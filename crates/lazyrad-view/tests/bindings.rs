@@ -201,6 +201,10 @@ fn eval_print_and_the_file_system_are_unreachable() {
         "eval(\"1 + 1\")",
         "print(\"hello\")",
         "debug(1)",
+        // `type_of` would name the type that stands in for a hidden entry.
+        "type_of(1)",
+        "(1).type_of()",
+        "Fn(\"type_of\").call(1)",
         "open(\"secret.txt\")",
         "read_file(\"secret.txt\")",
         "timestamp()",

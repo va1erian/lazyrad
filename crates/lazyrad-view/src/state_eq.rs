@@ -6,6 +6,8 @@
 
 use rhai::{Array, Dynamic, Map};
 
+use crate::poison::Poison;
+
 /// The deepest nesting of maps and arrays compared. Anything deeper is
 /// treated as changed, so a hostile or accidental 100 000-level state cannot
 /// overflow the stack here. Real form state nests a handful of levels.
@@ -40,6 +42,11 @@ fn same_value(a: &Dynamic, b: &Dynamic, depth: usize) -> bool {
         return false;
     }
     if a.is_unit() && b.is_unit() {
+        return true;
+    }
+    // Two hidden entries at one place are the same to a binding: it cannot
+    // read either.
+    if a.is::<Poison>() && b.is::<Poison>() {
         return true;
     }
     if let (Ok(x), Ok(y)) = (a.as_bool(), b.as_bool()) {
