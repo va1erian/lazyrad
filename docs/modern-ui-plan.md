@@ -98,7 +98,7 @@ This plan **extends** its workstreams; it does not redefine them.
          │                        ▼                           ▼
          └──────────►  lazyrad-view  (renderer-neutral, wasm-clean)
                        state · binding evaluation (Rhai) · responsive cascade
-                       component expansion · diff  ──►  Patch { Create, Set, Move, Remove }
+                       component expansion · diff  ──►  Patch { Create, Set, Unset, Move, Remove }
                                      │
                     ┌────────────────┼────────────────────────┐
                     ▼                ▼                        ▼
@@ -149,7 +149,7 @@ step after the handler:
         ▼
  re-evaluate bindings against `state`, `props`, `env`     (never stops the debugger)
         ▼
- diff against the last applied values  ──►  [Patch::Set …]
+ diff against the last applied values  ──►  [Patch::Set / Patch::Unset …]
         ▼
  renderer applies patches                                  (skip a Set equal to the live
                                                             value: keeps caret and IME)
@@ -249,6 +249,9 @@ Not additions, already there: `fill`, `align`, `align_items`, `justify`, `gap`, 
 - `Diagnostic.node` carries a widget name only, and a bad `bind` key is a map key, so a
   load error has no line, column or "did you mean". Validation of bind keys therefore
   reports through `Form::validate`, with the key and node.
+- **Node-name uniqueness** (found in lane B) conflicts with unnamed layout nodes and with
+  control arrays (`digit[0]` … `digit[9]` share one declared `name`). The view core keys
+  nodes by an address, and R1 decides whether that is a name, an index or a path.
 
 ### 4.3 Kinds
 
@@ -312,20 +315,35 @@ Container fields: `gap`, `padding`, `align_items` (default for children, across)
   **side-effect-free engine** (no assignment, no stdlib I/O). It sees `state`, `props`
   (M9) and `env` only, **not control properties**: reading controls would make evaluation
   order observable and allow cycles. Evaluated at build, after every event turn, and on
-  `env` change (only the bindings that read `env`); not per frame.
+  `env` change; not per frame. **Implementation note (lane B):** the two triggers
+  collapse into one `update(state, env)`. Skipping state-reading bindings on a pure
+  resize needs state-change detection; the first cut deep-compares the state map, and
+  a **version counter on the shared state handle** is the cheaper design.
 - **Tooling:** the debugger's step-into skips `.lfm` expressions; renaming a control
   rewrites the `bind` and `label_for` strings that name it, as `rename_handlers` does for
   handlers.
 - **Ownership:** a bound property belongs to its binding. A handler that writes it is a
   lint warning. A failing expression keeps the last good value and reports in the Output
   pane; it never crashes the app. Expressions are compile-checked at load.
+  **Skip-if-equal has a consequence** (found in lane B): a renderer skips a `Set` equal
+  to the live value to keep the caret, so a value the *user* changed with no handler
+  sticks until the bound value next changes. That is the right behaviour for a
+  controlled input, and it is why inputs bind through a handler (below), not by
+  re-asserting a binding every turn.
+- **Typed properties.** A binding's result must match the property's kind. The kind
+  comes from the **catalog schema**, not from the first value a binding happens to
+  produce; lane B had to infer it from the literal or the patch because the schema is
+  not wired in yet.
 - **Two-way input** stays explicit (`fn name_edit_change(text) { state.name = text; }`):
   transparent in the debugger, no magic.
 - `env` = `{ width, height, size_class, dark, text_scale }`, read-only. There is no
   `env.platform`: it would invite the `if web` branches the M8 gate forbids.
 
 Size classes follow Material 3 by width, cascading **mobile-first** like CSS `min-width`
-queries:
+queries. The cascade is **per property**, not whole-patch inheritance: a `Medium` patch
+that sets only `gap` leaves a `Compact` patch's `direction` in force. A property a patch
+set at a larger class returns to its base when the window shrinks again, through
+`Patch::Unset`:
 
 | Class | Width | Typical |
 |---|---|---|
@@ -528,6 +546,7 @@ lanes (A, B) need only P1–P2c; the desktop and designer lanes (C, E) need P4.*
 | # | Work | Repo | Size | After |
 |---|---|---|---|---|
 | P1 | **Land #275 and #276 on `main`.** Branch from `main`, take `f4f2e91` (RON) and `d798cd4` (CLI) (the squash `ede6e5a` already carries the move), resolve `CHANGELOG.md` and `Cargo.toml`, re-run CI. Leave the stale stacked branches for the owner to delete | xui | days | — |
+| P1b | **Harden format 2** against the first independent review of it (§11.1): `migrate` must reject invalid v1 (duplicate names, leaf or cyclic parents) and produce grids that land on the v1 pixels (asymmetric right margin, nested `Group`); `to_ron` must not panic at or past RON's recursion limit; `array`/`index` need caps and are rejected on containers; plus the minors listed there | xui | ≈ 1 wk | P1 |
 | P2 | **Model the kinds LazyRAD has and the RON model lacks:** `Timer`, `Canvas`, `PictureBox`, `Button.icon`, with their factories. About 3,000 lines move onto xui's factory API. Upstream, because the model is a closed enum (D3) | xui | 2–3 wk | P1 |
 | P2b | **Upstream LazyRAD's `xui-rhai` deltas** into `xui-script` (the nine names in F6) and settle top-level-variable semantics (D8) | xui | ≈ 1 wk | P1 |
 | P2c | **Wasm factoring:** a `build` feature gate in `xui-form`; a renderer-neutral `ScriptForm` session split; Rhai `debugging` behind a feature | xui | 1–2 wk | P1 |
@@ -561,7 +580,7 @@ all at once: A and B first (they need only P1–P2c), then C, D and E.
 | Lane | Work packages (issue-sized) |
 |---|---|
 | **A Model** (xui) | A1 `bind` field, validation and expression compile check. A2 `responsive` patches and size-class cascade in the schema. A3 `Flex`, `Scroll`, `Overlay`, `Spacer` kinds with factories. A4 `margin` (wrapper); `min_*` deferred (G21). A5 CLI: `render --size`, `--report json` (node path, control name, warnings), `label_for` and `accessible_name` |
-| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade. B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, `ViewTree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first** |
+| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade. B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, `ViewTree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: implemented as [#119](https://github.com/va1erian/lazyrad/pull/119); what it found is in §11.1* |
 | **C Desktop** | C1 builder: new kinds and layout fields → `arrange`, layout patches by re-mount (S3). C2 runtime: calls B2 after each turn, `Resize` → `env`, shared `state` handle. C3 lint: bound-property writes, unknown state keys, binding compile errors (`check_project`) |
 | **D Web** | D1 `lazyrad-web` skeleton, bundle loader, web `Platform`. D2 `DomRenderer` and `DomHost`, event delegation. D3 CSS emitter with media queries, driven by the catalog. D4 dev server and *Run in browser*. D5 *Make Web App* and the stub CI job. D6 `.lrp` `targets` and `[web]` (`lazyrad-project`) |
 | **E Designer** | E1 viewport bar and size-class badge. E2 drop indicators and outline drag. E3 property grid: layout fields per parent, sizing control, responsive indicator, binding field. E4 layout-warning badges (from A5's structured report). E5 quick actions (wrap, unwrap, move) |
@@ -642,7 +661,7 @@ Numbering continues PLAN.md §10. "Workaround" means LazyRAD proceeds without an
 | R2 | **Scope creep toward "build Flutter"** | Every milestone ends in a demo with a gate; tiers (§7) are ordered; M8 excludes components, lists and navigation on purpose |
 | R3 | **Web bundle size and startup** | Budgets measured in S1; no widget code or rasteriser in the wasm; prebuilt stub; lazy assets |
 | R4 | **Two binding styles confuse users** (handlers that set properties vs bindings) | One-way only, ownership rule, lint, docs. Imperative code stays legal for anything not bound |
-| R5 | **Rhai is synchronous**; web I/O is async | Callback-style `http`/`file` (the non-blocking `msg_box` pattern); the operation budget already limits runaway handlers |
+| R5 | **Rhai is synchronous**; web I/O is async. **The operation budget is leaky**: Rhai restarts its operation counter inside callbacks such as `array.map(closure)` (found in lane B), so a runaway there is not bounded by `on_progress` alone | Callback-style `http`/`file` (the non-blocking `msg_box` pattern); `lazyrad-view` counts operations across callbacks with a shared counter; `xui-rhai`'s handler budget has the same blind spot and needs the same fix |
 | R6 | **Designer complexity** (tree drag and drop in a custom-painted toolkit) | Outline reorder and click-to-insert first; pure, window-free tree ops; reuse overlay and hit-test patterns |
 | R7 | **Work stranded on stacked branches** (it already happened, F2) | P1 now. Process fix: retarget stacked PRs to `main` before merging the bottom one, or merge the stack top-down; a CI or bot check that a merged PR's base is the default branch |
 | R8 | **Three repos pinned at different xui revs** | xui's W5.5 single pin; adoption (P4) lands against one rev; the musl CI job gates every PR |
@@ -686,6 +705,42 @@ by hand before being adopted.
 | Docs, accessibility acceptance, WebKit, window mapping, `.lrp` work package | **Adopted** (P5, §4.2 row 5, gate, §5.2, work package D6 in lane D) |
 | "No IME" is false on Win32; `now()` does not use `web-time`; `d798cd4` is the CLI commit; F5 counts | **Corrected** (F5, F9, §5.2) |
 | Unverifiable: wasm compile, size and time budgets, third-party framework columns | **Open**: S1 and the budgets in §5.2 |
+
+### 11.1 What implementing and reviewing taught us (13 October 2026)
+
+**Lane B (`lazyrad-view`, [#119](https://github.com/va1erian/lazyrad/pull/119)).**
+Implementing the untested design in §3.4 and §4.5 found eight things, folded into those
+sections above:
+
+| Finding | Where it landed |
+|---|---|
+| A patch that returns to its base on a smaller window needs `Patch::Unset`; `Set` alone cannot express it | §3.1, §3.4, §4.5 |
+| Rhai restarts its operation counter inside callbacks, so the "operation budget limits runaways" claim was false there | R5 |
+| The two triggers collapse into one `update`; skipping state readers on resize needs state-change detection (a version counter) | §4.5 |
+| "Typed property" was undefined: the kind must come from the catalog | §4.5 |
+| The cascade is per property, as in CSS | §4.5 |
+| Skip-if-equal makes a user edit stick until the bound value changes | §4.5 |
+| Unique node names conflict with unnamed layouts and control arrays | §4.2 (R1) |
+| A `(0..N).map(...)` runaway does not exist in Rhai (ranges have no `map`; an expression cannot loop); the real hole is closures | R5 |
+
+**P1 review (xui [#296](https://github.com/va1erian/xui/pull/296), the landing PR).**
+The first independent review of the RON code verified that the landing is faithful (the
+RON paths are byte-identical to the stack tip; only `Cargo.toml` and `CHANGELOG.md` were
+resolved by hand) and found four Major defects, none a regression against `main`:
+
+| Finding | Evidence |
+|---|---|
+| `migrate` builds grids that do not land on the v1 pixels (only the left padding is checked; nested `Group` content is narrower than the outer size) | A 144-wide form with two buttons renders them 67 and 53 wide; in a `GroupBox`, 64-wide buttons render 60 |
+| `migrate` silently drops nodes and can overflow the stack on invalid v1 (duplicate names, a leaf as parent, a cycle); unchecked `i64` arithmetic | `thread 'main' has overflowed its stack` on two nodes named `x` where the second has `parent = "x"` |
+| `Form::to_ron` panics or writes a file `check` rejects at RON's recursion limit (about 20 nested panels); the W4 designer would crash on save | 40 nested v1 panels panic; 20 write an unloadable file |
+| `array` and `index` are unbounded and accepted on containers | `array: 100000000` took 2.5 s and 770 MB; three nested `Panel(array: 30)` ran past 150 s |
+
+Minors worth a fix with them: non-finite or huge lengths panic in debug builds;
+`schema --json` leaks `$crate::` macro internals into 119 type strings; `ProgressBar`
+truncates `i64` to `i32`; `fmt --check` is wrong on CRLF checkouts and rejects a BOM;
+`migrate X --out X` overwrites its own input; `check` aborts at the first unreadable
+file; `Button(name: "form")` passes `check` and then breaks scripts. P1b (§8) tracks
+them.
 
 ---
 
