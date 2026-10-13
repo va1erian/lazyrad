@@ -367,6 +367,16 @@ Container fields: `gap`, `padding`, `align_items` (default for children, across)
   produce. Lane B had no schema wired in, so it types a property from its literal or
   patch, and a bound-only property from its first good result: the fallback this
   sentence deprecates.
+- **What a binding can see (decided, 13 October 2026).** At most **512** array
+  elements and **512** map entries per value, counted the way Rhai counts (nested
+  entries included), 32 KiB of text and 32 768 operations per binding. A larger value
+  stays in `state`, but a binding sees a small **poison value** in its place: the key
+  is still present, so `contains`, `in`, `keys`, `len` and `==` against a literal map
+  give the true answer, and any *use* of the value fails with a diagnostic that names
+  the entry. Keep counts and summaries in `state`; M9's `Repeat` iterates a list
+  host-side, so a long list never has to pass through a binding. The numbers live once,
+  in `crates/lazyrad-view/src/limits.rs`. The owner chose 512 over 1024 after seeing
+  a transient peak of 545 MiB for one pathological `map`; at 512 it is about 154 MiB.
 - **Two-way input** stays explicit (`fn name_edit_change(text) { state.name = text; }`):
   transparent in the debugger, no magic.
 - `env` = `{ width, height, size_class, dark, text_scale, reduce_motion }`, read-only.
@@ -755,7 +765,7 @@ all at once: A and B first (they need only P1–P2c), then C, D and E.
 | Lane | Work packages (issue-sized) |
 |---|---|
 | **A Model** (xui) | A1 `bind` field, validation and expression compile check. A2 `responsive` patches and size-class cascade in the schema. A3 `Flex`, `Scroll`, `Overlay`, `Spacer` kinds with factories. A4 `margin` (wrapper); `min_*` deferred (G21). A5 CLI: `render --size`, `--report json` (node path, control name, warnings), `label_for` and `accessible_name`. A6 the `motion` field, its presets and validation (animating a layout property, a loop, a 3D name), **and the six common runtime properties** `opacity`, `translate_x/y`, `scale_x/y`, `rotate` (they must exist for `change`, `bind` and `animate()` to write; `motion` is accepted on widget nodes only) |
-| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade (and `reduce_motion`, which changes #119's `to_map`: it pins five keys). B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, its own `Tree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: B1 to B3 are in review as [#119](https://github.com/va1erian/lazyrad/pull/119) (fixes in progress); what it found is in §11.1.* **B5 the mapper** from the RON `Form` (its `bind`, `responsive` and `motion` fields) to `lazyrad-view`'s `Tree`; it needs A1, A2 and A6 and nothing in #119 owns it. **B4 the motion planner:** `Patch::Animate` with `from: Current`, a `finished` callback, presets expanded into animations, the `enter`/`exit` lifecycle (an exit holds the node until it ends; `enter` is gated on node identity so a rebuild does not replay it), the virtual clock, reduced motion |
+| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade (and `reduce_motion`, which changes the merged `to_map`: it pins five keys). B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, its own `Tree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: B1 to B3 are merged as [#119](https://github.com/va1erian/lazyrad/pull/119) after four review rounds; what they found is in §11.1.* **B5 the mapper** from the RON `Form` (its `bind`, `responsive` and `motion` fields) to `lazyrad-view`'s `Tree`; it needs A1, A2 and A6 and nothing in the merged crate owns it. **B4 the motion planner:** `Patch::Animate` with `from: Current`, a `finished` callback, presets expanded into animations, the `enter`/`exit` lifecycle (an exit holds the node until it ends; `enter` is gated on node identity so a rebuild does not replay it), the virtual clock, reduced motion |
 | **C Desktop** | C1 builder: new kinds and layout fields → `arrange`, layout patches by re-mount (S3). C2 runtime: calls B2 after each turn, `Resize` → `env`, shared `state` handle. C3 lint: bound-property writes, unknown state keys, binding compile errors (`check_project`). C4 the xui renderer's `MotionDriver`, driven by an injected `tick(now)` (`OffscreenBackend::set_timer` returns `TimerId(0)`): opacity and transform through G29, translate through P2d-c's offset layer, reduced motion from the OS. C5 `animate()` in the Rhai bridge: the same `Animate` patch, with a lint when the property is also bound |
 | **D Web** | D1 `lazyrad-web` skeleton, bundle loader, web `Platform`. D2 `DomRenderer` and `DomHost`, event delegation. D3 CSS emitter with media queries, driven by the catalog. D4 dev server and *Run in browser*. D5 *Make Web App* and the stub CI job. D6 `.lrp` `targets` and `[web]` (`lazyrad-project`). D7 motion in the DOM renderer: `Animate` patches to the Web Animations API, presets to CSS, `prefers-reduced-motion` into `env` (D3's emitter gains the preset keyframes) |
 | **E Designer** | E1 viewport bar and size-class badge. E2 drop indicators and outline drag. E3 property grid: layout fields per parent, sizing control, responsive indicator, binding field. E4 layout-warning badges (from A5's structured report). E5 quick actions (wrap, unwrap, move). E6 motion inspector, play and scrub, reduced-motion toggle and motion lints |
@@ -863,6 +873,7 @@ Numbering continues PLAN.md §10. "Workaround" means LazyRAD proceeds without an
 | R12 | **`xui-script` and LazyRAD's runtime diverge again** (F6) | P2b upstreams the deltas before adoption; one Rhai pin; LazyRAD keeps only its stdlib, `FsPolicy` and player |
 | R13 | **Motion drops frames on the software-painted xui canvas**, most on LazyOS and for large animated regions (a full-window fade repaints the window every frame) | Transform and opacity only; animate small subtrees; paint dirty rectangles; measure in spike S4; a frame-budget check that degrades a running animation to its end state under load; reduced motion as the escape hatch |
 | R14 | **Desktop and web motion disagree** (curves, timing, stagger origin) | One easing set and one definition of each preset; golden values at fixed times from the virtual clock against a paused Web Animation, with a stated tolerance, because an exponential ease-out is not a cubic-bezier and the web uses a CSS `linear()` approximation; the no-3D lint |
+| R15 | **The binding sandbox is a pinned allow-list, not a syntax property** (Rhai `=1.26.1`, 703 registered functions): a Rhai bump or a feature flag can add a function that does I/O or blocks | The exact `=` pin; the function-count test and the call-each-dangerous-name test fail loudly; the tests are re-run on every Rhai bump, plus a wasm check when a target is available |
 
 ### Decisions I need from you
 
@@ -920,9 +931,10 @@ sections above:
 | Unique node names conflict with unnamed layouts and control arrays | §4.2 (S5) |
 | A `(0..N).map(...)` runaway does not exist in Rhai (ranges have no `map`; an expression cannot loop); the real hole is closures | R5 |
 
-**Independent review of #119 (read-only, 13 October).** The session, cascade and diff
-logic held up and the shared operation counter genuinely closes the callback hole. It
-also found one Blocker and three Majors in the evaluator, now being fixed:
+**Independent review of #119 (read-only, 13 October; merged after four rounds).** The
+session, cascade and diff logic held up and the shared operation counter genuinely
+closes the callback hole. The reviews found one Blocker and several Majors in the
+evaluator, all fixed before the merge:
 
 | Finding | Evidence |
 |---|---|
@@ -935,7 +947,23 @@ The lesson for the web target: "no I/O" is a property of the *package list*, not
 expression syntax, so the allow-list is a tested contract, and the evaluator needs a
 small-stack test because wasm threads and the browser main thread have small stacks too.
 Minors (state cloned twice per turn, a cache cleared wholesale at 4096 sources, unbounded tree depth, NaN
-widths re-evaluating every turn, a lexical-only platform guard) are on the fix list.
+widths re-evaluating every turn, a lexical-only platform guard) were fixed too.
+
+Later rounds found five more, all fixed:
+
+| Finding | Outcome |
+|---|---|
+| The visible budget and Rhai's map limit disagreed (a list of 5-field records broke at 52 rows with a generic error) | One set of limits, counted as Rhai counts, stated once in `limits.rs`; a test fails if the docs repeat a different number |
+| A binding could mutate host state through a shared `Dynamic` (`state.items.push(9)` grew a host array) | The view and the retry copy are deep and read-only; tests assert the host value is unchanged on both paths |
+| A hidden entry read as *absent*, so `contains("items")` was false and a pruned map compared equal to a truncated literal: a silent wrong branch | The key stays present with a poison value that fails on any use; 47 operations are tested |
+| The closure retry path cloned the whole state per call: about 18× slower than the fast path | `into_read_only().into_shared()`: 2.2 ms down to 0.21 ms for 500 ints |
+| Limits were repeated in five places and had drifted from the code | `limits.rs` is the single source; `tests/limits_docs.rs` checks the docs against it |
+
+Deferred, with the owner's agreement: the peak memory of one pathological `map`/`zip`
+(about 154 MiB at 512; ceiling 192 MiB). A cheaper guard (shadowing `map` and `zip`
+with `register_raw_fn`, which handles one-parameter closures only) is recorded in the
+crate README. Minors deferred: the `state_copies` test counts resolver calls rather
+than guarding the speed-up, and the docs test misses small unit-less numbers.
 
 **P1 review (xui [#296](https://github.com/va1erian/xui/pull/296), the landing PR).**
 The first independent review of the RON code verified that the landing is faithful (the
