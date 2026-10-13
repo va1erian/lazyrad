@@ -17,6 +17,7 @@ xui gaps the project tracks.
 | `lazyrad-debug-proto` | the IDE <-> player debug protocol: one JSON object per line |
 | `lazyrad-player` (bin) | the runtime host: runs a project dir or a payload, `--watch` reloads, `--debug` runs under the debugger |
 | `lazyrad-designer` | the xui form-designer surface, toolbox and property grid |
+| `lazyrad-view` | renderer-neutral size classes, Rhai bindings and a patch diff any renderer can apply |
 | `lazyrad-ide` (bin) | the IDE shell |
 
 ## Samples
