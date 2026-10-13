@@ -77,6 +77,7 @@ controls and export a Windows `.exe`. This plan adds a second, modern way to bui
 | F10 | The theme is a small semantic palette plus decoration tokens (`corner_radius`, `glow`, …; bevel and glow are painted by `theme/look.rs`, not CSS-expressible as tokens). `Ui::bounds(id)` exposes laid-out rectangles. | xui `docs/theming.md`; `app/ui/node_ops.rs` | Colour tokens map to CSS custom properties; decoration needs per-target rendering. The designer can read live bounds. |
 | F11 | **Layout is immutable once mounted.** A mount holds `tree: Group<usize>` (`arrange/mount.rs`); layout kinds have fields but **no runtime properties**; `width`/`height` are read-only outside `Absolute`; only `layout::Placement` is live. A `Fill` item has **zero natural main extent** (`layout/tree/item.rs:232`). | `mount.rs:31`; `schema/catalog.rs`; #275 body | A `responsive` patch to `direction`, `gap`, `fill`, `align` or `max_*` cannot be applied in place. See §3.4 (remount over shared widgets) and G27. |
 | F12 | The CLI renders at `form.size` (no `--size`), and `layout_report` is prose naming widgets by type and text, not by control name, and has no JSON. | `xui-form-cli/src/render.rs`; `arrange/report.rs` | Conformance and designer badges need structured output (A5, G28). |
+| F13 | xui has **no per-node opacity or transform**, no shared frame clock and no region repaint: the present path allocates a surface and clones the whole frame per present, and `arrange` re-places a node whose bounds differ from its layout rectangle on any relayout | `xui-canvas/src/backend/app/present.rs`; `arrange/mount.rs:87`; `NodeSpec` | Motion on desktop is real work (P2d), not a configuration. G24, G29, G30 |
 
 ### How this relates to xui's productivity plan
 
@@ -246,7 +247,7 @@ fn add_button_click()      { state.count += 1; }
 | 3 | **New kinds** | `Flex` (a `Stack` whose `direction` is a field, so it can be responsive), `Scroll`, `Overlay`, `Spacer` | `Row`/`Column` are separate variants, so a responsive axis needs a `direction` field. The others are xui layouts the model has not exposed yet |
 | 4 | **`margin`** | A layout field: `margin: 8` | Missing from the model and from `arrange` (G21). A one-child wrapper layout until then. `min_width`/`min_height` are **deferred**: an entry has one sizing slot and `Min` is in the rigid class with `Fixed`, so `fill` plus `min_width` cannot be expressed (§4.4) |
 | 5 | **Accessible names** | `label_for: "name_edit"` on `Label`; `accessible_name` and `description` on any widget | The DOM needs `<label for>` and `aria-*`; the web demo's accessibility claim is untestable without them |
-| 6 | **`motion`** (a common node field) | `enter`, `exit`, `change` and `press`, from a small preset vocabulary (§4.8) | Same side-table reason as `bind`. Motion is first class (goal 6), so it has a typed home in the schema rather than living in script |
+| 6 | **`motion`** (a common field on widget nodes) | `enter`, `exit`, `change` and `press`, from a small preset vocabulary (§4.8) | Same side-table reason as `bind`. Motion is first class (goal 6), so it has a typed home in the schema rather than living in script |
 
 Not additions, already there: `fill`, `align`, `align_items`, `justify`, `gap`, `padding`,
 `max_*`, `span`, `Panel(card: true)` (my earlier `Card`), control arrays.
@@ -266,6 +267,16 @@ Not additions, already there: `fill`, `align`, `align_items`, `justify`, `gap`, 
 - `Diagnostic.node` carries a widget name only, and a bad `bind` key is a map key, so a
   load error has no line, column or "did you mean". Validation of bind keys therefore
   reports through `Form::validate`, with the key and node.
+- **Field order.** `node!` appends the layout fields *after* `content` and `children`,
+  so what `fmt` writes is not the order of the sketches in this document. Declare the
+  new common fields (`bind`, `responsive`, `motion`) before `content` if a stable,
+  readable order matters.
+- **The schema does not describe presets.** `FieldSpec.ty` is a type string only, so a
+  preset enum with data (`Slide(from, distance)`, `Feather(stagger)`) will not show its
+  structure in `schema --json`; the schema needs a way to say it, or the designer reads
+  the variants some other way.
+- **Prefer a defaulted `motion: Motion` over `Option<Motion>`**, so an absent field and
+  an empty one are the same and the canonical writer omits it.
 - **Node-name uniqueness** (found in lane B) conflicts with unnamed layout nodes and with
   control arrays (`digit[0]` … `digit[9]` share one declared `name`). The view core keys
   nodes by a unique string name and rejects empty and duplicate names; S5 decides how
@@ -417,8 +428,11 @@ source (`microsoftarchive/WindowsPhoneToolkit`), not recalled.
 
 1. **Transform and opacity only.** The animatable properties are those that do not
    change layout: `opacity`, `translate_x`, `translate_y`, `scale_x`, `scale_y`,
-   `rotate` (2D, about the node's centre; used by `Roll` and `Rotate`) and paint
-   colours. `width`, `gap`, `fill` and the like are **not** animated: layout is
+   `rotate` (2D; used by `Roll` and `Rotate`) and, from M9, paint colours (they need
+   colour properties first, G17). Each preset fixes its **transform origin**: the
+   node's centre for `Roll`, `Rotate` and `PressScale`, the left edge for `Turnstile`,
+   and `-0.2` of the width for `Feather`'s items; an `origin` property is M9.
+   `width`, `gap`, `fill` and the like are **not** animated: layout is
    immutable once mounted (F11), and a reflow per frame is what makes UI janky. A
    reflow itself is animated with FLIP (measure the first and last rectangle, animate
    the difference as a transform; M9). The Toolkit works the same way: it animates
@@ -435,7 +449,7 @@ source (`microsoftarchive/WindowsPhoneToolkit`), not recalled.
    plain fade or an instant change and nothing loops.
 4. **Fast in, slow out.** The Toolkit uses `ExponentialEase` (ease-out, exponent 6) for
    its transitions: durations of 250 to 350 ms (a turnstile is 350 ms in and 250 ms out;
-   slide left and right 500 ms; roll 600 ms), a 40 ms stagger in and 50 ms out for
+   slide left and right 500 ms in and 300 ms out; roll 600 ms), a 40 ms stagger in and 50 ms out for
    feather, and a tilt that releases over 100 ms after a 200 ms delay. These become
    motion **tokens**, tuned by eye and editable in the theme editor (M9). An
    exponential ease-out is not a cubic-bezier, so the web uses a CSS `linear()`
@@ -447,9 +461,9 @@ source (`microsoftarchive/WindowsPhoneToolkit`), not recalled.
 |---|---|---|---|
 | `Slide(from, distance)` | translates in from an edge, with an opacity fade | Toolkit `SlideTransition`: translate (about 200) plus opacity, exponent 6 | nothing: this is the original's 2D |
 | `Fade` | opacity 0 ↔ 1 | the opacity half of Slide and Rotate. Turnstile and Swivel do **not** fade: their opacity switches in a step | the preset as a standalone |
-| `Roll` / `Rotate` | rotates about the node's centre while fading in | Toolkit `RollTransition` and `RotateTransition`: `RotationZ` about the centre, which is **2D** | nothing: kept as is |
+| `Roll` / `Rotate` | rotates about the node's centre (`Rotate` also fades in; `Roll` does not) | Toolkit `RollTransition` and `RotateTransition`: `RotationZ` about the centre, which is **2D** | nothing: kept as is |
 | `Turnstile` (flat) | the node squashes in horizontally from its left edge, `scale_x` from about 0.17 to 1 (the orthographic width of the original's 80° turn), mirrored on exit | Toolkit `TurnstileTransition`: `RotationY` of -80° to 0 about the left edge, no slide and no fade | **the flat projection of a 3D rotation.** A plain `Slide` is the alternative (D11) |
-| `Feather(stagger)` | children enter one after another, each a short flat `Turnstile` (or `Slide`), 40 ms apart in and 50 ms out | Toolkit `TurnstileFeatherEffect`: a per-item `RotationY` about `CenterOfRotationX = -0.2`, 350 ms, staggered | the stagger is the original's; the per-item motion is the flat reading |
+| `Feather(stagger)` | the direct children of the container's content layout (each a widget node, or wrapped in a `Panel`) enter one after another, each a short flat `Turnstile` (or `Slide`), 40 ms apart in and 50 ms out | Toolkit `TurnstileFeatherEffect`: a per-item `RotationY` about `CenterOfRotationX = -0.2`, 350 ms, staggered | the stagger is the original's; the per-item motion is the flat reading |
 | `PressScale` | a pressed item eases down to about 0.96 and back, releasing over 100 ms after a 200 ms delay | Toolkit `TiltEffect`: a tilt of up to 0.3 rad plus a depression of up to 25 px in Z | the scale, and the 0.96; there is no tilt |
 | `ProgressDots` | indeterminate dots sliding across | Toolkit `PerformanceProgressBar` | nothing |
 | `Continuum(key)` | a shared element carries from one place to another while the rest slides and fades | the platform's Continuum pattern. **Not in the Toolkit**; its behaviour was not verified here | ours: the web's View Transitions and xui's FLIP define it |
@@ -501,9 +515,12 @@ transform from the backend (G29). Four contract points:
   interpolated value, so an interrupted animation starts from where the renderer is.
 - **Completion is reported.** The renderer calls back `finished(node, property)`, so the
   core can sequence a `Remove` after an exit and an `enter` after a delay.
-- **Skip-if-equal does not apply to `Animate`.** `Session::update_with` keeps only
-  `Set` patches (`session.rs`); an `Animate` towards the live value must be dropped by
-  the core's own check, and an `Unset` of an animatable property applies at once.
+- **Skip-if-equal does not cover `Animate`.** `Session::update_with` drops a `Set`
+  that equals the renderer's live value and passes every other patch through
+  (`session.rs`), so an `Animate` towards the live value needs the core's own check,
+  and an `Unset` of an animatable property applies at once. The "already entered"
+  set behind identity-gated `enter` must also survive `reset()`, which `build` and
+  `replace_tree` call today.
 - **Two clocks.** The core has a virtual clock (`advance(dt)`), so golden traces assert
   values at fixed times (t = 0, 100 ms, 250 ms). A real run is driven by the renderer.
   `OffscreenBackend::set_timer` returns `TimerId(0)`, so `MotionDriver` takes an
@@ -532,7 +549,7 @@ duration over 500 ms, a loop, a 3D name).
 |---|---|
 | **xui** `xui-form` | The model additions of §4.2; tree ops (§6.2); **a `build` feature gate** (none exists: only `migrate`) so the web crate links the model without widgets. Developed through xui's established process, then pinned by LazyRAD |
 | **xui** `xui-script` | LazyRAD's deltas (P2b: `build_deferred`, `reload`, `state`/`set_state`, `StopHandle`, `is_host_handle`, `control_methods`, `to_arg_value`, `source_name`, top-level-variable semantics); a **renderer-neutral session split** (P2c): engine, AST, function table, run/load/close and callbacks apart from `Ui`/`LiveForm`; Rhai `debugging` behind a feature |
-| **xui** `xui-core` / `xui-canvas` | Per-node opacity and 2D transform in the compositing path (G29); a shared frame clock (G24); a reduced-motion setting (G30). Translate already works through node moves |
+| **xui** `xui-core` / `xui-canvas` | Per-node opacity and 2D transform in the compositing path (G29); a shared frame clock (G24); a reduced-motion setting (G30). Translate works on the backend through node moves, but `arrange` undoes it on any relayout until P2d-c |
 | `lazyrad-view` (new, LazyRAD) | Renderer-neutral and intended to be `wasm32`-clean (not yet compiled for it: no target is installed): `Environment`/size classes, responsive cascade, **the single home of the binding pass**, its own small `Tree`/`Node` model, `Patch` (including `Unset`, and `Animate` once the motion planner lands), a virtual clock, `Renderer` trait, golden patch traces. **No `xui-form` dependency** (it depends on `rhai` and `thiserror` only), so a mapper from the RON `Form` to its `Tree` is separate work (B5). Upstream to xui once stable |
 | `lazyrad-runtime` | Drops its `xui-form`/`xui-rhai` copies for xui's (P4); calls `lazyrad-view`'s binding pass; feeds `Resize` and reduced motion into `env`; hosts the xui renderer's `MotionDriver`. Gains a `wasm32` CI job (it already has the `desktop` split for musl), a `canvas-control` feature so the web build drops `xui-canvas`, and a web-safe `Platform` (today `Send + Sync`) |
 | `lazyrad-web` (new, `cdylib`) | wasm-bindgen entry, bundle loader, `DomRenderer`, `DomHost: FormHost`, the web `Platform`, CSS emitter |
@@ -675,7 +692,7 @@ map to CSS cleanly, and the timeline and state machine are a separate product.
 | Tier | Contents | Milestone | Notes |
 |---|---|---|---|
 | 0 Core | `Row`, `Column`, `Flex`, `Overlay`, `Scroll`, `Panel`, `Spacer`, `Separator`, `Label`, `Button`, `Edit`, `CheckBox`; **motion**: `Fade`, `Slide`, `PressScale` and `change` transitions on opacity, translate and scale | M8 | Both renderers; enough for forms and dashboards |
-| 1 Standard | `Wrap`, `Grid`, `ToggleButton`, `Slider`, `ProgressBar`, `ComboBox`, `RadioGroup`, `Image`, `Icon`; button variants (filled, tonal, outlined, text); **motion**: `Feather`, flat `Turnstile`, `ProgressDots`, `Continuum` within a form, FLIP layout transitions, named keyframes, motion tokens | M9 | Painted xui widgets on `look::*` tokens; CSS counterparts |
+| 1 Standard | `Wrap`, `Grid`, `ToggleButton`, `Slider`, `ProgressBar`, `ComboBox`, `RadioGroup`, `Image`, `Icon`; button variants (filled, tonal, outlined, text); **motion**: `Feather`, flat `Turnstile`, `Roll`, `Rotate`, `ProgressDots`, `Continuum` within a form, the non-finger `Pivot`/`Panorama` slide, FLIP layout transitions, named keyframes, motion tokens | M9 | Painted xui widgets on `look::*` tokens; CSS counterparts |
 | 2 Adaptive | `Scaffold` (app bar, body, drawer), `NavigationBar` (Compact) ↔ `NavigationRail` (Medium) ↔ `NavigationDrawer` (Expanded), list-detail pane, dialog, sheet, snackbar, `Tabs`; **motion**: route transitions (forward and back), `Continuum` across routes | M9–M10 | The adaptive trio is the best demonstration of "responsive"; route motion needs the router |
 | 3 Data | virtualized list, data table, tree, validation helpers | M10–M11 | `ListView`/`TreeView` exist on xui; the web needs virtualization |
 | 4 Rich | rich-text editor, charts, code editor, `Canvas` | M11 | May be xui-only on desktop at first; `Canvas` maps to `<canvas>` |
@@ -686,7 +703,7 @@ map to CSS cleanly, and the timeline and state machine are a separate product.
 
 Sizes are rough, for one developer, as in PLAN.md §11. Each milestone ends in a demo.
 
-### Phase P — Land and adopt xui's format 2 (≈ 8–10 weeks with two agents in tandem)
+### Phase P — Land and adopt xui's format 2 (≈ 10–12 weeks with two agents in tandem, P2d included)
 
 Mostly xui's own W3/W4, plus the deltas LazyRAD needs. It is worth doing on its own: it
 cuts LazyRAD's calculator form from 159 lines to about 40. **M8's model and view-core
@@ -702,7 +719,7 @@ desktop motion work (C4) also needs P2d.**
 | P2c | **Wasm factoring:** a `build` feature gate in `xui-form`; a renderer-neutral `ScriptForm` session split; Rhai `debugging` behind a feature | xui | 1–2 wk | P1 |
 | P2d-a | **Clock, easing and reduced motion:** a shared frame clock, the Metro easing set (exponential ease-out and friends) and `Backend::prefers_reduced_motion()` (G24, G30). The Win32 backend already calls `SystemParametersInfoW` (`xui-win32/src/sys/dwm.rs`); macOS and Linux are unverified | xui | days | P1 |
 | P2d-b | **Region repaint and per-node layers** (G29). Today the present path allocates a fresh surface per frame, composites every node, then clones the whole frame (`xui-canvas/src/backend/app/present.rs`); `invalidate_rect` ignores its rectangle and `Surface::paint_region` is used only in tests. Region repaint comes first; layers (paint a subtree, composite with opacity and transform) sit on it | xui | 2–3 wk (spike S4 sizes it) | P1 |
-| P2d-c | **A translate that survives relayout.** The backend moves a node by a parent-relative rectangle, but `arrange/mount.rs` re-places any node whose bounds differ from its layout rectangle, so any relayout (a text change, a resize, `set_visible`) snaps an animated node back. Needs an offset layer in `place()`, or the driver re-asserts offsets after each layout. Transforms are **visual only**: hit-testing stays on the layout rectangle, as the Toolkit does (`IsHitTestVisible = false` during a transition); hit-testing through a transform is M11 | xui | ≈ 1 wk | P2d-b |
+| P2d-c | **A translate that survives relayout.** The backend moves a node by a parent-relative rectangle, but `arrange/mount.rs` re-places any node whose bounds differ from its layout rectangle, so any relayout (a text change, a resize, `set_visible`) snaps an animated node back. Needs an offset layer in `place()`, or the driver re-asserts offsets after each layout. Transforms are **visual only**, and one input rule holds on both targets, as in the Toolkit (`IsHitTestVisible = false` during a transition): **a node takes no input while its `enter` or `exit` runs** (`pointer-events: none` on the web); otherwise hit-testing stays on the layout rectangle. Hit-testing through a transform is M11 | xui | ≈ 1 wk | P2d-b |
 | P3 | **Tree API:** path-addressed `NodePath`; `insert_at`, `move_to`, `remove`, `rename`, `wrap`, `unwrap`, each returning its inverse (§6.2) | xui | 1–2 wk | P1 |
 | P4 | **Adopt.** One xui rev (W5.5); delete LazyRAD's `xui-form`/`xui-rhai` copies; port the `FormDoc` sites (designer onto the P3 tree API, runtime, IDE, project); `xui-form migrate` the samples and templates; keep hot reload, rename-handlers and the debugger working | LazyRAD | 3–4 wk | P2, P2b, P3 |
 | P5 | **Docs:** PLAN.md §1 (TOML), §1.1 (`GroupBox`), §2, README, samples, tutorial | LazyRAD | days | P4 |
@@ -720,10 +737,10 @@ Cheap experiments that can change the plan. Each has a pass condition.
 | S1 | `cargo check --target wasm32-unknown-unknown` for `xui-core`, `xui-form` (a scratch `cfg` gate of its builder stands in for P2c), `rhai =1.26.1`, plus a "hello wasm" running a Rhai script and measuring size | Compiles; gzipped wasm within the §5.2 budget. Expected runtime panics (they compile, then panic on `wasm32-unknown-unknown`): `SystemTime::now` (`stdlib.rs:384`), `time::OffsetDateTime::now_*` (`stdlib.rs:430-436`), `Instant::now` in the `Canvas` control |
 | S2 | Hand-write the §4.2 form as HTML and CSS; compare to `xui-form render --report` at 360, 700 and 1000 px, with **text-bearing** fixtures (wrapping text in a `Row`, a `fill` card, a `Wrap`) and the Appendix A divergences | The divergences are confirmed or refuted; no semantic that needs a hack; fixed-size rectangles within ±1 px |
 | S3 | **Remount over shared widgets** (§3.4): on a built RON form, change a `Row` to a `Column` and a `gap` through a level re-mount that reuses the widgets, while an `Edit` has focus, caret and text and a scroll view is scrolled | Text, caret, selection, focus and scroll offset survive; no widget is recreated; cost measured on the calculator and a 200-node form. If it fails, G27 (live layout cells) moves into M8 |
-| S4 | **Motion on the xui canvas** (§4.8). First, **build region repaint** in `composite`/`redraw` (nothing uses `paint_region` outside tests). Then fade and translate a subtree of about 30 widgets (a card with text, an `Edit` and a button) at 60 frames per second, with per-node opacity done by painting the subtree into a layer and compositing it. Baseline to beat: a replica of today's present path (allocate, fill, clone, convert) cost about 8 ms per 1080p frame **before any widget painted** (an indicative measurement, release build) | Frame time under 16 ms on a mid laptop at 1080p with the animated region at 400 × 300, **region repaint included**; the cost on the LazyOS software path measured. Hit-testing through a transform is *not* a criterion: transforms are visual only (P2d-c). If it fails, the presets degrade on xui to translate-only or instant, and M8 says so |
+| S4 | **Motion on the xui canvas** (§4.8). First, a **throwaway region repaint** in `composite`/`redraw` on a spike branch (nothing uses `paint_region` outside tests; the product version is half of P2d-b, 2–3 weeks, and is *not* part of this spike). Then fade and translate a subtree of about 30 widgets (a card with text, an `Edit` and a button) at 60 frames per second, with per-node opacity done by painting the subtree into a layer and compositing it. Baseline to beat: a replica of today's present path (allocate, fill, clone, convert) cost about 8 ms per 1080p frame **before any widget painted** (an indicative measurement, release build) | Frame time under 16 ms on a mid laptop at 1080p with the animated region at 400 × 300 on the throwaway region path; the layer composite cost measured separately; the cost on the LazyOS software path measured. Hit-testing through a transform is *not* a criterion: transforms are visual only (P2d-c). If it fails, the presets degrade on xui to translate-only or instant, and M8 says so |
 | S5 | Prototype `bind`, `responsive` and `motion` as common fields in the `node!`/`widget!` macros (including the generated all-optional patch type and the mechanics in §4.2) | Round-trips byte-stable; `Form::validate` reports a bad key; the catalog JSON lists all three; a layout node can be addressed |
 
-### M8 — Core: the small proof (≈ 8–10 weeks wall-clock, two agents in tandem)
+### M8 — Core: the small proof (≈ 10–12 weeks wall-clock, two agents in tandem, after P1 to P2d)
 
 Scope: tier 0, bindings, responsive overrides, **the motion core (§4.8: `Fade`, `Slide`,
 `PressScale`, `change` transitions, reduced motion)**, the xui and DOM renderers, web
@@ -738,7 +755,7 @@ all at once: A and B first (they need only P1–P2c), then C, D and E.
 | Lane | Work packages (issue-sized) |
 |---|---|
 | **A Model** (xui) | A1 `bind` field, validation and expression compile check. A2 `responsive` patches and size-class cascade in the schema. A3 `Flex`, `Scroll`, `Overlay`, `Spacer` kinds with factories. A4 `margin` (wrapper); `min_*` deferred (G21). A5 CLI: `render --size`, `--report json` (node path, control name, warnings), `label_for` and `accessible_name`. A6 the `motion` field, its presets and validation (animating a layout property, a loop, a 3D name), **and the six common runtime properties** `opacity`, `translate_x/y`, `scale_x/y`, `rotate` (they must exist for `change`, `bind` and `animate()` to write; `motion` is accepted on widget nodes only) |
-| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade. B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, its own `Tree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: B1 to B3 are in review as [#119](https://github.com/va1erian/lazyrad/pull/119) (fixes in progress); what it found is in §11.1.* **B5 the mapper** from the RON `Form` (its `bind`, `responsive` and `motion` fields) to `lazyrad-view`'s `Tree`; it needs A1, A2 and A6 and nothing in #119 owns it. **B4 the motion planner:** `Patch::Animate` with `from: Current`, a `finished` callback, presets expanded into animations, the `enter`/`exit` lifecycle (an exit holds the node until it ends; `enter` is gated on node identity so a rebuild does not replay it), the virtual clock, reduced motion |
+| **B View core** (`lazyrad-view`) | B1 `Environment` and cascade (and `reduce_motion`, which changes #119's `to_map`: it pins five keys). B2 binding evaluator and `Patch` diff, skip-if-equal. B3 `Renderer` trait, its own `Tree`, golden patch traces. **B3 and A1 define the contracts the other lanes need first.** *Status: B1 to B3 are in review as [#119](https://github.com/va1erian/lazyrad/pull/119) (fixes in progress); what it found is in §11.1.* **B5 the mapper** from the RON `Form` (its `bind`, `responsive` and `motion` fields) to `lazyrad-view`'s `Tree`; it needs A1, A2 and A6 and nothing in #119 owns it. **B4 the motion planner:** `Patch::Animate` with `from: Current`, a `finished` callback, presets expanded into animations, the `enter`/`exit` lifecycle (an exit holds the node until it ends; `enter` is gated on node identity so a rebuild does not replay it), the virtual clock, reduced motion |
 | **C Desktop** | C1 builder: new kinds and layout fields → `arrange`, layout patches by re-mount (S3). C2 runtime: calls B2 after each turn, `Resize` → `env`, shared `state` handle. C3 lint: bound-property writes, unknown state keys, binding compile errors (`check_project`). C4 the xui renderer's `MotionDriver`, driven by an injected `tick(now)` (`OffscreenBackend::set_timer` returns `TimerId(0)`): opacity and transform through G29, translate through P2d-c's offset layer, reduced motion from the OS. C5 `animate()` in the Rhai bridge: the same `Animate` patch, with a lint when the property is also bound |
 | **D Web** | D1 `lazyrad-web` skeleton, bundle loader, web `Platform`. D2 `DomRenderer` and `DomHost`, event delegation. D3 CSS emitter with media queries, driven by the catalog. D4 dev server and *Run in browser*. D5 *Make Web App* and the stub CI job. D6 `.lrp` `targets` and `[web]` (`lazyrad-project`). D7 motion in the DOM renderer: `Animate` patches to the Web Animations API, presets to CSS, `prefers-reduced-motion` into `env` (D3's emitter gains the preset keyframes) |
 | **E Designer** | E1 viewport bar and size-class badge. E2 drop indicators and outline drag. E3 property grid: layout fields per parent, sizing control, responsive indicator, binding field. E4 layout-warning badges (from A5's structured report). E5 quick actions (wrap, unwrap, move). E6 motion inspector, play and scrub, reduced-motion toggle and motion lints |
@@ -777,7 +794,8 @@ Tier 1 components and the adaptive scaffolds; `props`, `Component`, `Repeat`, `S
 design tokens (colour roles, type scale, shape, spacing, density) with a theme editor,
 mapped to xui's `Theme` and CSS custom properties; extract-component, per-breakpoint
 editing, sample data for previews; xui's *Convert to flow layout* assistant. **Motion:**
-`Feather`, flat `Turnstile`, `ProgressDots`, `Continuum` within a form, **FLIP layout
+`Feather`, flat `Turnstile`, `Roll`, `Rotate`, `ProgressDots`, `Continuum` within a form, the
+non-finger `Pivot`/`Panorama` slide, **FLIP layout
 transitions** (a responsive reflow, a reorder or an insert animates as a transform),
 named keyframes (`card.play("pulse")`), motion tokens in the theme editor, and the
 designer's scrubber. Evaluate `xui-blitz` as an in-IDE *web preview* tab and as a layout
@@ -999,7 +1017,7 @@ columns are for orientation only and were not verified.
 |---|---|---|---|---|---|---|
 | `SlideTransition` | `Slide(from, distance)` | translate (about 200) plus opacity, ease-out exponent 6 | kept as is | `transform: translate()` + `opacity` | `slideInVertically` + `fadeIn` | `SlideTransition` + `FadeTransition` |
 | (the opacity half of Slide and Rotate) | `Fade` | opacity 0 ↔ 1 | kept | `opacity` | `fadeIn` | `FadeTransition` |
-| `RollTransition`, `RotateTransition` | `Roll`, `Rotate` | `RotationZ` about the centre, with a fade (2D) | kept as is | `rotate` + `opacity` | `Modifier.rotate` | `RotationTransition` |
+| `RollTransition`, `RotateTransition` | `Roll`, `Rotate` | `RotationZ` about the centre (2D); `Rotate` fades, `Roll` does not | kept as is | `rotate` + `opacity` | `Modifier.rotate` | `RotationTransition` |
 | `TurnstileTransition` | `Turnstile` (flat) | `RotationY` -80° to 0 about the left edge, 350 ms in and 250 ms out; **no slide and no fade** | **ours:** `scale_x` from about 0.17 to 1 at the left edge (a 2D squash). `Slide` is the alternative (D11) | `transform: scaleX()` with `transform-origin: left` | `Modifier.graphicsLayer { scaleX }` | `ScaleTransition` with `alignment` |
 | `TurnstileFeatherEffect` | `Feather(stagger)` | per-item `RotationY` about `CenterOfRotationX = -0.2`, 350 ms, staggered 40 ms in and 50 ms out | the **stagger** kept; the per-item motion is the flat reading | `animation-delay: calc(var(--i) * 50ms)` with `fill-mode: backwards` | `AnimatedVisibility` with a delay per item | staggered `AnimatedList` |
 | `TiltEffect` | `PressScale` | tilt of up to 0.3 rad plus up to 25 px of Z depression; release over 100 ms after a 200 ms delay | **ours:** scale to about 0.96; release timing kept | `:active { transform: scale(.96) }` | `Modifier.scale` on press | `ScaleTransition` |
@@ -1009,7 +1027,7 @@ columns are for orientation only and were not verified.
 | `SwivelTransition`, tile flip | *excluded* | `RotationX` (3D) | all of it | n/a | n/a | n/a |
 
 **Timing.** The Toolkit uses `ExponentialEase` (ease-out, exponent 6) throughout, with
-durations of 250 to 350 ms for turnstile, 500 ms for slide left and right and 600 ms for
+durations of 250 to 350 ms for turnstile, 500 ms in and 300 ms out for slide left and right and 600 ms for
 roll. The tokens `motion.decelerate`, `motion.accelerate` and `motion.standard` carry the
 curves; `motion.fast`, `motion.normal` and `motion.slow` carry the durations and
 `motion.stagger` the 40 to 50 ms step. An exponential ease-out is not a cubic-bezier, so
