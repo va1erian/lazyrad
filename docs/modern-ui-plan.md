@@ -369,12 +369,13 @@ Container fields: `gap`, `padding`, `align_items` (default for children, across)
   sentence deprecates.
 - **What a binding can see (decided, 13 October 2026).** At most **512** array
   elements and **512** map entries per value, counted the way Rhai counts (nested
-  entries included), 32 KiB of text and 32 768 operations per binding. A larger value
+  entries included), 32 KiB of text per value (a longer text can be bound but not used)
+  and 32 768 operations per binding. A larger value
   stays in `state`, but a binding sees a small **poison value** in its place: the key
-  is still present, so `contains`, `in`, `keys`, `len` and `==` against a literal map
-  give the true answer, and any *use* of the value fails with a diagnostic that names
+  is still present, so `contains`, `in`, `keys` and `len`, and `==` against a map with different keys,
+  give the true answer (comparing the hidden value itself fails), and any *use* of the value fails with a diagnostic that names
   the entry. Keep counts and summaries in `state`; M9's `Repeat` iterates a list
-  host-side, so a long list never has to pass through a binding. The numbers live once,
+  host-side, so a long list never has to pass through a binding. The crate states the binding limits once,
   in `crates/lazyrad-view/src/limits.rs`. The owner chose 512 over 1024 after seeing
   a transient peak of 545 MiB for one pathological `map`; at 512 it is about 154 MiB.
 - **Two-way input** stays explicit (`fn name_edit_change(text) { state.name = text; }`):
@@ -953,16 +954,16 @@ Later rounds found five more, all fixed:
 
 | Finding | Outcome |
 |---|---|
-| The visible budget and Rhai's map limit disagreed (a list of 5-field records broke at 52 rows with a generic error) | One set of limits, counted as Rhai counts, stated once in `limits.rs`; a test fails if the docs repeat a different number |
+| The visible budget and Rhai's map limit disagreed (a list of 5-field records broke at 52 rows with a generic error) | One set of limits, counted as Rhai counts, stated once in `limits.rs`; a test fails if another doc states a limit |
 | A binding could mutate host state through a shared `Dynamic` (`state.items.push(9)` grew a host array) | The view and the retry copy are deep and read-only; tests assert the host value is unchanged on both paths |
 | A hidden entry read as *absent*, so `contains("items")` was false and a pruned map compared equal to a truncated literal: a silent wrong branch | The key stays present with a poison value that fails on any use; 47 operations are tested |
-| The closure retry path cloned the whole state per call: about 18× slower than the fast path | `into_read_only().into_shared()`: 2.2 ms down to 0.21 ms for 500 ints |
+| The closure retry path handed closures a plain copy of the state and ran about 10× slower than the fast path at 500 ints (18× at 1000) | `into_read_only().into_shared()`: 2.2 ms down to 0.21 ms for 500 ints |
 | Limits were repeated in five places and had drifted from the code | `limits.rs` is the single source; `tests/limits_docs.rs` checks the docs against it |
 
 Deferred, with the owner's agreement: the peak memory of one pathological `map`/`zip`
-(about 154 MiB at 512; ceiling 192 MiB). A cheaper guard (shadowing `map` and `zip`
-with `register_raw_fn`, which handles one-parameter closures only) is recorded in the
-crate README. Minors deferred: the `state_copies` test counts resolver calls rather
+(about 154 MiB at 512; ceiling 192 MiB). A cheaper guard (`register_raw_fn` versions of `map` and `zip` that size-check each
+result; it means owning those methods' semantics, index forms and curried function
+pointers, which is why it is deferred) is recorded in the crate README. Minors deferred: the `state_copies` test counts resolver calls rather
 than guarding the speed-up, and the docs test misses small unit-less numbers.
 
 **P1 review (xui [#296](https://github.com/va1erian/xui/pull/296), the landing PR).**
