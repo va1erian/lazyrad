@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::motion::Motion;
 use crate::size_class::SizeClass;
 use crate::value::{Value, ValueKind};
 
@@ -48,6 +49,9 @@ pub struct Node {
     /// Size class to a partial patch of property values, cascaded mobile-first
     /// (see [`Responsive`](crate::Responsive)).
     pub responsive: BTreeMap<SizeClass, BTreeMap<String, Value>>,
+    /// What the node does when it appears, leaves, changes and is pressed. The
+    /// default is empty: the node does not animate.
+    pub motion: Motion,
     /// Child nodes, in order.
     pub children: Vec<Node>,
 }
@@ -74,6 +78,7 @@ impl Node {
             props: BTreeMap::new(),
             bind: BTreeMap::new(),
             responsive: BTreeMap::new(),
+            motion: Motion::default(),
             children: Vec::new(),
         }
     }
@@ -104,6 +109,13 @@ impl Node {
             .entry(class)
             .or_default()
             .insert(property.into(), value.into());
+        self
+    }
+
+    /// Sets the node's [`Motion`].
+    #[must_use]
+    pub fn with_motion(mut self, motion: Motion) -> Self {
+        self.motion = motion;
         self
     }
 

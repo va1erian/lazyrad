@@ -3,18 +3,24 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::animation::{AnimFrom, Animation};
+use crate::easing::Easing;
 use crate::value::Value;
 
 /// One change to the rendered tree.
 ///
-/// A [`Session`](crate::Session) produces only [`Create`](Self::Create),
-/// [`Set`](Self::Set) and [`Unset`](Self::Unset). [`Remove`](Self::Remove) and
-/// [`Move`](Self::Move) are part of the contract so a renderer can be written
-/// against the final vocabulary, but nothing produces them yet: they arrive
-/// with conditionals, repeaters and components.
+/// A [`Session`](crate::Session) produces [`Create`](Self::Create),
+/// [`Set`](Self::Set), [`Unset`](Self::Unset), [`Animate`](Self::Animate) and,
+/// when a node leaves the tree, [`Remove`](Self::Remove).
+/// [`Move`](Self::Move) is part of the contract so a renderer can be written
+/// against the final vocabulary, but nothing produces it yet: it arrives with
+/// repeaters and components.
 ///
 /// Nodes are addressed by their unique name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality is exact, except that a NaN equals a NaN (like
+/// [`Value`](crate::Value)), so a patch holding one is comparable.
+#[derive(Clone, Debug)]
 pub enum Patch {
     /// A node appears, with the properties it starts with.
     ///
@@ -53,7 +59,51 @@ pub enum Patch {
         /// The property.
         property: String,
     },
-    /// A node and its subtree disappear. **Reserved**: not produced yet.
+    /// A numeric property moves to a value over time instead of jumping.
+    ///
+    /// Only the [animatable](crate::motion::ANIMATABLE) properties are
+    /// animated. The planner emits this instead of a `Set` for a property that
+    /// has a `change` transition, and for the presets of `enter`, `exit` and
+    /// `press` (see [`motion`](crate::motion)).
+    ///
+    /// What a renderer does with it:
+    ///
+    /// * Hold `from` for `delay_ms`, then move to `to` over `duration_ms`
+    ///   shaped by `easing`, and be at exactly `to` afterwards. The same curves
+    ///   are available as [`Animation`] and [`Easing::ease`].
+    /// * Start `from: Current` from the value the widget shows now, and
+    ///   replace any animation already running on the same node and property.
+    /// * Apply `to` at once when it cannot animate that property.
+    /// * Report each animation that ran **to its end** by calling
+    ///   [`Session::finished`](crate::Session::finished) with the node and
+    ///   property: it is how an `exit` learns it may remove its node. A
+    ///   renderer that applied `to` at once reports it too, and an animation
+    ///   that was replaced or cancelled is not reported.
+    ///
+    /// A batch that creates a node and animates it is applied before the next
+    /// frame is drawn, so a node that enters is never seen at its rest value
+    /// first.
+    Animate {
+        /// The node's name.
+        node: String,
+        /// The animated property, one of [`ANIMATABLE`](crate::motion::ANIMATABLE).
+        property: String,
+        /// Where the animation starts.
+        from: AnimFrom,
+        /// The value it ends at.
+        to: f64,
+        /// How long the move takes, in milliseconds.
+        duration_ms: f64,
+        /// How long it holds `from` before it starts, in milliseconds.
+        delay_ms: f64,
+        /// The timing curve.
+        easing: Easing,
+    },
+    /// A node and its subtree disappear.
+    ///
+    /// Produced when a node leaves the tree (see
+    /// [`Session::reconcile`](crate::Session::reconcile)), straight away or,
+    /// for a node with an `exit` preset, once the exit has finished.
     Remove {
         /// The node's name.
         node: String,
@@ -78,9 +128,42 @@ impl Patch {
             Self::Create { node, .. }
             | Self::Set { node, .. }
             | Self::Unset { node, .. }
+            | Self::Animate { node, .. }
             | Self::Remove { node }
             | Self::Move { node, .. } => node,
         }
+    }
+}
+
+impl Patch {
+    /// The [`Animation`] an [`Animate`](Self::Animate) patch describes, for a
+    /// renderer or a test that samples it. `current` is the value the widget
+    /// shows now, which a `from: Current` starts from; without one it starts
+    /// from `to` (there is nothing to animate). `None` for any other patch.
+    #[must_use]
+    pub fn animation(&self, current: Option<f64>) -> Option<Animation> {
+        let Self::Animate {
+            from,
+            to,
+            duration_ms,
+            delay_ms,
+            easing,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let from = match from {
+            AnimFrom::Value(value) => *value,
+            AnimFrom::Current => current.unwrap_or(*to),
+        };
+        Some(Animation {
+            from,
+            to: *to,
+            duration_ms: *duration_ms,
+            delay_ms: *delay_ms,
+            easing: *easing,
+        })
     }
 }
 
@@ -91,12 +174,15 @@ impl Patch {
 /// create <node> <kind> parent=<parent|-> index=<n> {<prop>=<value>, ...}
 /// set <node>.<property> = <value>
 /// unset <node>.<property>
+/// animate <node>.<property> from=<current|n> to=<n> duration=<ms> delay=<ms> easing=<curve>
 /// remove <node>
 /// move <node> parent=<parent> index=<n>
 /// ```
 ///
 /// Properties of a `create` are sorted by name; values are written as
-/// [`Value`]'s `Display` does.
+/// [`Value`]'s `Display` does. The numbers of an `animate` are written as Rust
+/// floats (`40.0`, `0.5`) and the curve as [`Easing`]'s `Display` does
+/// (`expo_out(6.0)`).
 impl fmt::Display for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -123,6 +209,25 @@ impl fmt::Display for Patch {
                 value,
             } => write!(f, "set {node}.{property} = {value}"),
             Self::Unset { node, property } => write!(f, "unset {node}.{property}"),
+            Self::Animate {
+                node,
+                property,
+                from,
+                to,
+                duration_ms,
+                delay_ms,
+                easing,
+            } => {
+                write!(f, "animate {node}.{property} from=")?;
+                match from {
+                    AnimFrom::Value(value) => write!(f, "{value:?}")?,
+                    AnimFrom::Current => f.write_str("current")?,
+                }
+                write!(
+                    f,
+                    " to={to:?} duration={duration_ms:?} delay={delay_ms:?} easing={easing}"
+                )
+            }
             Self::Remove { node } => write!(f, "remove {node}"),
             Self::Move {
                 node,

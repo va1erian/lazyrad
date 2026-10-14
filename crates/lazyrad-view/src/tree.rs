@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::motion::MotionProblem;
 use crate::node::{MAX_TREE_DEPTH, Node};
 use crate::value::{Value, ValueKind};
 
@@ -44,6 +45,46 @@ pub enum TreeError {
         /// The limit, [`MAX_TREE_DEPTH`].
         max: usize,
     },
+    /// A `motion.change` entry names a property that is not animatable.
+    ///
+    /// Only `opacity`, the translations, the scales and `rotate` animate
+    /// (see [`ANIMATABLE`](crate::motion::ANIMATABLE)); a layout property is
+    /// the likeliest mistake, and the message says why it is refused.
+    #[error(
+        "`{node}` has a `change` transition for `{property}`, which cannot be animated: {}",
+        crate::motion::why_not_animatable(*.layout)
+    )]
+    NotAnimatable {
+        /// The node.
+        node: String,
+        /// The property named in `motion.change`.
+        property: String,
+        /// Whether it is a layout property (`width`, `gap`, `fill`, ...).
+        layout: bool,
+    },
+    /// A preset is in a slot it does not belong to: `PressScale` is only a
+    /// `press` preset, and a `press` preset must be `PressScale`.
+    #[error("`{node}.motion.{slot}` is `{preset}`, which is not a {slot} preset")]
+    WrongPreset {
+        /// The node.
+        node: String,
+        /// `enter`, `exit` or `press`.
+        slot: &'static str,
+        /// The preset's name.
+        preset: &'static str,
+    },
+    /// A number in a node's motion cannot be used: a NaN or negative duration
+    /// or distance, an infinite distance, or a duration over the limit.
+    #[error("`{node}.motion.{field}` {problem}")]
+    BadMotionValue {
+        /// The node.
+        node: String,
+        /// The field, such as `enter.distance` or
+        /// `change.opacity.duration_ms`.
+        field: String,
+        /// What is wrong with it.
+        problem: MotionProblem,
+    },
 }
 
 /// A node with its position, as [`Tree::placements`] lists them.
@@ -56,8 +97,8 @@ pub(crate) struct Placement<'a> {
     pub index: usize,
 }
 
-/// A validated view tree: node names are unique and every property keeps one
-/// value kind.
+/// A validated view tree: node names are unique, every property keeps one
+/// value kind and every node's motion is usable.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tree {
     root: Node,
@@ -70,8 +111,10 @@ impl Tree {
     /// # Errors
     ///
     /// [`TreeError::EmptyName`], [`TreeError::DuplicateName`],
-    /// [`TreeError::MixedKinds`] or [`TreeError::TooDeep`], for the first
-    /// offending node in pre-order.
+    /// [`TreeError::MixedKinds`], [`TreeError::TooDeep`] or, for a node's
+    /// [`motion`](Node::motion), [`TreeError::NotAnimatable`],
+    /// [`TreeError::WrongPreset`] or [`TreeError::BadMotionValue`], for the
+    /// first offending node in pre-order.
     pub fn new(root: Node) -> Result<Self, TreeError> {
         let mut names = HashSet::new();
         let mut stack = vec![(&root, 1_usize)];
@@ -94,6 +137,7 @@ impl Tree {
                 });
             }
             check_kinds(node)?;
+            node.motion.validate(&node.name)?;
             stack.extend(node.children.iter().rev().map(|child| (child, depth + 1)));
         }
         Ok(Self { root, names })
@@ -133,6 +177,50 @@ impl Tree {
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.names.contains(name)
+    }
+
+    /// Removes the node called `name` and its subtree, and returns their names
+    /// in pre-order. The root, and a name that is not in the tree, are not
+    /// removed: the result is empty.
+    pub(crate) fn remove_subtree(&mut self, name: &str) -> Vec<String> {
+        if name == self.root.name || !self.names.contains(name) {
+            return Vec::new();
+        }
+        // The child indexes from the root down to the node.
+        let mut found: Option<Vec<usize>> = None;
+        let mut stack: Vec<(&Node, Vec<usize>)> = vec![(&self.root, Vec::new())];
+        while let Some((node, path)) = stack.pop() {
+            if node.name == name {
+                found = Some(path);
+                break;
+            }
+            for (index, child) in node.children.iter().enumerate() {
+                let mut child_path = path.clone();
+                child_path.push(index);
+                stack.push((child, child_path));
+            }
+        }
+        let Some(path) = found else {
+            return Vec::new();
+        };
+        let Some((last, parents)) = path.split_last() else {
+            return Vec::new();
+        };
+        let mut parent = &mut self.root;
+        for index in parents {
+            parent = &mut parent.children[*index];
+        }
+        let removed = parent.children.remove(*last);
+        let mut names = Vec::new();
+        let mut pending = vec![&removed];
+        while let Some(node) = pending.pop() {
+            names.push(node.name.clone());
+            pending.extend(node.children.iter().rev());
+        }
+        for removed_name in &names {
+            self.names.remove(removed_name);
+        }
+        names
     }
 
     /// Every node in pre-order with its parent and sibling index. The position

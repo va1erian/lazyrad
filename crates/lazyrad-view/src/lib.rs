@@ -7,7 +7,8 @@
 //! from per-[`SizeClass`] responsive patches and from Rhai expressions over the
 //! form's `state` and the [`Environment`]. A [`Session`] evaluates all three
 //! and turns every change into [`Patch`]es that any [`Renderer`] (a widget
-//! toolkit, the DOM, a test recorder) applies.
+//! toolkit, the DOM, a test recorder) applies. A node's [`Motion`] makes some
+//! of those changes [`Patch::Animate`]s, which the renderer runs.
 //!
 //! ```text
 //!   Tree (nodes, bind, responsive)      state: Map     Environment
@@ -37,6 +38,10 @@
 //!   (see [`Responsive`]).
 //! * **Typed values, no coercion.** `1` and `1.0` are different values, and a
 //!   property keeps one kind.
+//! * **Motion is data, and the core owns no clock.** What animates is decided
+//!   from the node's [`Motion`] (see [`motion`]); the renderer owns real time
+//!   and reports `finished`, and tests drive a virtual clock
+//!   ([`SamplingRenderer`]). Reduced motion is part of the contract.
 //!
 //! # Example
 //!
@@ -72,17 +77,23 @@
 //! );
 //! ```
 
+mod animation;
 pub mod bindings;
 mod cache;
 mod dependencies;
+mod easing;
 mod engine;
 mod environment;
 mod error;
 pub mod limits;
+pub mod motion;
 mod node;
 mod patch;
+mod patch_eq;
+mod planner;
 mod poison;
 mod renderer;
+mod sampling;
 mod scope;
 mod session;
 mod size_class;
@@ -92,13 +103,17 @@ mod turn;
 mod value;
 mod visible;
 
+pub use animation::{AnimFrom, Animation, AnimationSampler, Frame, Sample, clamp_ms};
 pub use bindings::{BindingScope, BindingStats, Bindings, Dependencies, check_expression};
+pub use easing::{DEFAULT_EXPONENT, Easing};
 pub use environment::Environment;
 pub use error::{BindError, SourcePosition};
+pub use motion::{Edge, Motion, MotionProblem, Preset, Transition};
 pub use node::{MAX_TREE_DEPTH, Node};
 pub use patch::{Patch, trace};
 pub use renderer::{RecordingRenderer, Renderer};
-pub use session::Session;
+pub use sampling::SamplingRenderer;
+pub use session::{MotionStats, Session};
 pub use size_class::{Responsive, SizeClass};
 pub use tree::{Tree, TreeError};
 pub use turn::{BindDiagnostic, TurnResult};

@@ -42,6 +42,21 @@
 //! A value that does not fit is hidden from bindings (see
 //! [`crate::bindings`]), and the diagnostic names it.
 //!
+//! # Motion
+//!
+//! Animations are not bindings: they cost nothing in the operation budget, and
+//! none of the numbers above bounds them. They have two limits of their own.
+//!
+//! | Constant | Value | What it bounds |
+//! |---|---|---|
+//! | [`MAX_RUNNING_ANIMATIONS`] | 256 | animations in flight in one session, one per node and property |
+//! | [`MAX_ANIMATION_MS`] | 5000 | the duration, and the delay, of one animation, in milliseconds |
+//!
+//! Past the first, an animation is not started: the change is applied at once
+//! and counted in [`MotionStats::degraded`](crate::MotionStats::degraded). Past
+//! the second, a duration or delay is cut to it (and a motion that declares
+//! more is a [`TreeError`](crate::TreeError)).
+//!
 //! # Native stack
 //!
 //! The worst expressions the nesting limits allow need about 350 KiB of native
@@ -132,3 +147,35 @@ pub const MAX_MAP_SIZE: usize = 512;
 /// that size-check each result as it is produced; it is deferred (see the
 /// README).
 pub const PEAK_MEMORY_CEILING: u64 = 192 * 1024 * 1024;
+
+/// The most animations a session lets run at once, counted per node and
+/// property (a `Slide` is two: its opacity and its translation).
+///
+/// **Why this number.** The cost of an animation is a tween per frame and, on
+/// the software compositor, a repaint of the node's region, so the cost is in
+/// how many nodes move together, not in the tree's size. A preset is at most
+/// two animations per node, so the limit is 128 nodes entering at once, which
+/// is more than a phone screen of rows and than a desktop form of controls. A
+/// page that animates more than that in one frame is repainting most of the
+/// window anyway, and an instant change is better than a janky one.
+///
+/// **What happens past it.** The session does not start the animation: the
+/// change is applied at once (an `enter` simply shows the node, an `exit`
+/// removes it, a `change` is a `Set`), nothing panics and the next animation
+/// that finds room runs normally. The count is
+/// [`MotionStats::degraded`](crate::MotionStats::degraded).
+///
+/// An animation counts from the patch until the renderer reports
+/// [`Session::finished`](crate::Session::finished) for it, or a newer patch
+/// replaces it.
+pub const MAX_RUNNING_ANIMATIONS: usize = 256;
+
+/// The longest duration, and the longest delay, of one animation, in
+/// milliseconds.
+///
+/// Nothing in a user interface should move for five seconds, and the limit
+/// makes sure an `exit` cannot hold its node for ever: an infinite or enormous
+/// duration would. A longer value in a [`Motion`](crate::motion::Motion) is a
+/// [`TreeError`](crate::TreeError); one that reaches the sampler or the
+/// planner another way is cut to this.
+pub const MAX_ANIMATION_MS: f64 = 5_000.0;
