@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::animation::{AnimFrom, AnimationId, clamp_ms};
 use crate::easing::Easing;
-use crate::limits::{ANIMATION_GRACE_MS, MAX_RUNNING_ANIMATIONS};
+use crate::limits::{ANIMATION_GRACE_MS, MAX_ANIMATION_MS, MAX_RUNNING_ANIMATIONS};
 use crate::patch::Patch;
 use crate::renderer::Renderer;
 use crate::value::Value;
@@ -204,9 +204,15 @@ impl Planner {
 
     /// Moves the session clock forward (a NaN, negative or infinite step is
     /// zero: the clock never goes backwards and never reaches infinity).
+    ///
+    /// A step is cut to the longest an animation can be from its start to its
+    /// overdue point (the longest delay and duration plus the grace): a longer
+    /// one completes everything anyway, and a huge finite one (`f64::MAX`)
+    /// would make `now + delay + duration + grace` equal `now`, so that every
+    /// animation planned afterwards was overdue at once.
     pub fn tick(&mut self, dt_ms: f64) {
         if dt_ms.is_finite() && dt_ms > 0.0 {
-            self.now_ms += dt_ms;
+            self.now_ms += dt_ms.min(2.0 * MAX_ANIMATION_MS + ANIMATION_GRACE_MS);
         }
     }
 

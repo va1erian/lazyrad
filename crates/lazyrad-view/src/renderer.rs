@@ -21,6 +21,12 @@ pub trait Renderer {
     /// applies `to` at once and reports it finished. The host should also
     /// tick [`Session::advance`](crate::Session::advance) from its frame
     /// callback, so a report that is missed does not hold a node for ever.
+    ///
+    /// Animation ids are unique **per session**, not per process. A host that
+    /// swaps or re-creates the [`Session`](crate::Session) over the same
+    /// renderer must discard the renderer's pending reports from the old
+    /// session: a stale id of the old session can equal one of the new
+    /// session's (its first animation is `#1`), and would be taken for it.
     fn apply(&mut self, patches: &[Patch]);
 
     /// The value `property` of `node` has in the rendered widget right now, if

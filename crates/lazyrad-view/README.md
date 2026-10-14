@@ -81,6 +81,14 @@ the last applied value, the new one and the node's motion, so it decides
   renderer that misses a report (the default `RecordingRenderer` never reports)
   holds its exiting nodes, and its slots of the animation limit, for the rest
   of the session. With it, nothing is held longer than the exit plus the grace.
+  The grace is a crate constant, **not a budget for slow renderers**: a host
+  that runs its renderer slower than real time (devtools slow motion, a paused
+  tab) passes `dt_ms` scaled by the playback rate, so the session's clock keeps
+  the renderer's pace.
+- **Ids are per session, not per process.** A host that swaps or re-creates a
+  `Session` over the same renderer discards the renderer's pending `finished`
+  reports from the old session: a stale id can equal one the new session hands
+  out (its first animation is `#1`).
 - `Session::reset_motion()` is the hard reset for a host that knows its
   renderer lost track: every running animation is dropped and put at rest,
   every held node leaves as if its exit had ended.

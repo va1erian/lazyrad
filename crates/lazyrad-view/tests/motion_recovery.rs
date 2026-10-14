@@ -144,6 +144,32 @@ fn the_tick_ignores_steps_that_are_not_time() {
     assert_eq!(trace(&session.advance(1.0e9)), "remove n0\n");
 }
 
+/// A step so large that `now + delay + duration + grace` would equal `now` must
+/// not make every later animation overdue at once.
+#[test]
+fn a_degenerate_step_does_not_poison_the_clock() {
+    let mut session = Session::new(tree(panels(1)), Bindings::new());
+    session.build(&dim(0.0), &phone());
+    for step in [f64::MAX, f64::MAX, 1.0e300, 1.0e18] {
+        assert!(session.advance(step).is_empty(), "{step}");
+    }
+    // An animation planned afterwards runs for its own time (a hundred
+    // milliseconds, then the grace), not for none.
+    let turn = session.update(&dim(1.0), &phone());
+    assert_eq!(count(&turn.patches, is_animate), 1);
+    assert_eq!(session.motion_stats().running, 1);
+    assert!(session.advance(0.0).is_empty());
+    assert!(session.advance(100.0 + ANIMATION_GRACE_MS - 1.0).is_empty());
+    assert_eq!(session.motion_stats().running, 1);
+    assert!(session.advance(1.0).is_empty());
+    assert_eq!(session.motion_stats().running, 0);
+    // The huge step itself completes what was already overdue by any measure.
+    session.update(&dim(0.0), &phone());
+    assert_eq!(session.motion_stats().running, 1);
+    assert!(session.advance(f64::MAX).is_empty());
+    assert_eq!(session.motion_stats().running, 0);
+}
+
 #[test]
 fn a_hidden_node_is_hidden_by_the_tick_and_restored_like_finished_would() {
     let root = Node::new("root", "Column").with_child(

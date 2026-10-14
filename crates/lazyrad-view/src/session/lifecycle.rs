@@ -211,7 +211,15 @@ impl Session {
     ///
     /// A renderer's late report of an animation completed here carries an id
     /// that is no longer current, and is ignored. (A step that is NaN,
-    /// negative or infinite moves the clock by nothing.)
+    /// negative or infinite moves the clock by nothing, and a huge one is cut
+    /// to the longest an animation can take, which completes everything.)
+    ///
+    /// The grace is a crate constant and **not a budget for slow renderers**.
+    /// A host that runs its renderer slower than real time (the browser's
+    /// devtools slow motion, a paused tab) must pass `dt_ms` scaled by the
+    /// playback rate, so the session's clock runs at the renderer's pace;
+    /// otherwise the session completes animations the renderer has not
+    /// finished playing.
     #[must_use = "the patches that follow from an overdue animation must be applied"]
     pub fn advance(&mut self, dt_ms: f64) -> Vec<Patch> {
         self.planner.tick(dt_ms);
