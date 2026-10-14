@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{map, tree};
+use common::{map, report, tree};
 use lazyrad_view::limits::MAX_RUNNING_ANIMATIONS;
 use lazyrad_view::{
     AnimFrom, Bindings, Edge, Environment, Motion, Node, Patch, Preset, Session, Transition,
@@ -96,11 +96,7 @@ fn entrances_past_the_cap_show_at_once_and_are_counted() {
 
     // Reporting them finished frees the room.
     for index in 0..MAX_RUNNING_ANIMATIONS {
-        assert!(
-            session
-                .finished(&format!("item_{index}"), "opacity")
-                .is_empty()
-        );
+        assert!(report(&mut session, &format!("item_{index}"), "opacity").is_empty());
     }
     assert_eq!(session.motion_stats().running, 0);
 }
@@ -111,11 +107,7 @@ fn changes_past_the_cap_are_sets_and_an_animation_in_flight_is_replaced_not_adde
     let mut session = Session::new(tree(panels(total)), Bindings::new());
     session.build(&dim(0.0), &phone());
     for index in 0..MAX_RUNNING_ANIMATIONS {
-        assert!(
-            session
-                .finished(&format!("item_{index}"), "opacity")
-                .is_empty()
-        );
+        assert!(report(&mut session, &format!("item_{index}"), "opacity").is_empty());
     }
 
     // The first change: room for 256 of the 300.
@@ -148,7 +140,7 @@ fn changes_past_the_cap_are_sets_and_an_animation_in_flight_is_replaced_not_adde
     assert_eq!(session.motion_stats().degraded, 132);
 
     // One finishes: a node that had no room now has some.
-    assert!(session.finished("item_0", "opacity").is_empty());
+    assert!(report(&mut session, "item_0", "opacity").is_empty());
     assert_eq!(session.motion_stats().running, MAX_RUNNING_ANIMATIONS - 1);
     let turn = session.update(&dim(1.0), &phone());
     assert_eq!(animated(&turn.patches).len(), MAX_RUNNING_ANIMATIONS);

@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lazyrad_view::limits::{
-    MAX_ANIMATION_MS, MAX_ARRAY_SIZE, MAX_CALL_LEVELS, MAX_EXPR_DEPTHS, MAX_MAP_SIZE,
-    MAX_OPERATIONS, MAX_RUNNING_ANIMATIONS, MAX_STRING_SIZE, PEAK_MEMORY_CEILING,
+    ANIMATION_GRACE_MS, MAX_ANIMATION_MS, MAX_ARRAY_SIZE, MAX_CALL_LEVELS, MAX_EXPR_DEPTHS,
+    MAX_MAP_SIZE, MAX_OPERATIONS, MAX_RUNNING_ANIMATIONS, MAX_STRING_SIZE, PEAK_MEMORY_CEILING,
 };
 
 fn crate_path(relative: &str) -> PathBuf {
@@ -61,7 +61,7 @@ fn as_u64(value: usize) -> u64 {
 #[test]
 fn the_table_states_every_limit_exactly_once_and_matches_the_constants() {
     let rows = table_rows();
-    let expected: [(&str, Vec<u64>); 9] = [
+    let expected: [(&str, Vec<u64>); 10] = [
         ("MAX_ARRAY_SIZE", vec![as_u64(MAX_ARRAY_SIZE)]),
         ("MAX_MAP_SIZE", vec![as_u64(MAX_MAP_SIZE)]),
         ("MAX_STRING_SIZE", vec![as_u64(MAX_STRING_SIZE)]),
@@ -78,6 +78,7 @@ fn the_table_states_every_limit_exactly_once_and_matches_the_constants() {
         ),
         // A whole number of milliseconds, so the cast is exact.
         ("MAX_ANIMATION_MS", vec![MAX_ANIMATION_MS as u64]),
+        ("ANIMATION_GRACE_MS", vec![ANIMATION_GRACE_MS as u64]),
     ];
     for (name, value) in expected {
         let label = format!("[`{name}`]");
@@ -193,6 +194,7 @@ fn no_other_doc_states_a_limit() {
         // The motion limits: stated in `limits.rs` and nowhere else.
         as_u64(MAX_RUNNING_ANIMATIONS),
         MAX_ANIMATION_MS as u64,
+        ANIMATION_GRACE_MS as u64,
     ];
 
     let mut files = vec![crate_path("README.md")];

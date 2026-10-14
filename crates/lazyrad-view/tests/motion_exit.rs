@@ -3,8 +3,8 @@
 
 mod common;
 
-use common::{built, phone, settle, tick, visible_state};
-use lazyrad_view::{Motion, Node, Preset, Value, trace};
+use common::{built, ended, phone, report, settle, tick, visible_state};
+use lazyrad_view::{AnimationId, Motion, Node, Preset, Renderer, Value, trace};
 
 /// A card that fades in and out, whose `visible` and `text` follow the state,
 /// beside a plain label.
@@ -53,7 +53,7 @@ fn a_hidden_node_is_held_while_it_fades_then_hidden_after_finished() {
     assert_eq!(session.motion_stats().held, 1);
     assert_eq!(renderer.take_trace(), "");
     let frame = tick(&mut session, &mut renderer, 50.0);
-    assert_eq!(frame.finished, [("card".to_owned(), "opacity".to_owned())]);
+    assert_eq!(ended(&frame), [("card".to_owned(), "opacity".to_owned())]);
     // It is hidden, and what the exit moved is back at rest for the next show.
     assert_eq!(
         renderer.take_trace(),
@@ -118,30 +118,124 @@ fn showing_a_node_again_while_it_exits_cancels_the_exit() {
     renderer.take_trace();
     // Its end must not hide it.
     let frame = tick(&mut session, &mut renderer, 250.0);
-    assert_eq!(frame.finished, [("card".to_owned(), "opacity".to_owned())]);
+    assert_eq!(ended(&frame), [("card".to_owned(), "opacity".to_owned())]);
     assert_eq!(renderer.take_trace(), "");
     assert_eq!(session.value("card", "visible"), Some(&Value::Bool(true)));
 }
 
 #[test]
-fn unknown_and_duplicate_finished_calls_do_nothing() {
+fn unknown_stale_and_duplicate_finished_calls_do_nothing() {
     let (mut session, mut renderer) = built(toggled(), &visible_state(true, "x"));
     settle(&mut session, &mut renderer);
     session.update_with(&visible_state(false, "x"), &phone(), &mut renderer);
+    let exit = session
+        .running_animation("card", "opacity")
+        .expect("the exit's animation");
 
-    // Not a node, not a property of it, and not an exit's property.
-    assert!(session.finished("ghost", "opacity").is_empty());
-    assert!(session.finished("card", "translate_y").is_empty());
-    assert!(session.finished("label", "opacity").is_empty());
+    // Not a node, not a property of it, not an exit's property, and not the
+    // animation the exit waits for.
+    assert!(session.finished("ghost", "opacity", exit).is_empty());
+    assert!(session.finished("card", "translate_y", exit).is_empty());
+    assert!(session.finished("label", "opacity", exit).is_empty());
+    assert!(
+        session
+            .finished("card", "opacity", AnimationId(exit.0 + 100))
+            .is_empty()
+    );
+    assert!(
+        session
+            .finished("card", "opacity", AnimationId(0))
+            .is_empty()
+    );
     assert_eq!(session.motion_stats().held, 1);
+    assert_eq!(session.running_animation("card", "opacity"), Some(exit));
 
-    let first = session.finished("card", "opacity");
+    let first = session.finished("card", "opacity", exit);
     assert_eq!(
         trace(&first),
         "set card.visible = false\nunset card.opacity\n"
     );
     // Again, and again: nothing, and the node is not hidden twice.
-    assert!(session.finished("card", "opacity").is_empty());
-    assert!(session.finished("card", "opacity").is_empty());
+    assert!(session.finished("card", "opacity", exit).is_empty());
+    assert!(session.finished("card", "opacity", exit).is_empty());
     assert_eq!(session.motion_stats().held, 0);
+}
+
+/// The usual event-queue race: the enter's end is delivered after the node
+/// has started to leave. It names an animation that is no longer the current
+/// one, so it must not complete the exit.
+#[test]
+fn a_late_report_of_the_enter_does_not_complete_the_exit() {
+    let (mut session, mut renderer) = built(toggled(), &visible_state(true, "x"));
+    let enter = session
+        .running_animation("card", "opacity")
+        .expect("the entrance");
+    tick(&mut session, &mut renderer, 100.0);
+    renderer.take_trace();
+
+    // Hidden 100 ms into the entrance: the exit starts from where it is.
+    let turn = session.update_with(&visible_state(false, "x"), &phone(), &mut renderer);
+    assert_eq!(
+        trace(&turn.patches),
+        "animate card.opacity from=current to=0.0 duration=250.0 delay=0.0 easing=expo_in(6.0)\n"
+    );
+    let exit = session
+        .running_animation("card", "opacity")
+        .expect("the exit");
+    assert_ne!(enter, exit);
+
+    // The entrance's report arrives late: nothing happens.
+    assert!(session.finished("card", "opacity", enter).is_empty());
+    assert_eq!(session.motion_stats().held, 1);
+    assert_eq!(session.value("card", "visible"), Some(&Value::Bool(true)));
+    // Only the exit's own report ends it.
+    let done = session.finished("card", "opacity", exit);
+    assert_eq!(
+        trace(&done),
+        "set card.visible = false\nunset card.opacity\n"
+    );
+}
+
+#[test]
+fn a_quick_hide_show_hide_ignores_the_earlier_reports() {
+    let (mut session, mut renderer) = built(toggled(), &visible_state(true, "x"));
+    settle(&mut session, &mut renderer);
+
+    session.update_with(&visible_state(false, "x"), &phone(), &mut renderer);
+    let first_exit = session.running_animation("card", "opacity").unwrap();
+    session.update_with(&visible_state(true, "x"), &phone(), &mut renderer);
+    let comeback = session.running_animation("card", "opacity").unwrap();
+    session.update_with(&visible_state(false, "x"), &phone(), &mut renderer);
+    let second_exit = session.running_animation("card", "opacity").unwrap();
+    assert!(first_exit < comeback && comeback < second_exit);
+
+    // The first exit and the comeback end late, in either order: both stale.
+    assert!(session.finished("card", "opacity", comeback).is_empty());
+    assert!(session.finished("card", "opacity", first_exit).is_empty());
+    assert_eq!(session.motion_stats().held, 1);
+    assert_eq!(session.value("card", "visible"), Some(&Value::Bool(true)));
+    // The second exit's own report hides it, once.
+    assert_eq!(
+        trace(&session.finished("card", "opacity", second_exit)),
+        "set card.visible = false\nunset card.opacity\n"
+    );
+    assert!(session.finished("card", "opacity", second_exit).is_empty());
+}
+
+#[test]
+fn the_ids_are_numbered_in_order_and_never_reused_across_a_rebuild() {
+    let (mut session, mut renderer) = built(toggled(), &visible_state(true, "x"));
+    let first = session.running_animation("card", "opacity").unwrap();
+    assert_eq!(first, AnimationId(1));
+    settle(&mut session, &mut renderer);
+    assert_eq!(session.running_animation("card", "opacity"), None);
+    // A rebuild forgets what was running, not what it numbered.
+    session.update_with(&visible_state(false, "x"), &phone(), &mut renderer);
+    let exit = session.running_animation("card", "opacity").unwrap();
+    assert!(exit > first);
+    renderer.apply(&session.build(&visible_state(true, "x"), &phone()).patches);
+    assert_eq!(session.running_animation("card", "opacity"), None);
+    // The report that was in flight across the rebuild is ignored.
+    assert!(session.finished("card", "opacity", exit).is_empty());
+    assert!(report(&mut session, "card", "opacity").is_empty());
 }

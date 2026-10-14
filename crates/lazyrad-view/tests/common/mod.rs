@@ -2,8 +2,8 @@
 #![allow(dead_code)] // Each test file uses a different subset.
 
 use lazyrad_view::{
-    Bindings, Edge, Environment, Frame, Motion, Node, Preset, Renderer, SamplingRenderer, Session,
-    Transition, Tree,
+    Bindings, Edge, Environment, Frame, Motion, Node, Patch, Preset, Renderer, SamplingRenderer,
+    Session, Transition, Tree,
 };
 use rhai::{Dynamic, Map};
 
@@ -119,11 +119,30 @@ pub fn settled_card() -> (Session, SamplingRenderer) {
 /// that returns, and gives back the frame.
 pub fn tick(session: &mut Session, renderer: &mut SamplingRenderer, dt_ms: f64) -> Frame {
     let frame = renderer.advance(dt_ms);
-    for (node, property) in &frame.finished {
-        let patches = session.finished(node, property);
+    for ended in &frame.finished {
+        let patches = session.finished(&ended.node, &ended.property, ended.id);
         renderer.apply(&patches);
     }
     frame
+}
+
+/// `(node, property)` of what ended in a frame.
+pub fn ended(frame: &Frame) -> Vec<(String, String)> {
+    frame
+        .finished
+        .iter()
+        .map(|ended| (ended.node.clone(), ended.property.clone()))
+        .collect()
+}
+
+/// Reports `node.property` finished with the id the session has running for
+/// it, as a renderer whose animation just ended does. Nothing is running
+/// there: nothing is reported.
+pub fn report(session: &mut Session, node: &str, property: &str) -> Vec<Patch> {
+    match session.running_animation(node, property) {
+        Some(id) => session.finished(node, property, id),
+        None => Vec::new(),
+    }
 }
 
 pub fn visible_state(visible: bool, text: &str) -> rhai::Map {

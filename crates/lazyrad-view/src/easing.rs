@@ -30,6 +30,7 @@ pub const DEFAULT_EXPONENT: f32 = 6.0;
 /// Equality is exact, except that a NaN exponent equals a NaN exponent (like
 /// [`Value`](crate::Value)), so a patch holding one is comparable.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum Easing {
     /// `f(t) = t`: constant speed.
     Linear,

@@ -1,5 +1,7 @@
 //! The random inputs and the minimal renderer of the model-based motion test.
 
+pub mod world;
+
 use std::collections::HashMap;
 
 use lazyrad_view::{Edge, Motion, Node, Patch, Preset, Session, Transition};
@@ -57,7 +59,10 @@ pub fn leaf(name: &str, motions: &HashMap<&'static str, Motion>) -> Node {
 /// keeps its parent and its place among its siblings and only its presence
 /// changes (so `reconcile` can apply a difference); otherwise leaves move
 /// between parents and reorder (so it has to rebuild).
-pub fn random_tree(rng: &mut Rng, motions: &HashMap<&'static str, Motion>) -> Node {
+pub fn random_tree(rng: &mut Rng, motions: &HashMap<&'static str, Motion>, wide: bool) -> Node {
+    if wide {
+        return wide_tree(rng);
+    }
     if rng.chance(75) {
         // root: a b g0[c d] g g1[e f] h
         let mut root = Node::new("root", "Column");
@@ -118,8 +123,34 @@ pub fn random_tree(rng: &mut Rng, motions: &HashMap<&'static str, Motion>) -> No
     root
 }
 
+/// Far more nodes than the animation limit allows to move at once: each slides
+/// in and out (two animations each way) and eases its opacity, and they show and hide
+/// together. Roughly one in ten is missing, so trees differ between calls.
+fn wide_tree(rng: &mut Rng) -> Node {
+    let motion = Motion::new()
+        .with_enter(Preset::slide(Edge::Bottom, 16.0))
+        .with_exit(Preset::slide(Edge::Bottom, 16.0))
+        .with_change("opacity", Transition::new(120.0));
+    let mut root = Node::new("root", "Column");
+    for index in 0..WIDE {
+        if rng.chance(90) {
+            root = root.with_child(
+                Node::new(format!("w{index}"), "Panel")
+                    .with_bind("visible", "state.show_wide")
+                    .with_bind("opacity", "1.0 - state.dim * 0.5")
+                    .with_motion(motion.clone()),
+            );
+        }
+    }
+    root
+}
+
+/// How many nodes a wide tree has at most.
+pub const WIDE: usize = 160;
+
 pub fn random_state(rng: &mut Rng) -> rhai::Map {
     let mut state = rhai::Map::new();
+    state.insert("show_wide".into(), Dynamic::from(rng.chance(70)));
     for name in LEAVES {
         state.insert(format!("v_{name}").into(), Dynamic::from(rng.chance(80)));
     }

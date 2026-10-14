@@ -10,7 +10,7 @@ use super::{BindingScope, Session};
 use crate::environment::Environment;
 use crate::motion::identity;
 use crate::patch::Patch;
-use crate::planner::{Exit, ExitKind, Live, Origin, Outcome, Request, number};
+use crate::planner::{Exit, ExitKind, Live, Origin, Outcome, Request, keep_last_animates, number};
 use crate::state_eq::same_map;
 use crate::turn::{BindDiagnostic, TurnResult};
 use crate::visible::View;
@@ -163,14 +163,14 @@ impl Session {
                         live,
                         &mut patches,
                     );
-                    if let Some(animated) = animated {
+                    if let Some(pending) = animated {
                         self.planner.frozen.insert(name.to_owned());
                         self.planner.exits.insert(
                             name.to_owned(),
                             Exit {
                                 kind: ExitKind::Hide,
-                                pending: animated.clone(),
-                                animated,
+                                animated: pending.keys().cloned().collect(),
+                                pending,
                             },
                         );
                         continue;
@@ -188,24 +188,48 @@ impl Session {
                 {
                     shown = true;
                 }
+                // `change`: an animatable property with a transition eases,
+                // unless the user asked for reduced motion.
+                let transition = node
+                    .motion
+                    .change
+                    .get(property.as_str())
+                    .filter(|_| !reduced);
                 match &wanted {
-                    // An unset applies at once, whatever the property.
+                    // An unset returns the property to its default: it eases
+                    // there when it has a transition, as the `Set` that gave it
+                    // a value did, and applies at once when it has none.
                     None => {
-                        self.planner.stop(name, property);
-                        patches.push(Patch::Unset {
-                            node: name.to_owned(),
-                            property: property.clone(),
-                        });
+                        let outcome = match (
+                            transition,
+                            prop.applied.as_ref().and_then(number),
+                            identity(property),
+                        ) {
+                            (Some(transition), Some(from), Some(to)) => Some(self.planner.animate(
+                                &Request {
+                                    node: name,
+                                    property,
+                                    origin: Origin::Belief(from),
+                                    to,
+                                    duration_ms: transition.duration_ms,
+                                    delay_ms: 0.0,
+                                    easing: transition.easing,
+                                },
+                                live,
+                                &mut patches,
+                            )),
+                            _ => None,
+                        };
+                        if !outcome.is_some_and(Outcome::handled) {
+                            self.planner.stop(name, property);
+                            patches.push(Patch::Unset {
+                                node: name.to_owned(),
+                                property: property.clone(),
+                            });
+                        }
                     }
                     Some(value) => {
-                        // `change`: an animatable property with a transition
-                        // eases from the last applied value, unless the user
-                        // asked for reduced motion.
-                        let transition = node
-                            .motion
-                            .change
-                            .get(property.as_str())
-                            .filter(|_| !reduced);
+                        // It eases from the last applied value.
                         let rest = prop
                             .applied
                             .as_ref()
@@ -227,7 +251,7 @@ impl Session {
                             )),
                             _ => None,
                         };
-                        if !matches!(outcome, Some(Outcome::Started | Outcome::Noop)) {
+                        if !outcome.is_some_and(Outcome::handled) {
                             // An animation in flight is mid-way: what the widget
                             // shows then proves nothing, and the `Set` is what
                             // stops it.
@@ -271,6 +295,8 @@ impl Session {
             self.planner.entered.insert(node.name.clone());
         }
         self.pending_create.clear();
+        // One `Animate` per node and property: the last planned.
+        keep_last_animates(&mut patches);
 
         // The snapshot is only replaced when the visible state changed, so a
         // resize or a no-op turn costs a comparison, not a copy.
@@ -285,6 +311,7 @@ impl Session {
         TurnResult {
             patches,
             diagnostics,
+            rebuilt: full,
         }
     }
 }

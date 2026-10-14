@@ -82,6 +82,7 @@ fn check_distance(node: &str, slot: &str, preset: &Preset) -> Result<(), TreeErr
 /// What is wrong with a number in a [`Motion`], for
 /// [`TreeError::BadMotionValue`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum MotionProblem {
     /// The value is NaN.
     #[error("is not a number")]

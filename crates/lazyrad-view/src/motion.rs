@@ -26,9 +26,13 @@
 //!   [`Easing::expo_out`], exiting the accelerating [`Easing::expo_in`].
 //! * **Reduced motion** (`Environment::reduce_motion`): [`Preset::Slide`]
 //!   resolves to [`Preset::Fade`], [`Preset::PressScale`] is dropped, a
-//!   `change` transition is an instant `Set`, and nothing loops. A running
-//!   animation is not cut short when the setting flips; it applies to the next
-//!   one.
+//!   `change` transition is an instant `Set`, and nothing loops. The setting
+//!   is read when an animation is planned, so flipping it does not touch one in
+//!   flight: it runs on, unless the next change to that same property is then
+//!   applied as a `Set`, which replaces it.
+//! * **A slide is relative to where the node rests.** `Slide { from: Bottom,
+//!   distance: 40 }` starts 40 below the node's own `translate_y`, not 40 from
+//!   zero.
 //!
 //! # Example
 //!
@@ -54,8 +58,9 @@
 //! // ...and at rest once the entrance has run. The renderer reports what ended.
 //! let frame = renderer.advance(350.0);
 //! assert_eq!(frame.value("card", "translate_y"), Some(0.0));
-//! for (node, property) in &frame.finished {
-//!     assert!(session.finished(node, property).is_empty());
+//! for ended in &frame.finished {
+//!     let patches = session.finished(&ended.node, &ended.property, ended.id);
+//!     assert!(patches.is_empty());
 //! }
 //! ```
 
@@ -155,6 +160,7 @@ pub const PRESS_RELEASE_MS: f64 = 100.0;
 
 /// An edge of a node's parent a preset moves it from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum Edge {
     /// The top edge: the node starts above its place.
     Top,
@@ -241,8 +247,9 @@ impl Transition {
 /// animate, so a tree without motion behaves exactly as it did before.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Motion {
-    /// Runs when the node is created (the first time a name appears) and when
-    /// its `visible` becomes true.
+    /// Runs when the node is created (the first time a name appears, and
+    /// again after the node has left the tree) and when its `visible`
+    /// becomes true.
     pub enter: Option<Preset>,
     /// Runs when the node is removed from the tree and when its `visible`
     /// becomes false. The node is held, and its room kept, until it ends.

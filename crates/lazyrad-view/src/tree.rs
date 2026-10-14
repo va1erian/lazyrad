@@ -8,6 +8,7 @@ use crate::value::{Value, ValueKind};
 
 /// Why a [`Tree`] is invalid.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TreeError {
     /// A node has an empty name, which cannot address it in a patch.
     #[error("a `{kind}` node has an empty name")]

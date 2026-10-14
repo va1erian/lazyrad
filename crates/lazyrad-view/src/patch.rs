@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::animation::{AnimFrom, Animation};
+use crate::animation::{AnimFrom, Animation, AnimationId};
 use crate::easing::Easing;
 use crate::value::Value;
 
@@ -20,7 +20,11 @@ use crate::value::Value;
 ///
 /// Equality is exact, except that a NaN equals a NaN (like
 /// [`Value`](crate::Value)), so a patch holding one is comparable.
+///
+/// The vocabulary grows (repeaters and components bring more), so a `match`
+/// needs a wildcard arm.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Patch {
     /// A node appears, with the properties it starts with.
     ///
@@ -52,7 +56,11 @@ pub enum Patch {
     /// default it has when nothing sets it.
     ///
     /// This is what a responsive property that exists only above some size
-    /// class becomes when the window shrinks back below it.
+    /// class becomes when the window shrinks back below it. It applies at
+    /// once, **except** for an animatable property of a node with a `change`
+    /// transition for it: that one is an [`Animate`](Self::Animate) to the
+    /// property's default (see [`identity`](crate::motion::identity)), like
+    /// the `Set` that gave it a value was.
     Unset {
         /// The node's name.
         node: String,
@@ -71,18 +79,29 @@ pub enum Patch {
     /// * Hold `from` for `delay_ms`, then move to `to` over `duration_ms`
     ///   shaped by `easing`, and be at exactly `to` afterwards. The same curves
     ///   are available as [`Animation`] and [`Easing::ease`].
-    /// * Start `from: Current` from the value the widget shows now, and
-    ///   replace any animation already running on the same node and property.
+    /// * Start `from: Current` from the value the widget shows now. Any
+    ///   animation already running on the same node and property is replaced,
+    ///   whatever `from` is: the widget jumps to an explicit `from` first.
     /// * Apply `to` at once when it cannot animate that property.
     /// * Report each animation that ran **to its end** by calling
-    ///   [`Session::finished`](crate::Session::finished) with the node and
-    ///   property: it is how an `exit` learns it may remove its node. A
-    ///   renderer that applied `to` at once reports it too, and an animation
-    ///   that was replaced or cancelled is not reported.
+    ///   [`Session::finished`](crate::Session::finished) with the node, the
+    ///   property and this patch's `id`: it is how an `exit` learns it may
+    ///   remove its node. A renderer that applied `to` at once reports it too.
+    ///   An animation that was replaced or cancelled is not reported, and a
+    ///   report that carries an id that is no longer the current one of that
+    ///   node and property is ignored, so a late event cannot complete an exit
+    ///   that has only just started.
+    /// * A renderer that misses a report is not stuck for ever when the host
+    ///   also ticks [`Session::advance`](crate::Session::advance): the session
+    ///   then completes an animation that is overdue by itself.
     ///
     /// A batch that creates a node and animates it is applied before the next
     /// frame is drawn, so a node that enters is never seen at its rest value
-    /// first.
+    /// first. A batch holds at most one `Animate` per node and property (the
+    /// last one planned), so a renderer needs no ordering rule for them.
+    ///
+    /// The [trace](crate::trace) line leaves out the `id`: it is bookkeeping,
+    /// numbered in order, and not part of what moves.
     Animate {
         /// The node's name.
         node: String,
@@ -98,6 +117,9 @@ pub enum Patch {
         delay_ms: f64,
         /// The timing curve.
         easing: Easing,
+        /// This animation's number, which the renderer hands back in
+        /// [`Session::finished`](crate::Session::finished).
+        id: AnimationId,
     },
     /// A node and its subtree disappear.
     ///
@@ -182,7 +204,7 @@ impl Patch {
 /// Properties of a `create` are sorted by name; values are written as
 /// [`Value`]'s `Display` does. The numbers of an `animate` are written as Rust
 /// floats (`40.0`, `0.5`) and the curve as [`Easing`]'s `Display` does
-/// (`expo_out(6.0)`).
+/// (`expo_out(6.0)`). The `id` of an `animate` is not written.
 impl fmt::Display for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -217,6 +239,7 @@ impl fmt::Display for Patch {
                 duration_ms,
                 delay_ms,
                 easing,
+                id: _,
             } => {
                 write!(f, "animate {node}.{property} from=")?;
                 match from {

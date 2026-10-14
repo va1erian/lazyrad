@@ -15,10 +15,12 @@ pub trait Renderer {
     ///
     /// An [`Animate`](Patch::Animate) is the renderer's to run, on its own
     /// clock. It must report each animation that runs to its end by calling
-    /// [`Session::finished`](crate::Session::finished) (and apply the patches
-    /// that returns), because a node that is leaving is held until it does.
-    /// A renderer that cannot animate a property applies `to` at once and
-    /// reports it finished.
+    /// [`Session::finished`](crate::Session::finished) with the patch's `id`
+    /// (and apply the patches that returns), because a node that is leaving
+    /// is held until it does. A renderer that cannot animate a property
+    /// applies `to` at once and reports it finished. The host should also
+    /// tick [`Session::advance`](crate::Session::advance) from its frame
+    /// callback, so a report that is missed does not hold a node for ever.
     fn apply(&mut self, patches: &[Patch]);
 
     /// The value `property` of `node` has in the rendered widget right now, if
@@ -182,7 +184,7 @@ impl Renderer for RecordingRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::animation::AnimFrom;
+    use crate::animation::{AnimFrom, AnimationId};
     use crate::easing::Easing;
 
     fn create(node: &str, parent: Option<&str>, value: i64) -> Patch {
@@ -234,6 +236,7 @@ mod tests {
             duration_ms: 350.0,
             delay_ms: 0.0,
             easing: Easing::expo_out(),
+            id: AnimationId(1),
         }]);
         assert_eq!(
             renderer.live_value("card", "opacity"),

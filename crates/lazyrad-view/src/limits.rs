@@ -45,17 +45,20 @@
 //! # Motion
 //!
 //! Animations are not bindings: they cost nothing in the operation budget, and
-//! none of the numbers above bounds them. They have two limits of their own.
+//! none of the numbers above bounds them. They have three limits of their own.
 //!
 //! | Constant | Value | What it bounds |
 //! |---|---|---|
 //! | [`MAX_RUNNING_ANIMATIONS`] | 256 | animations in flight in one session, one per node and property |
 //! | [`MAX_ANIMATION_MS`] | 5000 | the duration, and the delay, of one animation, in milliseconds |
+//! | [`ANIMATION_GRACE_MS`] | 500 | how long past its end an animation may wait for its report before [`Session::advance`](crate::Session::advance) completes it, in milliseconds |
 //!
 //! Past the first, an animation is not started: the change is applied at once
 //! and counted in [`MotionStats::degraded`](crate::MotionStats::degraded). Past
 //! the second, a duration or delay is cut to it (and a motion that declares
-//! more is a [`TreeError`](crate::TreeError)).
+//! more is a [`TreeError`](crate::TreeError)). The third is what keeps a
+//! renderer that misses a report from holding a node, or a slot of the first
+//! limit, for the rest of the session, **if the host ticks the session**.
 //!
 //! # Native stack
 //!
@@ -166,16 +169,35 @@ pub const PEAK_MEMORY_CEILING: u64 = 192 * 1024 * 1024;
 /// [`MotionStats::degraded`](crate::MotionStats::degraded).
 ///
 /// An animation counts from the patch until the renderer reports
-/// [`Session::finished`](crate::Session::finished) for it, or a newer patch
-/// replaces it.
+/// [`Session::finished`](crate::Session::finished) for it, a newer patch on the
+/// same node and property replaces it, or the host's
+/// [`Session::advance`](crate::Session::advance) finds it overdue
+/// ([`ANIMATION_GRACE_MS`] past its end). Without that tick, a renderer that
+/// never reports leaves its animations counted, and every later change is
+/// applied at once.
 pub const MAX_RUNNING_ANIMATIONS: usize = 256;
 
 /// The longest duration, and the longest delay, of one animation, in
 /// milliseconds.
 ///
 /// Nothing in a user interface should move for five seconds, and the limit
-/// makes sure an `exit` cannot hold its node for ever: an infinite or enormous
-/// duration would. A longer value in a [`Motion`](crate::motion::Motion) is a
+/// bounds how long an `exit` can hold its node: an infinite or enormous
+/// duration would hold it for ever. (Bounds, given a host that calls
+/// [`Session::advance`](crate::Session::advance): the hold ends at the
+/// exit's duration plus [`ANIMATION_GRACE_MS`] even if the renderer never
+/// reports. Without that tick only the renderer's report ends it.) A longer
+/// value in a [`Motion`](crate::motion::Motion) is a
 /// [`TreeError`](crate::TreeError); one that reaches the sampler or the
 /// planner another way is cut to this.
 pub const MAX_ANIMATION_MS: f64 = 5_000.0;
+
+/// How long past its end, in milliseconds, an animation may wait for the
+/// renderer's report before [`Session::advance`](crate::Session::advance)
+/// completes it as `finished` would.
+///
+/// A renderer reports an animation when it ends, a frame or two after the
+/// session's clock says it should have; the grace covers that and a stalled
+/// frame. It is not a budget for slow renderers: a late report that arrives
+/// after the session completed the animation by itself carries an id that is
+/// no longer current and changes nothing.
+pub const ANIMATION_GRACE_MS: f64 = 500.0;

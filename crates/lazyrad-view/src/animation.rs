@@ -7,24 +7,50 @@
 //! of running animations and a clock that moves only when told to.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::easing::Easing;
 use crate::limits::MAX_ANIMATION_MS;
+
+/// Which animation a [`Patch::Animate`](crate::Patch::Animate) started.
+///
+/// The session numbers every animation it plans, from `1` and in order, and
+/// never reuses a number (not even across a rebuild). A renderer hands the id
+/// back in [`Session::finished`](crate::Session::finished), and the session
+/// acts on the report only if it is the **current** animation of that node
+/// and property: a report that is late, repeated, or about an animation that a
+/// newer one replaced is ignored. Without the id a stale "the fade ended" (the
+/// usual event-queue race) would complete an exit that had only just started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnimationId(pub u64);
+
+impl fmt::Display for AnimationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "#{}", self.0)
+    }
+}
 
 /// Where an animation starts.
 ///
 /// Equality is exact, except that a NaN equals a NaN, like
 /// [`Value`](crate::Value).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub enum AnimFrom {
     /// An explicit start value.
+    ///
+    /// A `change` with nothing in flight starts here, from the last value the
+    /// core applied, and so does an `enter`, from the value its preset
+    /// chooses: that one is an instruction, and the widget jumps there first.
     Value(f64),
     /// Wherever the renderer's widget is right now.
     ///
     /// The core knows only the *target* it last applied, not the interpolated
-    /// value, so an animation that interrupts another one starts from where
-    /// the renderer is. When the renderer cannot tell, it starts from `to`
-    /// (there is nothing to animate).
+    /// value, so an animation of a `change`, `exit` or `press` that
+    /// interrupts one in flight starts from where the renderer is. (An `enter`
+    /// is not one of them: it always starts from its preset's value and
+    /// replaces what was running.) When the renderer cannot tell, it starts
+    /// from `to` (there is nothing to animate).
     Current,
 }
 
@@ -171,6 +197,18 @@ pub struct Sample {
     pub value: f64,
 }
 
+/// One animation that ran to its end, as [`Frame::finished`] lists it: what a
+/// renderer reports to [`Session::finished`](crate::Session::finished).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ended {
+    /// The node.
+    pub node: String,
+    /// The animated property.
+    pub property: String,
+    /// The animation that ended, as the patch that started it numbered it.
+    pub id: AnimationId,
+}
+
 /// What [`AnimationSampler::advance`] returns: the animated values at the new
 /// time and which animations ended there.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -183,7 +221,7 @@ pub struct Frame {
     /// The animations that ended at this step, in the same order. These are
     /// what a renderer reports to
     /// [`Session::finished`](crate::Session::finished).
-    pub finished: Vec<(String, String)>,
+    pub finished: Vec<Ended>,
 }
 
 impl Frame {
@@ -198,6 +236,7 @@ impl Frame {
 }
 
 struct Running {
+    id: AnimationId,
     animation: Animation,
     started_ms: f64,
 }
@@ -239,16 +278,25 @@ impl AnimationSampler {
         self.running.is_empty()
     }
 
-    /// Starts `animation` on `node.property` at the current time, replacing
-    /// any animation that was running there.
-    pub fn start(&mut self, node: &str, property: &str, animation: Animation) {
+    /// Starts `animation`, numbered `id`, on `node.property` at the current
+    /// time, replacing any animation that was running there.
+    pub fn start(&mut self, node: &str, property: &str, id: AnimationId, animation: Animation) {
         self.running.insert(
             (node.to_owned(), property.to_owned()),
             Running {
+                id,
                 animation,
                 started_ms: self.now_ms,
             },
         );
+    }
+
+    /// The id of the animation running on `node.property`, if there is one.
+    #[must_use]
+    pub fn id(&self, node: &str, property: &str) -> Option<AnimationId> {
+        self.running
+            .get(&(node.to_owned(), property.to_owned()))
+            .map(|running| running.id)
     }
 
     /// Stops the animation on `node.property` without finishing it. Returns
@@ -276,11 +324,12 @@ impl AnimationSampler {
         Some(running.animation.sample(self.now_ms - running.started_ms))
     }
 
-    /// Moves the clock forward by `dt_ms` (a NaN or negative step is zero: the
-    /// clock never goes backwards), samples every running animation at the new
-    /// time and removes the ones that ended.
+    /// Moves the clock forward by `dt_ms` (a NaN, negative or infinite step is
+    /// zero: the clock never goes backwards and never reaches infinity),
+    /// samples every running animation at the new time and removes the ones
+    /// that ended.
     pub fn advance(&mut self, dt_ms: f64) -> Frame {
-        if dt_ms > 0.0 {
+        if dt_ms.is_finite() && dt_ms > 0.0 {
             self.now_ms += dt_ms;
         }
         let now = self.now_ms;
@@ -296,11 +345,16 @@ impl AnimationSampler {
                 value: running.animation.sample(elapsed),
             });
             if running.animation.is_finished(elapsed) {
-                frame.finished.push((node.clone(), property.clone()));
+                frame.finished.push(Ended {
+                    node: node.clone(),
+                    property: property.clone(),
+                    id: running.id,
+                });
             }
         }
-        for key in &frame.finished {
-            self.running.remove(key);
+        for ended in &frame.finished {
+            self.running
+                .remove(&(ended.node.clone(), ended.property.clone()));
         }
         frame
     }

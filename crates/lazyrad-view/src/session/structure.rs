@@ -12,7 +12,7 @@ use super::{Environment, Session, TurnResult};
 use crate::motion::Preset;
 use crate::node::Node;
 use crate::patch::Patch;
-use crate::planner::{Exit, ExitKind, Live};
+use crate::planner::{Exit, ExitKind, Live, keep_last_animates};
 use crate::tree::Tree;
 
 /// A node that is gone from the new tree and whose parent is not: where it
@@ -170,7 +170,10 @@ impl Session {
     /// When a node that both trees have changes **kind or parent**, when kept
     /// siblings change their order, when the root changes, or when the session
     /// is not built, there is no cheap difference to apply and this is
-    /// `replace_tree` and `build`: the patches describe the whole tree.
+    /// `replace_tree` and `build`: the patches describe the whole tree, and
+    /// [`TurnResult::rebuilt`](crate::TurnResult::rebuilt) is true. A renderer
+    /// that treats a rebuild differently (it discards its tree) reads that
+    /// flag, not the patches.
     pub fn reconcile(&mut self, tree: Tree, state: &Map, env: &Environment) -> TurnResult {
         let plan = if self.last.is_some() {
             Plan::between(&self.tree, &tree)
@@ -299,13 +302,13 @@ impl Session {
                     _ => None,
                 };
                 match animated {
-                    Some(animated) => {
+                    Some(pending) => {
                         self.planner.exits.insert(
                             name.to_owned(),
                             Exit {
                                 kind: ExitKind::Remove,
-                                pending: animated.clone(),
-                                animated,
+                                animated: pending.keys().cloned().collect(),
+                                pending,
                             },
                         );
                     }
@@ -326,6 +329,9 @@ impl Session {
 
         let mut result = self.turn(state, env, &live);
         patches.append(&mut result.patches);
+        // One `Animate` per node and property across the whole batch: a cancel
+        // and a `change`, say, would otherwise tell the renderer two things.
+        keep_last_animates(&mut patches);
         result.patches = patches;
         result
     }

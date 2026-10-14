@@ -26,9 +26,9 @@ decides **what moves** (the motion planner, lane B4); the renderer decides how.
 | `tree` | `Node` and the validated `Tree` (unique names, one kind per property) |
 | `bindings` | `Bindings`, the side-effect-free evaluator: expressions over `state`, `props` and `env` only, compiled once, with operation, depth and size limits |
 | `patch` | `Patch { Create, Set, Unset, Animate, Remove, Move }` and the stable line-based `trace` format |
-| `session` | `Session`: `build`, `update`, `update_with`, `reconcile`, the failure policy, the diff and the motion planner (`finished`, `press_begin`, `press_end`) |
+| `session` | `Session`: `build`, `update`, `update_with`, `reconcile`, the failure policy, the diff and the motion planner (`finished`, `advance`, `reset_motion`, `press_begin`, `press_end`) |
 | `motion` | `Motion { enter, exit, change, press }` on a `Node`, the `Preset`s (`Fade`, `Slide`, `PressScale`) and the six animatable properties |
-| `easing`, `animation` | `Easing` (byte-compatible with `xui_core::motion`), `Animation::sample` and `AnimationSampler`, a virtual clock |
+| `easing`, `animation` | `Easing` (byte-compatible with `xui_core::motion`), `AnimationId`, `Animation::sample` and `AnimationSampler`, a virtual clock |
 | `renderer` | the `Renderer` trait, `RecordingRenderer` for golden patch traces and `SamplingRenderer`, which adds the virtual clock |
 
 ## Rules it keeps
@@ -59,40 +59,72 @@ the last applied value, the new one and the node's motion, so it decides
 
 | Declared | When it runs | What the planner emits |
 |---|---|---|
-| `enter` | a node is created for the first time, or its `visible` becomes true | `Animate` from the preset's start to rest, after every `Create` of the turn |
-| `exit` | a node leaves the tree (`Session::reconcile`) or its `visible` becomes false | `Animate` to the preset's end; **the node is held** (not diffed, not removed) until the renderer reports it `finished`, then `Remove` (or `Set visible = false`) |
-| `change` | a property in it (only the six animatable ones) changes | `Animate` instead of `Set`, from the last applied value, or from `Current` if one is in flight |
+| `enter` | a node is created for a name that has not entered, or its `visible` becomes true | `Animate` from the preset's start (relative to where the node rests) to rest, after every `Create` of the turn |
+| `exit` | a node leaves the tree (`Session::reconcile`) or its `visible` becomes false | `Animate` to the preset's end; **the node is held** (not diffed, not removed) until its animation is reported `finished` (or the host's tick finds it overdue), then `Remove` (or `Set visible = false`) |
+| `change` | a property in it (only the six animatable ones) changes, or is unset | `Animate` instead of `Set` (an unset eases to the property's default), from the last applied value, or from `Current` if one is in flight |
 | `press` | `Session::press_begin` / `press_end` | scale to the press token and back after a delay |
 
-Rules the planner keeps (each has a test):
+### What a renderer and a host must do
+
+- **Run `Animate`** on its own clock, and **report each animation that ran to
+  its end** with `Session::finished(node, property, id)`, `id` being the one the
+  patch carried. The session numbers every animation (never reusing a number)
+  and acts on a report only if it names the **current** animation of that node
+  and property: a late, repeated or replaced animation's report changes
+  nothing, so the usual event-queue race cannot complete an exit that has only
+  just started. A renderer that applies `to` at once because it cannot animate
+  reports it too.
+- **Tick the session.** `Session::advance(dt_ms)` is the host's frame tick: it
+  moves the session's own clock (the core reads no real one) and completes an
+  animation that is overdue (`limits::ANIMATION_GRACE_MS` past its end) exactly
+  as `finished` would. **Without it only `finished` completes animations**: a
+  renderer that misses a report (the default `RecordingRenderer` never reports)
+  holds its exiting nodes, and its slots of the animation limit, for the rest
+  of the session. With it, nothing is held longer than the exit plus the grace.
+- `Session::reset_motion()` is the hard reset for a host that knows its
+  renderer lost track: every running animation is dropped and put at rest,
+  every held node leaves as if its exit had ended.
+- `TurnResult::rebuilt` says the patches describe the whole tree (a build, or
+  a `reconcile` that fell back to one): the renderer discards what it had.
+
+### Rules the planner keeps (each has a test)
 
 - **Transform and opacity only.** `opacity`, `translate_x`, `translate_y`,
   `scale_x`, `scale_y`, `rotate`. A `change` entry for anything else is a typed
   `TreeError` at validation; a layout property's message says why (layout is
   fixed once mounted and a reflow per frame is what makes an interface janky).
-- **Identity-gated `enter`.** The set of names that have entered survives
-  `build`, `replace_tree` and `reset`, so a hot-reload rebuild does not replay
-  it; a name that is new enters, and one that left the tree enters again if it
-  returns. A node created hidden enters when it is first shown.
-- **An `Unset` applies at once**, whatever the property.
-- **Interruption.** A newer animation on a property that is still running
-  starts `from: Current`, and replaces the running one.
+- **A slide is relative to where the node rests**: `Slide(Bottom, 40)` on a
+  node at `translate_y = 100` starts at 140, not at 40.
+- **Identity-gated `enter`.** The set of names that have entered is kept across
+  `build`, `replace_tree` and `reset`, but **only for the names the tree has**:
+  a hot reload that keeps a node does not replay its `enter`, and a node that
+  left the tree is new when it comes back. A node created hidden enters when it
+  is first shown.
+- **An `Unset` is a change like any other.** For an animatable property of a
+  node with a `change` entry for it (and no reduced motion) it eases to the
+  property's default, as the `Set` that gave it a value did; otherwise it
+  applies at once.
+- **Interruption.** A `change`, `exit` or `press` that finds an animation in
+  flight on its property starts `from: Current`. An `enter` does not: it
+  starts from the value its preset chooses and replaces what was running.
+- **One `Animate` per node and property in a batch**: the last one planned.
 - **Already there.** `update_with` drops an `Animate` (and a `Set`) whose
   target the renderer already shows, unless an animation of that property is in
   flight: its value is mid-way then, and the new patch is what replaces it. An
   `enter` is never dropped: its start is an instruction.
 - **A rebuild does not bring back a node that was leaving.** `build` describes
   the tree the session was given, so a node held by an exit is not in it.
+- **A cancelled exit never strands a property**: what it moved goes back to
+  rest by animation, or by a `Set` when the limit leaves no room.
 - **Reduced motion** (`Environment::reduce_motion`, readable as
   `env.reduce_motion`): `Slide` resolves to `Fade`, `PressScale` is dropped, a
-  `change` becomes an instant `Set`, and nothing loops (no preset does). A
-  running animation is not cut short.
+  `change` and an `Unset` become instant, and nothing loops (no preset does).
+  The setting is read when an animation is planned: flipping it leaves one in
+  flight running, unless the next change to that property is then applied as a
+  `Set`, which replaces it.
 - **A bounded number of running animations** (`limits::MAX_RUNNING_ANIMATIONS`).
   Past it a change is applied at once and counted in
-  `MotionStats::degraded`; nothing panics. An animation counts from its patch
-  until the renderer reports it finished, so a renderer **must** report
-  `Session::finished` for every animation that ran to its end (including one it
-  applied at once because it cannot animate).
+  `MotionStats::degraded`; nothing panics.
 - **No clock.** The core reads none. `AnimationSampler` is a virtual one, and
   `SamplingRenderer` runs a session's animations against it, so a golden test
   asserts values at `t = 0`, `100`, `250` ms.
@@ -100,7 +132,7 @@ Rules the planner keeps (each has a test):
 `Session::reconcile` swaps the tree under a built session without a rebuild.
 It handles added and removed nodes and diffs the ones both trees have; when a
 kept node changes kind or parent, kept siblings change order or the root
-changes, it falls back to `replace_tree` and `build` (and says so in its doc).
+changes, it falls back to `replace_tree` and `build` (and `rebuilt` says so).
 
 ## What a binding can and cannot do
 
@@ -151,6 +183,11 @@ A binding is one Rhai *expression* over `state`, `props` and `env`.
 
 ## API notes
 
+- The public enums (`Patch`, `Value`, `ValueKind`, `ValueError`, `BindError`,
+  `TreeError`, `SizeClass`, `Easing`, `AnimFrom`, `Edge`, `Preset`,
+  `MotionProblem`) are `#[non_exhaustive]`: a `match` on one needs a wildcard
+  arm, so the vocabulary can grow (colours, repeaters, more presets) without
+  breaking a renderer.
 - `Node` implements `Drop` (to drop a deep chain without recursing), so fields
   cannot be moved out of a `Node` with a destructuring pattern or
   struct-update syntax. Use `std::mem::take(&mut node.children)` or clone.

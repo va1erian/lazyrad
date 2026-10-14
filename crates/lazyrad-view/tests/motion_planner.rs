@@ -205,20 +205,25 @@ fn values_that_cannot_be_animated_are_set_at_once() {
     assert_eq!(session.motion_stats().running, 0);
 }
 
-#[test]
-fn an_unset_of_an_animatable_property_applies_at_once() {
+/// A node whose `translate_y` exists only from Medium up.
+fn medium_only(motion: Motion) -> Session {
     let root = Node::new("root", "Column").with_child(
         Node::new("card", "Panel")
             .with_responsive(lazyrad_view::SizeClass::Medium, "translate_y", 12.0)
-            .with_motion(Motion::new().with_change("translate_y", Transition::new(300.0))),
+            .with_motion(motion),
     );
-    let mut session = Session::new(tree(root), Bindings::new());
+    Session::new(tree(root), Bindings::new())
+}
+
+#[test]
+fn an_unset_eases_back_to_the_default_when_the_property_has_a_transition() {
+    let mut session = medium_only(Motion::new().with_change("translate_y", Transition::new(300.0)));
     let mut renderer = SamplingRenderer::new();
     let state = rhai::Map::new();
     renderer.apply(&session.build(&state, &phone()).patches);
     renderer.take_trace();
 
-    // Growing sets it from the identity; the animation is running...
+    // Growing gives it a value, from the identity, by animation...
     let tablet = Environment::new(700.0, 640.0);
     session.update_with(&state, &tablet, &mut renderer);
     assert_eq!(
@@ -226,13 +231,55 @@ fn an_unset_of_an_animatable_property_applies_at_once() {
         "animate card.translate_y from=0.0 to=12.0 duration=300.0 delay=0.0 \
          easing=expo_out(6.0)\n"
     );
+    tick(&mut session, &mut renderer, 300.0);
+    // ...and shrinking takes it away the same way: back to the default, not a
+    // jump.
+    session.update_with(&state, &phone(), &mut renderer);
+    assert_eq!(
+        renderer.take_trace(),
+        "animate card.translate_y from=12.0 to=0.0 duration=300.0 delay=0.0 \
+         easing=expo_out(6.0)\n"
+    );
+    // The session's model is that the property has no value.
+    assert_eq!(session.value("card", "translate_y"), None);
     assert_eq!(session.motion_stats().running, 1);
-    // ...and shrinking unsets it at once, cancelling the animation.
+    // Interrupted by growing again: from where it is.
+    session.update_with(&state, &tablet, &mut renderer);
+    assert!(renderer.take_trace().contains("from=current to=12.0"));
+}
+
+#[test]
+fn an_unset_applies_at_once_without_a_transition_or_under_reduced_motion() {
+    // No `change` entry for the property: growing and shrinking are plain.
+    let mut session = medium_only(Motion::new().with_change("opacity", Transition::new(300.0)));
+    let mut renderer = RecordingRenderer::new();
+    let state = rhai::Map::new();
+    renderer.apply(&session.build(&state, &phone()).patches);
+    renderer.take_trace();
+    let tablet = Environment::new(700.0, 640.0);
+    session.update_with(&state, &tablet, &mut renderer);
+    assert_eq!(renderer.take_trace(), "set card.translate_y = 12.0\n");
     session.update_with(&state, &phone(), &mut renderer);
     assert_eq!(renderer.take_trace(), "unset card.translate_y\n");
+
+    // With a transition, but the user asked for reduced motion.
+    let mut session = medium_only(Motion::new().with_change("translate_y", Transition::new(300.0)));
+    let mut renderer = RecordingRenderer::new();
+    let calm_tablet = Environment {
+        reduce_motion: true,
+        ..tablet
+    };
+    let calm_phone = Environment {
+        reduce_motion: true,
+        ..phone()
+    };
+    renderer.apply(&session.build(&state, &calm_phone).patches);
+    renderer.take_trace();
+    session.update_with(&state, &calm_tablet, &mut renderer);
+    assert_eq!(renderer.take_trace(), "set card.translate_y = 12.0\n");
+    session.update_with(&state, &calm_phone, &mut renderer);
+    assert_eq!(renderer.take_trace(), "unset card.translate_y\n");
     assert_eq!(session.motion_stats().running, 0);
-    assert_eq!(renderer.running(), 0);
-    assert_eq!(session.value("card", "translate_y"), None);
 }
 
 #[test]

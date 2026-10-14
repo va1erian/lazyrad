@@ -20,6 +20,7 @@ use std::fmt;
 
 /// A window width class, ordered from the narrowest to the widest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum SizeClass {
     /// Below 600 dp: a phone in portrait.
     Compact,

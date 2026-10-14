@@ -3,9 +3,18 @@
 
 use lazyrad_view::limits::MAX_ANIMATION_MS;
 use lazyrad_view::{
-    AnimFrom, Animation, AnimationSampler, Easing, Patch, RecordingRenderer, Renderer,
-    SamplingRenderer, Value, trace,
+    AnimFrom, Animation, AnimationId, AnimationSampler, Easing, Frame, Patch, RecordingRenderer,
+    Renderer, SamplingRenderer, Value, trace,
 };
+
+/// `(node, property)` of what ended in a frame.
+fn names(frame: &Frame) -> Vec<(String, String)> {
+    frame
+        .finished
+        .iter()
+        .map(|ended| (ended.node.clone(), ended.property.clone()))
+        .collect()
+}
 
 fn animate(node: &str, property: &str, from: AnimFrom, to: f64) -> Patch {
     Patch::Animate {
@@ -16,6 +25,7 @@ fn animate(node: &str, property: &str, from: AnimFrom, to: f64) -> Patch {
         duration_ms: 100.0,
         delay_ms: 0.0,
         easing: Easing::Linear,
+        id: AnimationId(1),
     }
 }
 
@@ -99,8 +109,18 @@ fn nan_negative_and_huge_numbers_have_a_defined_meaning() {
 fn the_sampler_runs_on_a_clock_that_only_moves_when_told() {
     let mut sampler = AnimationSampler::new();
     assert!(sampler.is_empty());
-    sampler.start("card", "opacity", Animation::new(0.0, 1.0, 100.0));
-    sampler.start("card", "translate_y", Animation::new(40.0, 0.0, 200.0));
+    sampler.start(
+        "card",
+        "opacity",
+        AnimationId(11),
+        Animation::new(0.0, 1.0, 100.0),
+    );
+    sampler.start(
+        "card",
+        "translate_y",
+        AnimationId(12),
+        Animation::new(40.0, 0.0, 200.0),
+    );
     assert_eq!(sampler.len(), 2);
     assert_eq!(sampler.value("card", "opacity"), Some(0.0));
 
@@ -117,7 +137,7 @@ fn the_sampler_runs_on_a_clock_that_only_moves_when_told() {
     // The first one ends here, with its exact final value, and is gone.
     let frame = sampler.advance(50.0);
     assert_eq!(frame.value("card", "opacity"), Some(1.0));
-    assert_eq!(frame.finished, [("card".to_owned(), "opacity".to_owned())]);
+    assert_eq!(names(&frame), [("card".to_owned(), "opacity".to_owned())]);
     assert_eq!(sampler.len(), 1);
     assert_eq!(sampler.value("card", "opacity"), None);
 
@@ -129,7 +149,7 @@ fn the_sampler_runs_on_a_clock_that_only_moves_when_told() {
     }
     let frame = sampler.advance(100.0);
     assert_eq!(
-        frame.finished,
+        names(&frame),
         [("card".to_owned(), "translate_y".to_owned())]
     );
     assert!(sampler.is_empty());
@@ -138,19 +158,44 @@ fn the_sampler_runs_on_a_clock_that_only_moves_when_told() {
 #[test]
 fn starting_replaces_and_cancelling_stops_without_finishing() {
     let mut sampler = AnimationSampler::new();
-    sampler.start("a", "opacity", Animation::new(0.0, 1.0, 100.0));
+    sampler.start(
+        "a",
+        "opacity",
+        AnimationId(13),
+        Animation::new(0.0, 1.0, 100.0),
+    );
     sampler.advance(50.0);
     // A newer animation on the same key replaces it, starting from the clock.
-    sampler.start("a", "opacity", Animation::new(0.5, 0.0, 100.0));
+    sampler.start(
+        "a",
+        "opacity",
+        AnimationId(14),
+        Animation::new(0.5, 0.0, 100.0),
+    );
     assert_eq!(sampler.len(), 1);
     let frame = sampler.advance(50.0);
     assert_eq!(frame.value("a", "opacity"), Some(0.25));
     assert!(sampler.cancel("a", "opacity"));
     assert!(!sampler.cancel("a", "opacity"));
     assert!(sampler.advance(500.0).finished.is_empty());
-    sampler.start("b", "opacity", Animation::new(0.0, 1.0, 10.0));
-    sampler.start("b", "rotate", Animation::new(0.0, 1.0, 10.0));
-    sampler.start("c", "rotate", Animation::new(0.0, 1.0, 10.0));
+    sampler.start(
+        "b",
+        "opacity",
+        AnimationId(15),
+        Animation::new(0.0, 1.0, 10.0),
+    );
+    sampler.start(
+        "b",
+        "rotate",
+        AnimationId(16),
+        Animation::new(0.0, 1.0, 10.0),
+    );
+    sampler.start(
+        "c",
+        "rotate",
+        AnimationId(17),
+        Animation::new(0.0, 1.0, 10.0),
+    );
     sampler.cancel_node("b");
     assert_eq!(sampler.len(), 1);
     sampler.clear();
@@ -186,7 +231,7 @@ fn the_sampling_renderer_animates_resolves_current_and_reports_the_end() {
     let frame = renderer.advance(50.0);
     assert_eq!(frame.value("card", "opacity"), Some(0.25));
     let frame = renderer.advance(50.0);
-    assert_eq!(frame.finished, [("card".to_owned(), "opacity".to_owned())]);
+    assert_eq!(names(&frame), [("card".to_owned(), "opacity".to_owned())]);
     // Afterwards the live value is the end value.
     assert_eq!(renderer.value("card", "opacity"), Some(0.0));
     assert_eq!(renderer.running(), 0);
@@ -213,7 +258,7 @@ fn current_without_a_known_value_starts_at_the_target() {
     let frame = renderer.advance(50.0);
     assert_eq!(frame.value("ghost", "opacity"), Some(0.8));
     let frame = renderer.advance(50.0);
-    assert_eq!(frame.finished, [("ghost".to_owned(), "opacity".to_owned())]);
+    assert_eq!(names(&frame), [("ghost".to_owned(), "opacity".to_owned())]);
 }
 
 #[test]
@@ -226,6 +271,7 @@ fn the_trace_line_of_an_animate_is_stable() {
         duration_ms: 350.0,
         delay_ms: 0.0,
         easing: Easing::expo_out(),
+        id: AnimationId(7),
     };
     assert_eq!(
         enter.to_string(),
@@ -240,6 +286,7 @@ fn the_trace_line_of_an_animate_is_stable() {
         duration_ms: 100.0,
         delay_ms: 200.0,
         easing: Easing::CubicOut,
+        id: AnimationId(8),
     };
     assert_eq!(
         trace(&[release]),
@@ -293,4 +340,59 @@ fn a_recording_renderer_has_no_clock_and_applies_the_target_at_once() {
     let mut renderer = RecordingRenderer::new();
     renderer.apply(&[animate("a", "opacity", AnimFrom::Value(0.0), 0.7)]);
     assert_eq!(renderer.live_value("a", "opacity"), Some(Value::Float(0.7)));
+}
+
+#[test]
+fn an_ended_animation_carries_the_id_it_started_with() {
+    let mut sampler = AnimationSampler::new();
+    sampler.start(
+        "a",
+        "opacity",
+        AnimationId(3),
+        Animation::new(0.0, 1.0, 10.0),
+    );
+    assert_eq!(sampler.id("a", "opacity"), Some(AnimationId(3)));
+    assert_eq!(sampler.id("a", "rotate"), None);
+    // A newer one replaces it, id and all.
+    sampler.start(
+        "a",
+        "opacity",
+        AnimationId(9),
+        Animation::new(0.0, 1.0, 10.0),
+    );
+    let frame = sampler.advance(10.0);
+    assert_eq!(frame.finished.len(), 1);
+    assert_eq!(frame.finished[0].id, AnimationId(9));
+    assert_eq!(sampler.id("a", "opacity"), None);
+
+    let mut renderer = SamplingRenderer::new();
+    let patch = Patch::Animate {
+        node: "card".into(),
+        property: "opacity".into(),
+        from: AnimFrom::Value(0.0),
+        to: 1.0,
+        duration_ms: 10.0,
+        delay_ms: 0.0,
+        easing: Easing::Linear,
+        id: AnimationId(42),
+    };
+    renderer.apply(&[patch]);
+    assert_eq!(
+        renderer.running_id("card", "opacity"),
+        Some(AnimationId(42))
+    );
+    let frame = renderer.advance(10.0);
+    assert_eq!(frame.finished[0].id, AnimationId(42));
+    assert_eq!(AnimationId(42).to_string(), "#42");
+}
+
+#[test]
+fn the_id_is_part_of_the_patch_but_not_of_its_trace_line() {
+    let a = animate("a", "opacity", AnimFrom::Current, 1.0);
+    let mut b = a.clone();
+    if let Patch::Animate { id, .. } = &mut b {
+        *id = AnimationId(2);
+    }
+    assert_ne!(a, b);
+    assert_eq!(a.to_string(), b.to_string());
 }

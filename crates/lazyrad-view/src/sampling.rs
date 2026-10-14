@@ -1,6 +1,6 @@
 //! A renderer with a virtual clock, for golden tests of motion.
 
-use crate::animation::{AnimationSampler, Frame};
+use crate::animation::{AnimationId, AnimationSampler, Frame};
 use crate::patch::Patch;
 use crate::renderer::{RecordingRenderer, Renderer};
 use crate::value::Value;
@@ -10,13 +10,15 @@ use crate::value::Value;
 /// `250` ms) without any real time passing.
 ///
 /// * [`Patch::Animate`] starts an [`Animation`](crate::Animation) at the
-///   current virtual time. `from: Current` starts from the value
-///   [`value`](Self::value) reports; a newer animation on the same node and
-///   property replaces the running one; a `Set`, an `Unset` or a `Remove` of it
-///   cancels it.
+///   current virtual time, remembering the patch's id. `from: Current` starts
+///   from the value [`value`](Self::value) reports; a newer animation on the
+///   same node and property replaces the running one; a `Set`, an `Unset` or a
+///   `Remove` of it cancels it.
 /// * [`advance`](Self::advance) moves the clock and returns the sampled
-///   [`Frame`], with the animations that ended in `finished`: report them to
-///   [`Session::finished`](crate::Session::finished), as a real renderer does.
+///   [`Frame`], with the animations that ended in `finished` (each with its
+///   id): report them to [`Session::finished`](crate::Session::finished), as a
+///   real renderer does. A test that wants a renderer that **misses** a report
+///   simply does not.
 /// * [`live_value`](Renderer::live_value) answers with the animated value
 ///   while one runs, so the session sees what the widget shows.
 ///
@@ -88,6 +90,13 @@ impl SamplingRenderer {
         self.sampler.value(node, property).is_some()
     }
 
+    /// The id of the animation running on `node.property`, as the patch that
+    /// started it numbered it.
+    #[must_use]
+    pub fn running_id(&self, node: &str, property: &str) -> Option<AnimationId> {
+        self.sampler.id(node, property)
+    }
+
     /// The number `node.property` shows now: the animated value while one
     /// runs, else the live value if it is numeric.
     #[must_use]
@@ -123,11 +132,13 @@ impl Renderer for SamplingRenderer {
                         self.sampler.cancel_node(&name);
                     }
                 }
-                Patch::Animate { node, property, .. } => {
+                Patch::Animate {
+                    node, property, id, ..
+                } => {
                     // Read before the recording applies `to`.
                     let current = self.value(node, property);
                     if let Some(animation) = patch.animation(current) {
-                        self.sampler.start(node, property, animation);
+                        self.sampler.start(node, property, *id, animation);
                     }
                 }
                 Patch::Move { .. } => {}

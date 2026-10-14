@@ -103,7 +103,9 @@ mod turn;
 mod value;
 mod visible;
 
-pub use animation::{AnimFrom, Animation, AnimationSampler, Frame, Sample, clamp_ms};
+pub use animation::{
+    AnimFrom, Animation, AnimationId, AnimationSampler, Ended, Frame, Sample, clamp_ms,
+};
 pub use bindings::{BindingScope, BindingStats, Bindings, Dependencies, check_expression};
 pub use easing::{DEFAULT_EXPONENT, Easing};
 pub use environment::Environment;

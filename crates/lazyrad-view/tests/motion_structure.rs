@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{built, map, phone, settle, tick, tree, visible_state};
+use common::{built, ended, map, phone, report, settle, tick, tree, visible_state};
 use lazyrad_view::{
     Bindings, Edge, Motion, Node, Patch, Preset, RecordingRenderer, Renderer, Session, trace,
 };
@@ -57,12 +57,13 @@ fn a_node_removed_from_the_tree_is_held_then_removed_after_finished() {
     );
     assert_eq!(session.motion_stats().held, 1);
 
+    let exit = session.running_animation("b", "opacity").expect("the exit");
     tick(&mut session, &mut renderer, 250.0);
     assert_eq!(renderer.take_trace(), "remove b\n");
     assert_eq!(names(&session), ["root", "a", "c", "d"]);
     assert_eq!(session.motion_stats().held, 0);
     // A late duplicate removes nothing.
-    assert!(session.finished("b", "opacity").is_empty());
+    assert!(session.finished("b", "opacity", exit).is_empty());
     assert_eq!(session.value("b", "opacity"), None);
 }
 
@@ -84,7 +85,7 @@ fn a_node_added_back_while_it_exits_cancels_the_exit() {
     );
     assert_eq!(session.motion_stats().held, 0);
     let frame = tick(&mut session, &mut renderer, 250.0);
-    assert_eq!(frame.finished, [("b".to_owned(), "opacity".to_owned())]);
+    assert_eq!(ended(&frame), [("b".to_owned(), "opacity".to_owned())]);
     // Its end must not remove it.
     assert_eq!(renderer.take_trace(), "");
     assert_eq!(names(&session), ["root", "a", "b"]);
@@ -175,13 +176,19 @@ fn a_slide_exit_waits_for_every_property_in_either_order() {
              easing=expo_in(6.0)\n"
         );
         renderer.apply(&turn.patches);
-        assert!(session.finished("b", order[0]).is_empty());
+        let id = |session: &Session, property: &str| {
+            session
+                .running_animation("b", property)
+                .expect("an exit animation")
+        };
+        let (first, second) = (id(&session, order[0]), id(&session, order[1]));
+        assert!(session.finished("b", order[0], first).is_empty());
         assert_eq!(session.motion_stats().held, 1);
-        let last = session.finished("b", order[1]);
+        let last = session.finished("b", order[1], second);
         assert_eq!(trace(&last), "remove b\n");
         // Both again: nothing, and nothing is removed twice.
-        assert!(session.finished("b", order[0]).is_empty());
-        assert!(session.finished("b", order[1]).is_empty());
+        assert!(session.finished("b", order[0], first).is_empty());
+        assert!(session.finished("b", order[1], second).is_empty());
     }
 }
 
@@ -228,7 +235,7 @@ fn reduced_motion_turns_a_slide_exit_into_a_fade() {
         trace(&turn.patches),
         "animate b.opacity from=1.0 to=0.0 duration=250.0 delay=0.0 easing=expo_in(6.0)\n"
     );
-    assert_eq!(trace(&session.finished("b", "opacity")), "remove b\n");
+    assert_eq!(trace(&report(&mut session, "b", "opacity")), "remove b\n");
 }
 
 #[test]
@@ -276,6 +283,7 @@ fn a_rebuild_forgets_what_was_running_and_holding() {
     let turn = session.reconcile(tree(row(&["a"])), &rhai::Map::new(), &phone());
     renderer.apply(&turn.patches);
     assert_eq!(session.motion_stats().held, 1);
+    let exit = session.running_animation("b", "opacity").expect("the exit");
     // The renderer discards its tree on a build; nothing is held for it, and
     // the node that was leaving is not part of what the build describes.
     let rebuilt = session.build(&rhai::Map::new(), &phone());
@@ -286,7 +294,7 @@ fn a_rebuild_forgets_what_was_running_and_holding() {
     );
     assert_eq!(session.motion_stats().running, 0);
     assert_eq!(session.motion_stats().held, 0);
-    assert!(session.finished("b", "opacity").is_empty());
+    assert!(session.finished("b", "opacity", exit).is_empty());
     assert_eq!(names(&session), ["root", "a"]);
 }
 

@@ -60,6 +60,7 @@ impl PartialEq for Patch {
                     duration_ms,
                     delay_ms,
                     easing,
+                    id,
                 },
                 Self::Animate {
                     node: node2,
@@ -69,6 +70,7 @@ impl PartialEq for Patch {
                     duration_ms: duration_ms2,
                     delay_ms: delay_ms2,
                     easing: easing2,
+                    id: id2,
                 },
             ) => {
                 node == node2
@@ -78,6 +80,7 @@ impl PartialEq for Patch {
                     && same_float(*duration_ms, *duration_ms2)
                     && same_float(*delay_ms, *delay_ms2)
                     && easing == easing2
+                    && id == id2
             }
             (Self::Remove { node }, Self::Remove { node: node2 }) => node == node2,
             (

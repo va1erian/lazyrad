@@ -44,12 +44,15 @@
 //! [`Patch::Animate`] instead of a `Set`; a node that is created for the first
 //! time, or shown, runs its `enter`; one that leaves the tree
 //! ([`reconcile`](Session::reconcile)) or is hidden runs its `exit` and is held
-//! until the renderer reports it [`finished`](Session::finished). The renderer
-//! owns the clock: the session reads none, and a test drives a virtual one
-//! (see [`SamplingRenderer`](crate::SamplingRenderer)).
+//! until the renderer reports its animation [`finished`](Session::finished) by
+//! id, or the host's [`advance`](Session::advance) tick finds it overdue. The
+//! renderer owns the clock: the session reads none (its own is the one
+//! `advance` moves), and a test drives a virtual one (see
+//! [`SamplingRenderer`](crate::SamplingRenderer)).
 
 mod lifecycle;
 mod pass;
+mod press;
 mod slots;
 mod structure;
 
