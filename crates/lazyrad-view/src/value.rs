@@ -10,6 +10,7 @@ use rhai::Dynamic;
 /// exact: `Int(1)` is not `Float(1.0)`, and a `Float` NaN equals itself, so a
 /// NaN result does not produce a patch every turn.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Value {
     /// A boolean.
     Bool(bool),
@@ -29,6 +30,7 @@ pub enum Value {
 
 /// The type of a [`Value`], without the payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ValueKind {
     /// [`Value::Bool`].
     Bool,
@@ -56,6 +58,7 @@ impl fmt::Display for ValueKind {
 
 /// Why a Rhai value is not a property [`Value`].
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ValueError {
     /// The expression produced `()`, usually a missing key or a branch with no
     /// `else`.

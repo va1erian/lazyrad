@@ -22,6 +22,13 @@ pub struct Environment {
     pub dark: bool,
     /// The user's text scale, `1.0` for the default size.
     pub text_scale: f32,
+    /// Whether the user asked for reduced motion (the OS setting, or
+    /// `prefers-reduced-motion` on the web).
+    ///
+    /// The motion planner honours it (see [`motion`](crate::motion)): `Slide`
+    /// resolves to `Fade`, `PressScale` is dropped and a `change` transition is
+    /// an instant `Set`.
+    pub reduce_motion: bool,
 }
 
 /// `a == b`, with NaN equal to NaN.
@@ -35,13 +42,15 @@ impl PartialEq for Environment {
             && same_float(self.height, other.height)
             && self.dark == other.dark
             && same_float(self.text_scale, other.text_scale)
+            && self.reduce_motion == other.reduce_motion
     }
 }
 
 impl Eq for Environment {}
 
 impl Environment {
-    /// A light environment at the default text scale, `width` by `height` dp.
+    /// A light environment at the default text scale, `width` by `height` dp,
+    /// with motion allowed.
     #[must_use]
     pub const fn new(width: f32, height: f32) -> Self {
         Self {
@@ -49,6 +58,7 @@ impl Environment {
             height,
             dark: false,
             text_scale: 1.0,
+            reduce_motion: false,
         }
     }
 
@@ -67,6 +77,7 @@ impl Environment {
     /// | `size_class` | string | `"compact"`, `"medium"`, `"expanded"`, `"large"` or `"xlarge"` |
     /// | `dark`       | bool   | dark theme active                      |
     /// | `text_scale` | float  | text scale factor                      |
+    /// | `reduce_motion` | bool | the user asked for reduced motion       |
     ///
     /// Sizes are floats because dp are fractional; compare them with a float
     /// or an integer literal alike (`env.width >= 600`).
@@ -84,6 +95,7 @@ impl Environment {
             "text_scale".into(),
             Dynamic::from_float(f64::from(self.text_scale)),
         );
+        map.insert("reduce_motion".into(), Dynamic::from(self.reduce_motion));
         map
     }
 }
@@ -99,12 +111,26 @@ mod tests {
             height: 500.0,
             dark: true,
             text_scale: 1.5,
+            reduce_motion: true,
         };
         let map = env.to_map();
         let keys: Vec<&str> = map.keys().map(|k| k.as_str()).collect();
         assert_eq!(
             keys,
-            ["dark", "height", "size_class", "text_scale", "width"]
+            [
+                "dark",
+                "height",
+                "reduce_motion",
+                "size_class",
+                "text_scale",
+                "width"
+            ]
+        );
+        assert!(map["reduce_motion"].as_bool().unwrap());
+        assert!(
+            !Environment::new(1.0, 1.0).to_map()["reduce_motion"]
+                .as_bool()
+                .unwrap()
         );
         assert!(!map.contains_key("platform"));
         assert_eq!(map["size_class"].clone().into_string().unwrap(), "medium");
@@ -125,6 +151,19 @@ mod tests {
         same.text_scale = f32::NAN;
         assert_eq!(scaled, same);
         assert_eq!(Environment::new(0.0, 0.0), Environment::new(-0.0, 0.0));
+    }
+
+    #[test]
+    fn reduced_motion_is_part_of_the_equality() {
+        let calm = Environment::new(360.0, 640.0);
+        let mut reduced = calm;
+        reduced.reduce_motion = true;
+        assert_ne!(calm, reduced);
+        // NaN-aware equality is unaffected by the new field.
+        let mut nan = reduced;
+        nan.width = f32::NAN;
+        assert_eq!(nan, nan);
+        assert_ne!(nan, reduced);
     }
 
     #[test]

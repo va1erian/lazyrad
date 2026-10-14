@@ -24,8 +24,8 @@
 //! # Failure
 //!
 //! A binding that fails keeps its last good value (or, before its first good
-//! value, the literal or responsive value) and yields one [`BindDiagnostic`]
-//! per turn. It is evaluated again every turn until it succeeds. Nothing
+//! value, the literal or responsive value) and yields one
+//! [`BindDiagnostic`](crate::BindDiagnostic) per turn. It is evaluated again every turn until it succeeds. Nothing
 //! panics and no other binding is affected.
 //!
 //! # What is re-evaluated
@@ -36,57 +36,55 @@
 //! them, see [`bindings`](crate::bindings), is not a change); one that reads
 //! none of them runs only at build. Responsive patches are re-resolved on every
 //! turn, and produce patches only when the size class changes the cascade.
+//!
+//! # Motion
+//!
+//! The same turn plans motion (see [`motion`](crate::motion)): a change to an
+//! animatable property of a node with a `change` transition is a
+//! [`Patch::Animate`] instead of a `Set`; a node that is created for the first
+//! time, or shown, runs its `enter`; one that leaves the tree
+//! ([`reconcile`](Session::reconcile)) or is hidden runs its `exit` and is held
+//! until the renderer reports its animation [`finished`](Session::finished) by
+//! id, or the host's [`advance`](Session::advance) tick finds it overdue. The
+//! renderer owns the clock: the session reads none (its own is the one
+//! `advance` moves), and a test drives a virtual one (see
+//! [`SamplingRenderer`](crate::SamplingRenderer)).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+mod lifecycle;
+mod pass;
+mod press;
+mod slots;
+mod structure;
+
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use rhai::Map;
 
-use crate::bindings::{BindingScope, Bindings, Dependencies};
+use crate::bindings::{BindingScope, Bindings};
 use crate::environment::Environment;
-use crate::node::Node;
+#[cfg(doc)]
 use crate::patch::Patch;
+use crate::planner::{ExitKind, Live, Planner};
 use crate::renderer::Renderer;
-use crate::size_class::{Responsive, SizeClass};
-use crate::state_eq::same_map;
+use crate::size_class::SizeClass;
 use crate::tree::Tree;
-pub use crate::turn::{BindDiagnostic, TurnResult};
-use crate::value::{Value, ValueKind};
-use crate::visible::View;
+use crate::turn::TurnResult;
+use crate::value::Value;
+use slots::{Last, Props, carry};
 
-/// What the session remembers about one property of one node.
-struct PropState {
-    /// The fixed value kind, once known.
-    kind: Option<ValueKind>,
-    /// What the binding reads; `None` for an unbound property.
-    deps: Option<Dependencies>,
-    /// The value the renderer was last given.
-    applied: Option<Value>,
-    /// The last value the binding produced successfully.
-    good: Option<Value>,
-    /// Whether the binding failed on the last turn that ran it.
-    failed: bool,
-}
-
-impl PropState {
-    fn new(node: &Node, property: &str) -> Self {
-        Self {
-            kind: node.literal_kind(property),
-            deps: node
-                .bind
-                .get(property)
-                .map(|source| Dependencies::scan(source)),
-            applied: None,
-            good: None,
-            failed: false,
-        }
-    }
-}
-
-/// The inputs of the last turn, which the next one is compared with.
-struct Last {
-    env: Environment,
-    state: Map,
+/// What the motion planner is holding, for tests and diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MotionStats {
+    /// Animations in flight: started and not yet reported finished or
+    /// replaced. Bounded by
+    /// [`MAX_RUNNING_ANIMATIONS`](crate::limits::MAX_RUNNING_ANIMATIONS).
+    pub running: usize,
+    /// Nodes held by an exit that has not finished.
+    pub held: usize,
+    /// Animations that were not started because the limit was reached; the
+    /// change was applied at once. Counts for the life of the session.
+    pub degraded: u64,
 }
 
 /// A view tree bound to state: it builds the tree once and then turns state
@@ -97,11 +95,16 @@ pub struct Session {
     tree: Tree,
     bindings: Rc<Bindings>,
     /// Per node, in pre-order, indexed like [`Tree::placements`].
-    slots: Vec<BTreeMap<String, PropState>>,
+    slots: Vec<Props>,
     /// Node name to its slot.
     index: HashMap<String, usize>,
     /// `None` until the first turn: the session is not built yet.
     last: Option<Last>,
+    /// What is running, entering, leaving or pressed.
+    planner: Planner,
+    /// Names the next turn must `Create`: nodes [`reconcile`](Self::reconcile)
+    /// added.
+    pending_create: HashSet<String>,
 }
 
 impl Session {
@@ -117,18 +120,23 @@ impl Session {
             slots: Vec::new(),
             index: HashMap::new(),
             last: None,
+            planner: Planner::default(),
+            pending_create: HashSet::new(),
         };
         session.reset();
         session
     }
 
-    /// The tree.
+    /// The tree: the one the session was given, or last
+    /// [reconciled](Self::reconcile) to, plus the nodes that are still leaving
+    /// (an exit holds its node in the tree until it finishes).
     #[must_use]
     pub fn tree(&self) -> &Tree {
         &self.tree
     }
 
-    /// The value `property` of `node` was last given, if it has one.
+    /// The value `property` of `node` was last given, if it has one. For an
+    /// animated property this is the value it is going to.
     #[must_use]
     pub fn value(&self, node: &str, property: &str) -> Option<&Value> {
         let slot = self.slots.get(*self.index.get(node)?)?;
@@ -141,8 +149,23 @@ impl Session {
         self.last.as_ref().map(|last| last.env.size_class())
     }
 
+    /// What the motion planner holds right now.
+    #[must_use]
+    pub fn motion_stats(&self) -> MotionStats {
+        MotionStats {
+            running: self.planner.running(),
+            held: self.planner.exits.len(),
+            degraded: self.planner.degraded,
+        }
+    }
+
     /// Replaces the tree (a hot reload). Everything applied is forgotten, so
-    /// the session is unbuilt: call [`build`](Self::build) next.
+    /// the session is unbuilt: call [`build`](Self::build) next. Use
+    /// [`reconcile`](Self::reconcile) to keep what is applied.
+    ///
+    /// The nodes that have already entered stay known by name, so the rebuild
+    /// does not play their `enter` again. A name the new tree does not have is
+    /// forgotten: a node that comes back later is a new node and enters.
     pub fn replace_tree(&mut self, tree: Tree) {
         self.tree = tree;
         self.reset();
@@ -153,26 +176,50 @@ impl Session {
     ///
     /// Calling it again is a rebuild: every applied value, last good value
     /// and failure is forgotten and the result again describes the whole tree.
+    /// The `enter` of a node that has entered before does not play again (see
+    /// [`Motion`](crate::Motion)); animations in flight are forgotten, because
+    /// the renderer discards the tree it had.
+    ///
+    /// The `Animate` patches of the nodes that do enter follow the last
+    /// `Create`, so a renderer has the whole tree before anything moves.
     pub fn build(&mut self, state: &Map, env: &Environment) -> TurnResult {
+        // A node that is still leaving is not part of what was asked for: the
+        // renderer discards its tree, and the rebuild must not bring it back.
+        let leaving: Vec<String> = self
+            .planner
+            .exits
+            .iter()
+            .filter(|(_, exit)| exit.kind == ExitKind::Remove)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in leaving {
+            self.tree.remove_subtree(&name);
+        }
         self.reset();
-        self.turn(state, env)
+        self.turn(state, env, &Live::none())
     }
 
     /// Re-evaluates what can have changed and returns a [`Patch::Set`] (or
-    /// [`Patch::Unset`]) for each property whose value differs from the last
+    /// [`Patch::Unset`], or a [`Patch::Animate`] for a property with a `change`
+    /// transition) for each property whose value differs from the last
     /// *applied* one.
     ///
     /// On a session that is not built yet this is a [`build`](Self::build).
     pub fn update(&mut self, state: &Map, env: &Environment) -> TurnResult {
-        self.turn(state, env)
+        self.turn(state, env, &Live::none())
     }
 
     /// [`update`](Self::update), then hands the patches to `renderer`.
     ///
     /// A `Set` whose value equals the renderer's
-    /// [`live_value`](Renderer::live_value) is dropped first: the widget
-    /// already shows it, and writing it again would reset the caret of a text
-    /// field being typed in. The session counts such a value as applied. The
+    /// [`live_value`](Renderer::live_value) is dropped: the widget already
+    /// shows it, and writing it again would reset the caret of a text field
+    /// being typed in. The session counts such a value as applied. So is an
+    /// `Animate` whose target the renderer already shows. Neither is dropped
+    /// while an animation of that property is in flight: the live value is
+    /// then mid-way, and the new patch is what replaces the animation. The
+    /// preset animations of an `enter` are never dropped either: they start
+    /// from a value the preset chooses, not from what the widget shows. The
     /// returned [`TurnResult`] holds the patches that were handed over, and
     /// `apply` is not called when none are left.
     ///
@@ -189,15 +236,10 @@ impl Session {
         env: &Environment,
         renderer: &mut dyn Renderer,
     ) -> TurnResult {
-        let mut result = self.turn(state, env);
-        result.patches.retain(|patch| match patch {
-            Patch::Set {
-                node,
-                property,
-                value,
-            } => renderer.live_value(node, property).as_ref() != Some(value),
-            _ => true,
-        });
+        let result = {
+            let live = Live(Some(&*renderer));
+            self.turn(state, env, &live)
+        };
         if !result.patches.is_empty() {
             renderer.apply(&result.patches);
         }
@@ -205,172 +247,64 @@ impl Session {
     }
 
     /// Forgets everything applied and re-derives the per-node tables.
+    ///
+    /// What survives is the set of names that have entered (pruned to the
+    /// nodes the tree has), which is the identity an `enter` is gated on.
     fn reset(&mut self) {
-        let placements = self.tree.placements();
-        // Room for every distinct source of this tree, so the compile cache
-        // never thrashes on a form with many bindings.
-        let sources: HashSet<&str> = placements
+        self.reserve_sources();
+        self.reindex();
+        self.slots = self
+            .tree
+            .placements()
             .iter()
-            .flat_map(|placement| placement.node.bind.values().map(String::as_str))
+            .map(|placement| carry(placement.node, None))
+            .collect();
+        self.last = None;
+        self.pending_create.clear();
+        self.planner.reset();
+        let tree = &self.tree;
+        self.planner.entered.retain(|name| tree.contains(name));
+    }
+
+    /// Room in the compile cache for every distinct source of the tree, so it
+    /// never thrashes on a form with many bindings.
+    fn reserve_sources(&self) {
+        let sources: HashSet<&str> = self
+            .tree
+            .iter()
+            .flat_map(|node| node.bind.values().map(String::as_str))
             .collect();
         self.bindings.reserve(sources.len());
-        self.index = placements
+    }
+
+    /// Node name to slot, from the tree's pre-order.
+    fn reindex(&mut self) {
+        self.index = self
+            .tree
+            .placements()
             .iter()
             .enumerate()
             .map(|(slot, placement)| (placement.node.name.clone(), slot))
             .collect();
-        self.slots = placements
-            .iter()
-            .map(|placement| {
-                placement
-                    .node
-                    .property_names()
-                    .into_iter()
-                    .map(|property| {
-                        (
-                            property.to_owned(),
-                            PropState::new(placement.node, property),
-                        )
-                    })
-                    .collect()
-            })
-            .collect();
-        self.last = None;
-    }
-
-    fn turn(&mut self, state: &Map, env: &Environment) -> TurnResult {
-        let full = self.last.is_none();
-        let env_changed = self.last.as_ref().is_none_or(|last| last.env != *env);
-        // What bindings can see of the state, which is also what decides
-        // whether a binding has anything new to read: a change inside an
-        // entry that is hidden from them is not a change to them. Building it
-        // costs at most `VISIBLE_BUDGET` steps per entry, however big the
-        // state is.
-        let state_view = View::of("state", state);
-        let state_changed = self
-            .last
-            .as_ref()
-            .is_none_or(|last| !same_map(&last.state, &state_view.map));
-        let class = env.size_class();
-        let placements = self.tree.placements();
-
-        // Phase 1: evaluate. Reads the session, changes nothing.
-        let mut scope: Option<BindingScope> = None;
-        let mut outcomes = Vec::new();
-        for (slot, placement) in placements.iter().enumerate() {
-            for (property, source) in &placement.node.bind {
-                let Some(prop) = self.slots[slot].get(property) else {
-                    continue;
-                };
-                let deps = prop.deps.unwrap_or_default();
-                let due = full
-                    || prop.failed
-                    || (deps.reads_state_or_props() && state_changed)
-                    || (deps.env && env_changed);
-                if !due {
-                    continue;
-                }
-                let scope = scope.get_or_insert_with(|| {
-                    BindingScope::from_views(
-                        &state_view,
-                        &View::default(),
-                        &View::of("env", &env.to_map()),
-                    )
-                });
-                let result = self.bindings.evaluate(source, scope, prop.kind);
-                outcomes.push((slot, property, result));
-            }
-        }
-
-        // Phase 2: commit the outcomes.
-        let mut diagnostics = Vec::new();
-        for (slot, property, result) in outcomes {
-            let Some(prop) = self.slots[slot].get_mut(property) else {
-                continue;
-            };
-            match result {
-                Ok(value) => {
-                    prop.kind.get_or_insert(value.kind());
-                    prop.good = Some(value);
-                    prop.failed = false;
-                }
-                Err(error) => {
-                    prop.failed = true;
-                    diagnostics.push(BindDiagnostic {
-                        node: placements[slot].node.name.clone(),
-                        property: property.clone(),
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-
-        // Phase 3: diff against what was applied.
-        let mut patches = Vec::new();
-        for (slot, placement) in placements.iter().enumerate() {
-            let node = placement.node;
-            if full {
-                let mut props = BTreeMap::new();
-                for (property, prop) in &mut self.slots[slot] {
-                    prop.applied = effective(node, property, prop, class);
-                    if let Some(value) = &prop.applied {
-                        props.insert(property.clone(), value.clone());
-                    }
-                }
-                patches.push(Patch::Create {
-                    node: node.name.clone(),
-                    parent: placement.parent.map(str::to_owned),
-                    index: placement.index,
-                    kind: node.kind.clone(),
-                    props,
-                });
-                continue;
-            }
-            for (property, prop) in &mut self.slots[slot] {
-                let wanted = effective(node, property, prop, class);
-                if wanted == prop.applied {
-                    continue;
-                }
-                patches.push(match &wanted {
-                    Some(value) => Patch::Set {
-                        node: node.name.clone(),
-                        property: property.clone(),
-                        value: value.clone(),
-                    },
-                    None => Patch::Unset {
-                        node: node.name.clone(),
-                        property: property.clone(),
-                    },
-                });
-                prop.applied = wanted;
-            }
-        }
-
-        // The snapshot is only replaced when the visible state changed, so a
-        // resize or a no-op turn costs a comparison, not a copy.
-        if state_changed || self.last.is_none() {
-            self.last = Some(Last {
-                env: *env,
-                state: state_view.map,
-            });
-        } else if let Some(last) = self.last.as_mut() {
-            last.env = *env;
-        }
-        TurnResult {
-            patches,
-            diagnostics,
-        }
     }
 }
 
-/// The value a property should show: its binding's last good value, else the
-/// responsive cascade for `class`, else the literal.
-fn effective(node: &Node, property: &str, prop: &PropState, class: SizeClass) -> Option<Value> {
-    if let Some(good) = &prop.good {
-        return Some(good.clone());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::Node;
+    use crate::patch::Patch;
+
+    #[test]
+    fn a_session_over_an_empty_motion_makes_no_motion_patches() {
+        let tree = Tree::new(Node::new("root", "Column").with_prop("gap", 4)).unwrap();
+        let mut session = Session::new(tree, Bindings::new());
+        let turn = session.build(&Map::new(), &Environment::new(360.0, 640.0));
+        assert!(
+            turn.patches
+                .iter()
+                .all(|patch| matches!(patch, Patch::Create { .. }))
+        );
+        assert_eq!(session.motion_stats(), MotionStats::default());
     }
-    Responsive::new(&node.responsive)
-        .property(class, property)
-        .or_else(|| node.props.get(property))
-        .cloned()
 }

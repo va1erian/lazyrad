@@ -12,6 +12,21 @@ pub trait Renderer {
     ///
     /// A build's patches describe the whole tree (the first one is the root's
     /// `Create`), so a renderer discards what it had before reading them.
+    ///
+    /// An [`Animate`](Patch::Animate) is the renderer's to run, on its own
+    /// clock. It must report each animation that runs to its end by calling
+    /// [`Session::finished`](crate::Session::finished) with the patch's `id`
+    /// (and apply the patches that returns), because a node that is leaving
+    /// is held until it does. A renderer that cannot animate a property
+    /// applies `to` at once and reports it finished. The host should also
+    /// tick [`Session::advance`](crate::Session::advance) from its frame
+    /// callback, so a report that is missed does not hold a node for ever.
+    ///
+    /// Animation ids are unique **per session**, not per process. A host that
+    /// swaps or re-creates the [`Session`](crate::Session) over the same
+    /// renderer must discard the renderer's pending reports from the old
+    /// session: a stale id of the old session can equal one of the new
+    /// session's (its first animation is `#1`), and would be taken for it.
     fn apply(&mut self, patches: &[Patch]);
 
     /// The value `property` of `node` has in the rendered widget right now, if
@@ -37,11 +52,22 @@ pub trait Renderer {
 ///
 /// Its [`live_value`](Renderer::live_value) answers from those values, so it
 /// behaves like a renderer whose widgets report what they display. Use
-/// [`set_live`](Self::set_live) to play the user editing a widget.
+/// [`set_live`](Self::set_live) to play the user editing a widget. A `Create`
+/// starts a widget from its own properties, and a `Remove` takes the values of
+/// the node and of everything created under it.
+///
+/// It has no clock, so it is a renderer that cannot animate: an
+/// [`Animate`](Patch::Animate) is recorded and its `to` is applied at once. It
+/// does not report [`Session::finished`](crate::Session::finished) either, so
+/// a test that animates calls it itself, or uses
+/// [`SamplingRenderer`](crate::SamplingRenderer), which has a virtual clock.
 #[derive(Clone, Debug, Default)]
 pub struct RecordingRenderer {
     patches: Vec<Patch>,
     live: BTreeMap<(String, String), Value>,
+    /// Each node's parent, from the `Create`s, so a `Remove` takes the
+    /// subtree's values with it.
+    parents: BTreeMap<String, String>,
 }
 
 impl RecordingRenderer {
@@ -77,6 +103,23 @@ impl RecordingRenderer {
         self.live
             .insert((node.to_owned(), property.to_owned()), value);
     }
+
+    /// `node` and every node created under it, in no particular order.
+    pub(crate) fn subtree(&self, node: &str) -> Vec<String> {
+        let mut names = vec![node.to_owned()];
+        let mut next = 0;
+        while next < names.len() {
+            let parent = names[next].clone();
+            names.extend(
+                self.parents
+                    .iter()
+                    .filter(|(_, above)| **above == parent)
+                    .map(|(name, _)| name.clone()),
+            );
+            next += 1;
+        }
+        names
+    }
 }
 
 impl Renderer for RecordingRenderer {
@@ -89,9 +132,17 @@ impl Renderer for RecordingRenderer {
                     props,
                     ..
                 } => {
-                    if parent.is_none() {
+                    match parent {
                         // A new root replaces the whole rendered tree.
-                        self.live.clear();
+                        None => {
+                            self.live.clear();
+                            self.parents.clear();
+                        }
+                        // A created widget starts from its own properties.
+                        Some(parent) => {
+                            self.live.retain(|(name, _), _| name != node);
+                            self.parents.insert(node.clone(), parent.clone());
+                        }
                     }
                     for (property, value) in props {
                         self.live
@@ -109,8 +160,19 @@ impl Renderer for RecordingRenderer {
                 Patch::Unset { node, property } => {
                     self.live.remove(&(node.clone(), property.clone()));
                 }
+                Patch::Animate {
+                    node, property, to, ..
+                } => {
+                    // No clock: the animation is over before it starts.
+                    self.live
+                        .insert((node.clone(), property.clone()), Value::Float(*to));
+                }
                 Patch::Remove { node } => {
-                    self.live.retain(|(name, _), _| name != node);
+                    // The node and everything under it.
+                    for name in self.subtree(node) {
+                        self.live.retain(|(owner, _), _| *owner != name);
+                        self.parents.remove(&name);
+                    }
                 }
                 Patch::Move { .. } => {}
             }
@@ -128,6 +190,70 @@ impl Renderer for RecordingRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::{AnimFrom, AnimationId};
+    use crate::easing::Easing;
+
+    fn create(node: &str, parent: Option<&str>, value: i64) -> Patch {
+        Patch::Create {
+            node: node.into(),
+            parent: parent.map(str::to_owned),
+            index: 0,
+            kind: "Panel".into(),
+            props: BTreeMap::from([("n".to_owned(), Value::Int(value))]),
+        }
+    }
+
+    #[test]
+    fn a_remove_takes_the_subtree_and_a_create_starts_clean() {
+        let mut renderer = RecordingRenderer::new();
+        renderer.apply(&[
+            create("root", None, 0),
+            create("card", Some("root"), 1),
+            create("label", Some("card"), 2),
+            Patch::Set {
+                node: "label".into(),
+                property: "stale".into(),
+                value: Value::Int(9),
+            },
+        ]);
+        renderer.apply(&[Patch::Remove {
+            node: "card".into(),
+        }]);
+        assert_eq!(renderer.live_value("card", "n"), None);
+        assert_eq!(renderer.live_value("label", "n"), None);
+        assert_eq!(renderer.live_value("root", "n"), Some(Value::Int(0)));
+        // The same name created again is a new widget: nothing is left over.
+        renderer.apply(&[
+            create("card", Some("root"), 5),
+            create("label", Some("card"), 6),
+        ]);
+        assert_eq!(renderer.live_value("label", "stale"), None);
+        assert_eq!(renderer.live_value("label", "n"), Some(Value::Int(6)));
+    }
+
+    #[test]
+    fn an_animation_is_applied_at_once() {
+        let mut renderer = RecordingRenderer::new();
+        renderer.apply(&[Patch::Animate {
+            node: "card".into(),
+            property: "opacity".into(),
+            from: AnimFrom::Value(0.0),
+            to: 1.0,
+            duration_ms: 350.0,
+            delay_ms: 0.0,
+            easing: Easing::expo_out(),
+            id: AnimationId(1),
+        }]);
+        assert_eq!(
+            renderer.live_value("card", "opacity"),
+            Some(Value::Float(1.0))
+        );
+        assert_eq!(
+            renderer.take_trace(),
+            "animate card.opacity from=0.0 to=1.0 duration=350.0 delay=0.0 easing=expo_out(6.0)
+"
+        );
+    }
 
     #[test]
     fn records_traces_and_tracks_live_values() {

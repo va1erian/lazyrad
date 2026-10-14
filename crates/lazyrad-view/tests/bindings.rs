@@ -251,6 +251,7 @@ fn a_binding_reads_props_and_env() {
         height: 500.0,
         dark: true,
         text_scale: 1.25,
+        reduce_motion: true,
     };
     let bindings = Bindings::new();
     let mut scope = BindingScope::new(&Map::new(), &props, &env.to_map());
@@ -261,6 +262,7 @@ fn a_binding_reads_props_and_env() {
     assert_eq!(run("env.size_class"), Ok(Value::Text("medium".into())));
     assert_eq!(run("env.dark"), Ok(Value::Bool(true)));
     assert_eq!(run("env.text_scale"), Ok(Value::Float(1.25)));
+    assert_eq!(run("env.reduce_motion"), Ok(Value::Bool(true)));
 }
 
 #[test]

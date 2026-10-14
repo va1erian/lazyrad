@@ -41,6 +41,7 @@ fn at(position: &Option<SourcePosition>) -> String {
 
 /// Why a binding could not produce a value.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum BindError {
     /// The source is not a single expression: a syntax error, a statement, an
     /// assignment, a loop, or a name that is not `state`, `props` or `env`.

@@ -42,6 +42,24 @@
 //! A value that does not fit is hidden from bindings (see
 //! [`crate::bindings`]), and the diagnostic names it.
 //!
+//! # Motion
+//!
+//! Animations are not bindings: they cost nothing in the operation budget, and
+//! none of the numbers above bounds them. They have three limits of their own.
+//!
+//! | Constant | Value | What it bounds |
+//! |---|---|---|
+//! | [`MAX_RUNNING_ANIMATIONS`] | 256 | animations in flight in one session, one per node and property |
+//! | [`MAX_ANIMATION_MS`] | 5000 | the duration, and the delay, of one animation, in milliseconds |
+//! | [`ANIMATION_GRACE_MS`] | 500 | how long past its end an animation may wait for its report before [`Session::advance`](crate::Session::advance) completes it, in milliseconds |
+//!
+//! Past the first, an animation is not started: the change is applied at once
+//! and counted in [`MotionStats::degraded`](crate::MotionStats::degraded). Past
+//! the second, a duration or delay is cut to it (and a motion that declares
+//! more is a [`TreeError`](crate::TreeError)). The third is what keeps a
+//! renderer that misses a report from holding a node, or a slot of the first
+//! limit, for the rest of the session, **if the host ticks the session**.
+//!
 //! # Native stack
 //!
 //! The worst expressions the nesting limits allow need about 350 KiB of native
@@ -132,3 +150,54 @@ pub const MAX_MAP_SIZE: usize = 512;
 /// that size-check each result as it is produced; it is deferred (see the
 /// README).
 pub const PEAK_MEMORY_CEILING: u64 = 192 * 1024 * 1024;
+
+/// The most animations a session lets run at once, counted per node and
+/// property (a `Slide` is two: its opacity and its translation).
+///
+/// **Why this number.** The cost of an animation is a tween per frame and, on
+/// the software compositor, a repaint of the node's region, so the cost is in
+/// how many nodes move together, not in the tree's size. A preset is at most
+/// two animations per node, so the limit is 128 nodes entering at once, which
+/// is more than a phone screen of rows and than a desktop form of controls. A
+/// page that animates more than that in one frame is repainting most of the
+/// window anyway, and an instant change is better than a janky one.
+///
+/// **What happens past it.** The session does not start the animation: the
+/// change is applied at once (an `enter` simply shows the node, an `exit`
+/// removes it, a `change` is a `Set`), nothing panics and the next animation
+/// that finds room runs normally. The count is
+/// [`MotionStats::degraded`](crate::MotionStats::degraded).
+///
+/// An animation counts from the patch until the renderer reports
+/// [`Session::finished`](crate::Session::finished) for it, a newer patch on the
+/// same node and property replaces it, or the host's
+/// [`Session::advance`](crate::Session::advance) finds it overdue
+/// ([`ANIMATION_GRACE_MS`] past its end). Without that tick, a renderer that
+/// never reports leaves its animations counted, and every later change is
+/// applied at once.
+pub const MAX_RUNNING_ANIMATIONS: usize = 256;
+
+/// The longest duration, and the longest delay, of one animation, in
+/// milliseconds.
+///
+/// Nothing in a user interface should move for five seconds, and the limit
+/// bounds how long an `exit` can hold its node: an infinite or enormous
+/// duration would hold it for ever. (Bounds, given a host that calls
+/// [`Session::advance`](crate::Session::advance): the hold ends at the
+/// exit's duration plus [`ANIMATION_GRACE_MS`] even if the renderer never
+/// reports. Without that tick only the renderer's report ends it.) A longer
+/// value in a [`Motion`](crate::motion::Motion) is a
+/// [`TreeError`](crate::TreeError); one that reaches the sampler or the
+/// planner another way is cut to this.
+pub const MAX_ANIMATION_MS: f64 = 5_000.0;
+
+/// How long past its end, in milliseconds, an animation may wait for the
+/// renderer's report before [`Session::advance`](crate::Session::advance)
+/// completes it as `finished` would.
+///
+/// A renderer reports an animation when it ends, a frame or two after the
+/// session's clock says it should have; the grace covers that and a stalled
+/// frame. It is not a budget for slow renderers: a late report that arrives
+/// after the session completed the animation by itself carries an id that is
+/// no longer current and changes nothing.
+pub const ANIMATION_GRACE_MS: f64 = 500.0;

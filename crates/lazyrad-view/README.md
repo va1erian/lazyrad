@@ -2,7 +2,8 @@
 
 The renderer-neutral core of LazyRAD's responsive, state-bound UI layer
 (lane B of the modern-UI plan). It turns a tree of nodes, the form's `state` and
-the window's environment into **patches** that any renderer can apply.
+the window's environment into **patches** that any renderer can apply, and
+decides **what moves** (the motion planner, lane B4); the renderer decides how.
 
 ```text
   Tree (nodes, bind, responsive)      state: Map     Environment
@@ -20,13 +21,15 @@ the window's environment into **patches** that any renderer can apply.
 | Module | Provides |
 |---|---|
 | `size_class` | `SizeClass` (Material 3 widths: 600 / 840 / 1200 / 1600 dp, lower edge inclusive) and `Responsive`, the mobile-first cascade |
-| `environment` | `Environment { width, height, dark, text_scale }` and the read-only `env` map scripts see (no `platform`) |
+| `environment` | `Environment { width, height, dark, text_scale, reduce_motion }` and the read-only `env` map scripts see (no `platform`) |
 | `value` | `Value { Bool, Int, Float, Text, Enum }` and its Rhai conversion; `1` and `1.0` are never coerced |
 | `tree` | `Node` and the validated `Tree` (unique names, one kind per property) |
 | `bindings` | `Bindings`, the side-effect-free evaluator: expressions over `state`, `props` and `env` only, compiled once, with operation, depth and size limits |
-| `patch` | `Patch { Create, Set, Unset, Remove, Move }` and the stable line-based `trace` format |
-| `session` | `Session`: `build`, `update`, `update_with`, the failure policy and the diff |
-| `renderer` | the `Renderer` trait and `RecordingRenderer` for golden patch traces |
+| `patch` | `Patch { Create, Set, Unset, Animate, Remove, Move }` and the stable line-based `trace` format |
+| `session` | `Session`: `build`, `update`, `update_with`, `reconcile`, the failure policy, the diff and the motion planner (`finished`, `advance`, `reset_motion`, `press_begin`, `press_end`) |
+| `motion` | `Motion { enter, exit, change, press }` on a `Node`, the `Preset`s (`Fade`, `Slide`, `PressScale`) and the six animatable properties |
+| `easing`, `animation` | `Easing` (byte-compatible with `xui_core::motion`), `AnimationId`, `Animation::sample` and `AnimationSampler`, a virtual clock |
+| `renderer` | the `Renderer` trait, `RecordingRenderer` for golden patch traces and `SamplingRenderer`, which adds the virtual clock |
 
 ## Rules it keeps
 
@@ -45,6 +48,99 @@ the window's environment into **patches** that any renderer can apply.
   wasm32-unknown-unknown` (which shows only Rhai's own `web-time` and
   `wasm-bindgen` edges) are the only evidence. The static musl build is checked
   in CI.
+
+## Motion
+
+Motion is declarative data on a node (`Node::motion`, empty by default, so a tree
+without it behaves as it always did). The planner is part of the turn: it knows
+the last applied value, the new one and the node's motion, so it decides
+**what** animates and emits a `Patch::Animate`. The renderer decides **how**
+(`docs/modern-ui-plan.md` §4.8).
+
+| Declared | When it runs | What the planner emits |
+|---|---|---|
+| `enter` | a node is created for a name that has not entered, or its `visible` becomes true | `Animate` from the preset's start (relative to where the node rests) to rest, after every `Create` of the turn |
+| `exit` | a node leaves the tree (`Session::reconcile`) or its `visible` becomes false | `Animate` to the preset's end; **the node is held** (not diffed, not removed) until its animation is reported `finished` (or the host's tick finds it overdue), then `Remove` (or `Set visible = false`) |
+| `change` | a property in it (only the six animatable ones) changes, or is unset | `Animate` instead of `Set` (an unset eases to the property's default), from the last applied value, or from `Current` if one is in flight |
+| `press` | `Session::press_begin` / `press_end` | scale to the press token and back after a delay |
+
+### What a renderer and a host must do
+
+- **Run `Animate`** on its own clock, and **report each animation that ran to
+  its end** with `Session::finished(node, property, id)`, `id` being the one the
+  patch carried. The session numbers every animation (never reusing a number)
+  and acts on a report only if it names the **current** animation of that node
+  and property: a late, repeated or replaced animation's report changes
+  nothing, so the usual event-queue race cannot complete an exit that has only
+  just started. A renderer that applies `to` at once because it cannot animate
+  reports it too.
+- **Tick the session.** `Session::advance(dt_ms)` is the host's frame tick: it
+  moves the session's own clock (the core reads no real one) and completes an
+  animation that is overdue (`limits::ANIMATION_GRACE_MS` past its end) exactly
+  as `finished` would. **Without it only `finished` completes animations**: a
+  renderer that misses a report (the default `RecordingRenderer` never reports)
+  holds its exiting nodes, and its slots of the animation limit, for the rest
+  of the session. With it, nothing is held longer than the exit plus the grace.
+  The grace is a crate constant, **not a budget for slow renderers**: a host
+  that runs its renderer slower than real time (devtools slow motion, a paused
+  tab) passes `dt_ms` scaled by the playback rate, so the session's clock keeps
+  the renderer's pace.
+- **Ids are per session, not per process.** A host that swaps or re-creates a
+  `Session` over the same renderer discards the renderer's pending `finished`
+  reports from the old session: a stale id can equal one the new session hands
+  out (its first animation is `#1`).
+- `Session::reset_motion()` is the hard reset for a host that knows its
+  renderer lost track: every running animation is dropped and put at rest,
+  every held node leaves as if its exit had ended.
+- `TurnResult::rebuilt` says the patches describe the whole tree (a build, or
+  a `reconcile` that fell back to one): the renderer discards what it had.
+
+### Rules the planner keeps (each has a test)
+
+- **Transform and opacity only.** `opacity`, `translate_x`, `translate_y`,
+  `scale_x`, `scale_y`, `rotate`. A `change` entry for anything else is a typed
+  `TreeError` at validation; a layout property's message says why (layout is
+  fixed once mounted and a reflow per frame is what makes an interface janky).
+- **A slide is relative to where the node rests**: `Slide(Bottom, 40)` on a
+  node at `translate_y = 100` starts at 140, not at 40.
+- **Identity-gated `enter`.** The set of names that have entered is kept across
+  `build`, `replace_tree` and `reset`, but **only for the names the tree has**:
+  a hot reload that keeps a node does not replay its `enter`, and a node that
+  left the tree is new when it comes back. A node created hidden enters when it
+  is first shown.
+- **An `Unset` is a change like any other.** For an animatable property of a
+  node with a `change` entry for it (and no reduced motion) it eases to the
+  property's default, as the `Set` that gave it a value did; otherwise it
+  applies at once.
+- **Interruption.** A `change`, `exit` or `press` that finds an animation in
+  flight on its property starts `from: Current`. An `enter` does not: it
+  starts from the value its preset chooses and replaces what was running.
+- **One `Animate` per node and property in a batch**: the last one planned.
+- **Already there.** `update_with` drops an `Animate` (and a `Set`) whose
+  target the renderer already shows, unless an animation of that property is in
+  flight: its value is mid-way then, and the new patch is what replaces it. An
+  `enter` is never dropped: its start is an instruction.
+- **A rebuild does not bring back a node that was leaving.** `build` describes
+  the tree the session was given, so a node held by an exit is not in it.
+- **A cancelled exit never strands a property**: what it moved goes back to
+  rest by animation, or by a `Set` when the limit leaves no room.
+- **Reduced motion** (`Environment::reduce_motion`, readable as
+  `env.reduce_motion`): `Slide` resolves to `Fade`, `PressScale` is dropped, a
+  `change` and an `Unset` become instant, and nothing loops (no preset does).
+  The setting is read when an animation is planned: flipping it leaves one in
+  flight running, unless the next change to that property is then applied as a
+  `Set`, which replaces it.
+- **A bounded number of running animations** (`limits::MAX_RUNNING_ANIMATIONS`).
+  Past it a change is applied at once and counted in
+  `MotionStats::degraded`; nothing panics.
+- **No clock.** The core reads none. `AnimationSampler` is a virtual one, and
+  `SamplingRenderer` runs a session's animations against it, so a golden test
+  asserts values at `t = 0`, `100`, `250` ms.
+
+`Session::reconcile` swaps the tree under a built session without a rebuild.
+It handles added and removed nodes and diffs the ones both trees have; when a
+kept node changes kind or parent, kept siblings change order or the root
+changes, it falls back to `replace_tree` and `build` (and `rebuilt` says so).
 
 ## What a binding can and cannot do
 
@@ -95,6 +191,11 @@ A binding is one Rhai *expression* over `state`, `props` and `env`.
 
 ## API notes
 
+- The public enums (`Patch`, `Value`, `ValueKind`, `ValueError`, `BindError`,
+  `TreeError`, `SizeClass`, `Easing`, `AnimFrom`, `Edge`, `Preset`,
+  `MotionProblem`) are `#[non_exhaustive]`: a `match` on one needs a wildcard
+  arm, so the vocabulary can grow (colours, repeaters, more presets) without
+  breaking a renderer.
 - `Node` implements `Drop` (to drop a deep chain without recursing), so fields
   cannot be moved out of a `Node` with a destructuring pattern or
   struct-update syntax. Use `std::mem::take(&mut node.children)` or clone.
@@ -118,6 +219,12 @@ A binding is one Rhai *expression* over `state`, `props` and `env`.
 No `.lfm` model (the tree is a small model of its own), no renderer, no
 dependency on `xui-*`. A `.lfm` loader maps its document onto `Node`s, and a
 renderer implements `Renderer`.
+
+Motion is the M8 set: `Fade`, `Slide`, `PressScale` and `change` transitions.
+`Roll`, `Rotate`, a flat `Turnstile`, `Feather`, `ProgressDots`, `Continuum`,
+named keyframes, FLIP for reflows, `animate()` from script and collapsing the
+room of an exiting node are M9 and later. An exit holds the node *and its
+room*; nothing here animates layout.
 
 The design is in the modern-UI plan (`docs/modern-ui-plan.md`, PR #118): §3.1,
 §3.4, §4.5 and §8 (lane B).
