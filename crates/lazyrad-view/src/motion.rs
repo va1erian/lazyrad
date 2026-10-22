@@ -12,7 +12,7 @@
 //!
 //! The core decides **what** animates and a renderer decides **how** (see
 //! [`Patch::Animate`](crate::Patch::Animate)). This is the M8 vocabulary of
-//! docs/modern-ui-plan.md §4.8: the 2D subset of Windows Phone 7's Metro
+//! docs/deferred-modern-ui-and-web.md §4.8: the 2D subset of Windows Phone 7's Metro
 //! motion. Nothing here is 3D and nothing loops.
 //!
 //! # The rules, as the planner keeps them

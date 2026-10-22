@@ -21,12 +21,12 @@ has the detail):
 | M0 Skeleton | Done |
 | M1 Runtime | Done: player, forms, event binding, `on_var`, non-blocking `msg_box`, four samples |
 | M2 Editor | Done: a reusable `xui-code-editor`, highlighting, diagnostics, find/replace, go to line, tab stops, completion |
-| M3 Designer | Done: surface, toolbox, property grid, double-click to handler. One PR open (#114: clip forms, scrollbars) |
+| M3 Designer | Done: surface, toolbox, property grid, double-click to handler, clipped and scrollable forms (#114). The toolbox offers 11 of the 19 catalog kinds |
 | **M4 Debugger** | **Done, minus watches.** `lazyrad-debug-proto`, `lazyrad-player --debug`, F9 breakpoints with a gutter dot and a stop-line tint, Continue / Step Into / Over / Out / Break / End, break on error, and Locals, Call Stack and Immediate tabs (§7). Watches and a Breakpoints list are 1.x |
 | M5 Export | Done: stub + payload, PE icon/version/subsystem, *Make EXE*, `.lzp` packages and `lazyrad-pack` |
 | M6 Polish | Partial. See §11 for what landed and what is left |
 | M7 LazyOS | **Running.** The player and the IDE both run on LazyOS as `xuid` clients (`lazyos/lazyrad-os`, core package `os.lazy.lazyrad`), including *Make LazyOS App*. The debugger runs there through the launcher's stdin queue (§12); rough edges are listed there too |
-| M8–M11 Modern UI and web | **Planned (draft).** Built on xui's RON `.lfm` format 2 (which must first be landed and adopted): responsive flow layouts, state bindings, a DOM web renderer and a tree designer. See [docs/modern-ui-plan.md](docs/modern-ui-plan.md) |
+| M8 Format 2 and palette | **Planned (draft).** Adopt xui's RON `.lfm` format 2 (landed in xui#296, hardened in #305; LazyRAD still pins the TOML-era xui) and offer every form-model widget in the palette; the web target, responsive layouts and motion are deferred. See [docs/form-format-plan.md](docs/form-format-plan.md) |
 
 Beyond the original plan, these landed: hot reload (`--watch`, §4.2), script errors as
 first-class failures with a host test kit and a Rhai lint (`check_project`), a `Canvas`
@@ -559,7 +559,7 @@ Each milestone ends in something demoable. Sizes are rough estimates for one dev
 | M5 | Export | Payload packer, Windows/Linux stubs, icon and version resources, *File → Make EXE* | 1 wk |
 | M6 | Completion & polish | Completion and signature help from metadata and AST, go to definition, class modules, menu editor, tab order, remaining stdlib (IO, Time, App, CommonDialog), themes, samples, docs | 3–4 wk |
 | M7 | LazyOS | musl player running exported apps on LazyOS (needs xui-skia and the LazyOS threads and `fs` layers), then the IDE itself (needs process spawn and pipes, i.e. LazyOS L4, or an in-process debug fallback) | later |
-| M8–M11 | Modern UI and web | Phase P lands and adopts xui's RON format 2 and a tree designer; then responsive layouts with state bindings and a web export next to the `.exe`: M8 core proof, M9 components and theming, M10 rich-SPA essentials, M11 breadth. Detailed in [docs/modern-ui-plan.md](docs/modern-ui-plan.md) | draft |
+| M8 | Format 2 and palette | Adopt xui's RON format 2 (one xui pin, `Timer`/`Canvas`/`PictureBox`/`Button.icon` modelled, a tree API, the designer, runtime, IDE and project ported, samples migrated); put the eight form-model widgets the toolbox lacks, then `Tabs` and chosen further widgets, in the palette. Detailed in [docs/form-format-plan.md](docs/form-format-plan.md). The web target, responsive layouts, bindings and motion are parked in [docs/deferred-modern-ui-and-web.md](docs/deferred-modern-ui-and-web.md) | draft |
 
 **Status per milestone (October 2026)**
 

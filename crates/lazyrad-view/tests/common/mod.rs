@@ -33,7 +33,7 @@ pub fn tree(root: Node) -> Tree {
     Tree::new(root).expect("valid tree")
 }
 
-/// The motion of the plan's card (docs/modern-ui-plan.md section 4.8): it
+/// The motion of the plan's card (docs/deferred-modern-ui-and-web.md section 4.8): it
 /// slides up 40 dp and fades in, fades out, eases its opacity (200 ms) and its
 /// `translate_y` (300 ms), and scales down while pressed.
 pub fn card_motion() -> Motion {

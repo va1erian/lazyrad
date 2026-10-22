@@ -1,4 +1,4 @@
-//! Golden patch traces for the `profile_form` of docs/modern-ui-plan.md §4.2,
+//! Golden patch traces for the `profile_form` of docs/deferred-modern-ui-and-web.md §4.2,
 //! built by hand as the `.lfm` loader eventually will.
 //!
 //! The expected text is the contract a renderer is tested against: any
