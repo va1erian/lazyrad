@@ -1,3 +1,11 @@
+> **DEFERRED (22 October 2026).** The web target, the DOM renderer, responsive layouts,
+> state bindings, motion and the "modern" component set are **not part of the current
+> stage**. The live plan is [form-format-plan.md](form-format-plan.md): adopt xui's RON
+> form format and put the missing xui widgets in the palette. This document is kept as
+> the design to come back to; its statuses (Phase P, the spikes, M8-M11) are frozen at
+> 13-14 October and several are now out of date (see form-format-plan.md section 2).
+> `crates/lazyrad-view` (lane B) is merged and parked.
+
 # LazyRAD — Modern UI and the web target
 
 **Status: draft, revised 13 October 2026.** Proposes milestones **M8–M11** as a

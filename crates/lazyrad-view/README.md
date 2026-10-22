@@ -1,7 +1,8 @@
 # lazyrad-view
 
 The renderer-neutral core of LazyRAD's responsive, state-bound UI layer
-(lane B of the modern-UI plan). It turns a tree of nodes, the form's `state` and
+(lane B of the modern-UI plan). **Parked** since 22 October 2026: nothing depends on it,
+and the web and modern-UI work it serves is deferred (`docs/form-format-plan.md`). It turns a tree of nodes, the form's `state` and
 the window's environment into **patches** that any renderer can apply, and
 decides **what moves** (the motion planner, lane B4); the renderer decides how.
 
@@ -55,7 +56,7 @@ Motion is declarative data on a node (`Node::motion`, empty by default, so a tre
 without it behaves as it always did). The planner is part of the turn: it knows
 the last applied value, the new one and the node's motion, so it decides
 **what** animates and emits a `Patch::Animate`. The renderer decides **how**
-(`docs/modern-ui-plan.md` §4.8).
+(`docs/deferred-modern-ui-and-web.md` §4.8).
 
 | Declared | When it runs | What the planner emits |
 |---|---|---|
@@ -226,5 +227,5 @@ named keyframes, FLIP for reflows, `animate()` from script and collapsing the
 room of an exiting node are M9 and later. An exit holds the node *and its
 room*; nothing here animates layout.
 
-The design is in the modern-UI plan (`docs/modern-ui-plan.md`, PR #118): §3.1,
+The design is in the deferred modern-UI plan (`docs/deferred-modern-ui-and-web.md`, PR #118): §3.1,
 §3.4, §4.5 and §8 (lane B).
